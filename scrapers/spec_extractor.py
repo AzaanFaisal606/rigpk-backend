@@ -85,7 +85,7 @@ def _extract_brand(name: str) -> Optional[str]:
     return None
 
 
-_SOCKET_RE = re.compile(r'\b(AM[45]|LGA\s?1[0-9]{3,4})\b', re.IGNORECASE)
+_SOCKET_RE = re.compile(r'\b(AM[45]|LGA\s?\d{4})\b', re.IGNORECASE)
 
 
 def _extract_socket(name: str) -> Optional[str]:
@@ -136,8 +136,11 @@ def _extract_ram_speed(name: str) -> Optional[str]:
 
 _CHIPSET_RE = re.compile(r'\b([ABXHZ]\d{3}[EFMKPS]?)\b', re.IGNORECASE)
 _VALID_CHIPSET_PREFIXES = (
-    'A5', 'A6', 'B5', 'B6', 'B7', 'X5', 'X6', 'X8',
-    'H6', 'H7', 'Z6', 'Z7', 'Z8',
+    'A3', 'A4', 'A5', 'A6',
+    'B3', 'B4', 'B5', 'B6', 'B7',
+    'X3', 'X4', 'X5', 'X6', 'X8',
+    'H3', 'H4', 'H5', 'H6', 'H7',
+    'Z3', 'Z4', 'Z5', 'Z6', 'Z7', 'Z8',
 )
 
 
@@ -151,7 +154,7 @@ def _extract_chipset(name: str) -> Optional[str]:
 
 _PSU_WATTS_RE = re.compile(r'\b(\d{3,4})W\b', re.IGNORECASE)
 _PSU_RATING_RE = re.compile(
-    r'80[\s]*[+]?\s*[Pp]lus\s+(Bronze|Silver|Gold|Platinum|Titanium|White)',
+    r'80(?:\s+plus|\s*\+)\s*(Bronze|Silver|Gold|Platinum|Titanium|White)',
     re.IGNORECASE,
 )
 
