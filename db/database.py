@@ -29,6 +29,8 @@ from __future__ import annotations
 import os
 import re
 import sqlite3
+import random
+import string
 from pathlib import Path
 from typing import Optional
 import json
@@ -129,6 +131,35 @@ class Database:
 
         self._conn.commit()
         return inserted
+
+    def create_shared_build(self, build: dict) -> str:
+        """
+        Create a shared build and return its 6-char alphanumeric code.
+
+        Args:
+            build: dict of {slot: part_id} (e.g. {"cpu": 42, "gpu": 17})
+
+        Returns:
+            6-char alphanumeric code
+
+        Raises:
+            RuntimeError: if all 10 collision retries are exhausted
+        """
+        build_json = json.dumps(build)
+
+        for attempt in range(10):
+            code = "".join(random.choices(string.ascii_letters + string.digits, k=6))
+            try:
+                self._conn.execute(
+                    "INSERT INTO shared_builds (code, build_json) VALUES (?, ?)",
+                    (code, build_json),
+                )
+                self._conn.commit()
+                return code
+            except sqlite3.IntegrityError:
+                if attempt == 9:
+                    raise RuntimeError("Failed to generate unique shared build code after 10 attempts")
+                continue
 
     # ------------------------------------------------------------------
     # Read
@@ -276,6 +307,66 @@ class Database:
             (source_id, source),
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def get_shared_build(self, code: str) -> Optional[dict]:
+        """
+        Retrieve a shared build by its code.
+
+        Args:
+            code: 6-char alphanumeric code
+
+        Returns:
+            dict of {slot: part_id} or None if not found
+        """
+        row = self._conn.execute(
+            "SELECT build_json FROM shared_builds WHERE code = ?",
+            (code,),
+        ).fetchone()
+        if row is None:
+            return None
+        return json.loads(row[0])
+
+    def resolve_shared_build(self, code: str) -> Optional[dict]:
+        """
+        Resolve a shared build code to a dict of {slot: full_part_dict}.
+        Skips slots where the part no longer exists in DB.
+
+        Args:
+            code: 6-char alphanumeric code
+
+        Returns:
+            dict of {slot: part_dict} or None if code not found.
+            part_dict includes: id, source, name, category, url, thumbnail_url, specs, price_pkr
+        """
+        build_ids = self.get_shared_build(code)
+        if build_ids is None:
+            return None
+
+        result = {}
+        for slot, part_id in build_ids.items():
+            row = self._conn.execute(
+                """
+                SELECT p.id, p.source, p.name, p.category, p.url, p.thumbnail_url, p.specs, pl.price_pkr
+                FROM parts p
+                JOIN price_log pl ON pl.id = (
+                    SELECT id FROM price_log WHERE part_id = p.id ORDER BY scraped_at DESC LIMIT 1
+                )
+                WHERE p.id = ?
+                """,
+                (part_id,),
+            ).fetchone()
+
+            if row is None:
+                # Part was deleted; skip this slot
+                continue
+
+            d = dict(row)
+            # Parse specs JSON
+            specs_raw = d.pop("specs", None)
+            d["specs"] = json.loads(specs_raw) if specs_raw else None
+            result[slot] = d
+
+        return result
 
     def stats(self) -> dict:
         """Quick summary — useful for CLI output."""
