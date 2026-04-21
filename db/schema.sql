@@ -41,3 +41,11 @@ CREATE INDEX IF NOT EXISTS idx_parts_category ON parts(category);
 CREATE INDEX IF NOT EXISTS idx_parts_source   ON parts(source);
 CREATE INDEX IF NOT EXISTS idx_price_log_part ON price_log(part_id);
 CREATE INDEX IF NOT EXISTS idx_price_log_time ON price_log(scraped_at);
+
+CREATE TABLE IF NOT EXISTS shared_builds (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  code       TEXT NOT NULL UNIQUE,
+  build_json TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_shared_builds_code ON shared_builds(code);
