@@ -1,2 +1,52 @@
-.worktrees/
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+.venv/
+venv/
+env/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Data — scraped DB and JSON dumps (not source, added separately for deployment)
+data/ppc.db
+data/*.json
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Claude Code internal
+.claude/
 .superpowers/
+.worktrees/
+.playwright-mcp/
+
+# Internal dev plans (Claude-generated, not project docs)
+docs/superpowers/
+
+# Design artifacts / screenshots (dev scratchpad, not source)
+*.png
+*.webp
+
+# Misc dev notes that aren't project docs
+description.md
+capacity-dropdown.png
