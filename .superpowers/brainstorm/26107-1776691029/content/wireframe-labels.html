@@ -1,0 +1,94 @@
+<h2>Wireframe Label Style</h2>
+<p class="subtitle">How should the clickable component labels look around the PC wireframe? Each connects via a thin line to its hotspot on the image.</p>
+
+<div class="options">
+  <div class="option" data-choice="a" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>Minimal Pill Chips (Recommended)</h3>
+      <p>Small pill-shaped chips. Border only (no fill) when unselected, purple fill when a part is chosen. Subtle pulse animation on unselected chips to invite interaction.</p>
+      <div class="mockup" style="margin-top:10px">
+        <div class="mockup-body" style="display:flex;align-items:center;justify-content:center;padding:20px;gap:20px;background:#f4f4f5">
+          <div style="display:flex;flex-direction:column;gap:10px">
+            <div style="border:1px solid #7c3aed;border-radius:20px;padding:4px 12px;font-size:10px;color:#7c3aed;font-weight:600;letter-spacing:0.5px;background:transparent">CPU</div>
+            <div style="border:1px solid #7c3aed;border-radius:20px;padding:4px 12px;font-size:10px;color:white;font-weight:600;letter-spacing:0.5px;background:#7c3aed">GPU ✓</div>
+            <div style="border:1px solid #d4d4d8;border-radius:20px;padding:4px 12px;font-size:10px;color:#a1a1aa;font-weight:600;letter-spacing:0.5px">RAM</div>
+          </div>
+          <div style="width:1px;height:80px;background:#d4d4d8"></div>
+          <div style="width:80px;height:80px;background:#ececee;border-radius:4px;display:flex;align-items:center;justify-content:center;color:#a1a1aa;font-size:9px;border:1px dashed #d4d4d8">wireframe</div>
+          <div style="width:1px;height:80px;background:#d4d4d8"></div>
+          <div style="display:flex;flex-direction:column;gap:10px">
+            <div style="border:1px solid #d4d4d8;border-radius:20px;padding:4px 12px;font-size:10px;color:#a1a1aa;font-weight:600;letter-spacing:0.5px">PSU</div>
+            <div style="border:1px solid #7c3aed;border-radius:20px;padding:4px 12px;font-size:10px;color:#7c3aed;font-weight:600;letter-spacing:0.5px">Case</div>
+            <div style="border:1px solid #d4d4d8;border-radius:20px;padding:4px 12px;font-size:10px;color:#a1a1aa;font-weight:600;letter-spacing:0.5px">SSD</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="option" data-choice="b" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>Icon + Label Cards</h3>
+      <p>Small cards with lucide icon + component name. Shows selected part name truncated below icon when chosen. More information density but larger footprint.</p>
+      <div class="mockup" style="margin-top:10px">
+        <div class="mockup-body" style="display:flex;align-items:center;justify-content:center;padding:16px;gap:16px;background:#f4f4f5">
+          <div style="display:flex;flex-direction:column;gap:8px">
+            <div style="border:1px solid #7c3aed;border-radius:8px;padding:6px 10px;font-size:9px;color:#7c3aed;font-weight:600;background:#f0ebff;display:flex;flex-direction:column;align-items:center;gap:2px;width:54px">
+              <span style="font-size:14px">⚙️</span>
+              <span>CPU</span>
+              <span style="font-size:8px;color:#71717a;font-weight:400">R5 7600X</span>
+            </div>
+            <div style="border:1px dashed #d4d4d8;border-radius:8px;padding:6px 10px;font-size:9px;color:#a1a1aa;display:flex;flex-direction:column;align-items:center;gap:2px;width:54px">
+              <span style="font-size:14px">🖥️</span>
+              <span>GPU</span>
+              <span style="font-size:8px;color:#d4d4d8">+ add</span>
+            </div>
+          </div>
+          <div style="width:80px;height:80px;background:#ececee;border-radius:4px;display:flex;align-items:center;justify-content:center;color:#a1a1aa;font-size:9px;border:1px dashed #d4d4d8">wireframe</div>
+          <div style="display:flex;flex-direction:column;gap:8px">
+            <div style="border:1px solid #d4d4d8;border-radius:8px;padding:6px 10px;font-size:9px;color:#a1a1aa;display:flex;flex-direction:column;align-items:center;gap:2px;width:54px">
+              <span style="font-size:14px">🔋</span>
+              <span>PSU</span>
+              <span style="font-size:8px;color:#d4d4d8">+ add</span>
+            </div>
+            <div style="border:1px solid #7c3aed;border-radius:8px;padding:6px 10px;font-size:9px;color:#7c3aed;font-weight:600;background:#f0ebff;display:flex;flex-direction:column;align-items:center;gap:2px;width:54px">
+              <span style="font-size:14px">📦</span>
+              <span>Case</span>
+              <span style="font-size:8px;color:#71717a;font-weight:400">NZXT H5</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="option" data-choice="c" onclick="toggleSelect(this)">
+    <div class="letter">C</div>
+    <div class="content">
+      <h3>Dot Hotspot + Tooltip Chip</h3>
+      <p>Small pulsing dot directly on the wireframe image at each component location. Hovering shows a tooltip chip. Clicking opens picker. Cleanest — keeps wireframe uncluttered.</p>
+      <div class="mockup" style="margin-top:10px">
+        <div class="mockup-body" style="display:flex;align-items:center;justify-content:center;padding:20px;background:#f4f4f5">
+          <div style="position:relative;width:120px;height:100px;background:#ececee;border-radius:4px;border:1px dashed #d4d4d8;display:flex;align-items:center;justify-content:center;color:#a1a1aa;font-size:9px">
+            wireframe
+            <!-- CPU dot -->
+            <div style="position:absolute;top:20px;left:30px">
+              <div style="width:10px;height:10px;background:#7c3aed;border-radius:50%;border:2px solid white;box-shadow:0 0 0 3px rgba(124,58,237,0.3)"></div>
+              <div style="position:absolute;top:-18px;left:-10px;background:#7c3aed;color:white;font-size:8px;padding:2px 6px;border-radius:10px;white-space:nowrap;font-weight:600">CPU ✓</div>
+            </div>
+            <!-- GPU dot -->
+            <div style="position:absolute;top:50px;left:70px">
+              <div style="width:10px;height:10px;background:#d4d4d8;border-radius:50%;border:2px solid white"></div>
+            </div>
+            <!-- RAM dot -->
+            <div style="position:absolute;top:30px;left:55px">
+              <div style="width:10px;height:10px;background:#d4d4d8;border-radius:50%;border:2px solid white"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>

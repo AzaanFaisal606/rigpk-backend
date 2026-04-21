@@ -1,0 +1,147 @@
+<h2>Sharp / Cartoon Label Style</h2>
+<p class="subtitle">Slanted parallelogram chips with hard offset drop shadows. Pick the vibe that fits best.</p>
+
+<style>
+.chip-a {
+  display: inline-block;
+  padding: 5px 14px;
+  background: #f4f4f5;
+  border: 2px solid #111112;
+  transform: skewX(-12deg);
+  box-shadow: 3px 3px 0 #111112;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: #111112;
+  cursor: pointer;
+}
+.chip-a.active {
+  background: #7c3aed;
+  color: white;
+  border-color: #111112;
+  box-shadow: 3px 3px 0 #111112;
+}
+.chip-a.empty {
+  background: #f4f4f5;
+  color: #a1a1aa;
+  border-color: #d4d4d8;
+  box-shadow: 3px 3px 0 #d4d4d8;
+}
+
+.chip-b {
+  display: inline-block;
+  padding: 4px 12px;
+  background: #f4f4f5;
+  border: 2px solid #7c3aed;
+  transform: skewX(-10deg);
+  box-shadow: 4px 4px 0 #7c3aed;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: #7c3aed;
+}
+.chip-b.active {
+  background: #7c3aed;
+  color: white;
+  box-shadow: 4px 4px 0 #3b0764;
+  border-color: #3b0764;
+}
+.chip-b.empty {
+  border-color: #d4d4d8;
+  color: #a1a1aa;
+  box-shadow: 3px 3px 0 #d4d4d8;
+}
+
+.chip-c {
+  display: inline-block;
+  padding: 5px 14px 5px 10px;
+  background: #f4f4f5;
+  border: 2px solid #111112;
+  clip-path: polygon(8px 0%, 100% 0%, calc(100% - 8px) 100%, 0% 100%);
+  box-shadow: none;
+  outline: 2px solid #111112;
+  outline-offset: 3px;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: #111112;
+}
+.chip-c.active {
+  background: #7c3aed;
+  color: white;
+}
+</style>
+
+<div class="options">
+  <div class="option" data-choice="a" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>Black-bordered parallelogram, hard black shadow</h3>
+      <p>Skewed box, 2px black border, hard 3px offset black shadow. Purple fill when selected. Feels like a sticker / retro game UI.</p>
+      <div class="mockup" style="margin-top:12px">
+        <div class="mockup-body" style="display:flex;align-items:center;justify-content:center;padding:24px;gap:20px;background:#f4f4f5;flex-wrap:wrap">
+          <div style="display:flex;flex-direction:column;gap:12px;align-items:flex-start">
+            <span class="chip-a active">GPU ✓</span>
+            <span class="chip-a">CPU</span>
+            <span class="chip-a empty">RAM</span>
+          </div>
+          <div style="width:90px;height:90px;background:#e8e8ea;border:2px solid #111112;box-shadow:4px 4px 0 #111112;display:flex;align-items:center;justify-content:center;color:#71717a;font-size:9px">wireframe</div>
+          <div style="display:flex;flex-direction:column;gap:12px;align-items:flex-start">
+            <span class="chip-a empty">PSU</span>
+            <span class="chip-a active">Case ✓</span>
+            <span class="chip-a empty">SSD</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="option" data-choice="b" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>Purple-bordered, purple hard shadow</h3>
+      <p>Same skew but border and shadow are purple. Darker purple shadow when selected for depth. Feels more on-brand with the site's purple theme.</p>
+      <div class="mockup" style="margin-top:12px">
+        <div class="mockup-body" style="display:flex;align-items:center;justify-content:center;padding:24px;gap:20px;background:#f4f4f5;flex-wrap:wrap">
+          <div style="display:flex;flex-direction:column;gap:12px;align-items:flex-start">
+            <span class="chip-b active">GPU ✓</span>
+            <span class="chip-b">CPU</span>
+            <span class="chip-b empty">RAM</span>
+          </div>
+          <div style="width:90px;height:90px;background:#e8e8ea;border:2px solid #7c3aed;box-shadow:4px 4px 0 #7c3aed;display:flex;align-items:center;justify-content:center;color:#71717a;font-size:9px">wireframe</div>
+          <div style="display:flex;flex-direction:column;gap:12px;align-items:flex-start">
+            <span class="chip-b empty">PSU</span>
+            <span class="chip-b active">Case ✓</span>
+            <span class="chip-b empty">SSD</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="option" data-choice="c" onclick="toggleSelect(this)">
+    <div class="letter">C</div>
+    <div class="content">
+      <h3>Arrow / chevron shape, double outline</h3>
+      <p>Clip-path chevron (pointed sides), double outline effect. More aggressive arrow shape — less skew, more like a directional tag pointing at the wireframe.</p>
+      <div class="mockup" style="margin-top:12px">
+        <div class="mockup-body" style="display:flex;align-items:center;justify-content:center;padding:24px;gap:20px;background:#f4f4f5;flex-wrap:wrap">
+          <div style="display:flex;flex-direction:column;gap:12px;align-items:center">
+            <span class="chip-c active" style="background:#7c3aed;color:white">GPU ✓</span>
+            <span class="chip-c">CPU</span>
+            <span class="chip-c" style="color:#a1a1aa;outline-color:#d4d4d8;border-color:#d4d4d8">RAM</span>
+          </div>
+          <div style="width:90px;height:90px;background:#e8e8ea;border:2px solid #111112;outline:3px solid #111112;outline-offset:3px;display:flex;align-items:center;justify-content:center;color:#71717a;font-size:9px">wireframe</div>
+          <div style="display:flex;flex-direction:column;gap:12px;align-items:center">
+            <span class="chip-c" style="color:#a1a1aa;outline-color:#d4d4d8;border-color:#d4d4d8">PSU</span>
+            <span class="chip-c active" style="background:#7c3aed;color:white">Case ✓</span>
+            <span class="chip-c" style="color:#a1a1aa;outline-color:#d4d4d8;border-color:#d4d4d8">SSD</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>

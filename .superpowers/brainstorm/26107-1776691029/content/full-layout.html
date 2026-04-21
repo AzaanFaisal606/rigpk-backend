@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Build PC — Full Layout Mockup</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', system-ui, sans-serif; background: #f4f4f5; color: #111112; }
+
+  /* NAVBAR */
+  nav {
+    height: 52px; background: rgba(244,244,245,0.85); backdrop-filter: blur(10px);
+    border-bottom: 1px solid #d4d4d8; display: flex; align-items: center;
+    padding: 0 24px; gap: 24px; position: sticky; top: 0; z-index: 50;
+  }
+  .logo { font-weight: 800; font-size: 13px; letter-spacing: 0.5px; color: #7c3aed; }
+  .nav-link { font-size: 12px; color: #71717a; font-weight: 500; }
+  .nav-link.active { color: #111112; font-weight: 700; }
+
+  /* HERO — WIREFRAME SECTION */
+  .wireframe-section {
+    min-height: calc(100vh - 52px);
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    padding: 60px 24px; gap: 12px; position: relative; overflow: hidden;
+    background: #f4f4f5;
+  }
+  .section-label {
+    font-size: 10px; font-weight: 700; letter-spacing: 2px; text-transform: uppercase;
+    color: #7c3aed; margin-bottom: 4px;
+  }
+  .section-title {
+    font-size: 28px; font-weight: 900; letter-spacing: -0.5px; color: #111112;
+    text-align: center; margin-bottom: 32px;
+  }
+
+  /* WIREFRAME + SVG LABELS */
+  .wireframe-container {
+    position: relative; width: 620px; max-width: 100%;
+  }
+  .wireframe-img {
+    width: 380px; height: 380px; display: block; margin: 0 auto;
+    background: #e8e8ea; border: 2px solid #111112;
+    box-shadow: 6px 6px 0 #111112;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 11px; color: #71717a; letter-spacing: 1px;
+  }
+  /* SVG overlay */
+  .wireframe-svg {
+    position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+    pointer-events: none;
+  }
+
+  /* CHIPS */
+  .chip {
+    position: absolute;
+    display: inline-block;
+    padding: 5px 13px;
+    background: #f4f4f5;
+    border: 2px solid #111112;
+    transform: skewX(-12deg);
+    box-shadow: 3px 3px 0 #111112;
+    font-size: 10px; font-weight: 800; letter-spacing: 1px;
+    text-transform: uppercase; color: #111112; cursor: pointer;
+    white-space: nowrap; transition: background 0.15s;
+    pointer-events: all;
+  }
+  .chip:hover { background: #ede9fe; }
+  .chip.selected {
+    background: #7c3aed; color: white;
+    border-color: #111112; box-shadow: 3px 3px 0 #111112;
+  }
+  .chip.empty { color: #a1a1aa; border-color: #d4d4d8; box-shadow: 3px 3px 0 #d4d4d8; }
+
+  /* SVG connector lines */
+  .connector { stroke: #111112; stroke-width: 1.5; fill: none; stroke-dasharray: 4 3; }
+  .connector.selected { stroke: #7c3aed; stroke-dasharray: none; }
+
+  /* SCROLL HINT */
+  .scroll-hint {
+    display: flex; flex-direction: column; align-items: center; gap: 4px;
+    margin-top: 40px; color: #a1a1aa; font-size: 10px; letter-spacing: 1px;
+    text-transform: uppercase;
+  }
+  .scroll-arrow { font-size: 16px; animation: bounce 1.5s infinite; }
+  @keyframes bounce { 0%,100%{transform:translateY(0)} 50%{transform:translateY(4px)} }
+
+  /* PARTS SECTION */
+  .parts-section {
+    padding: 60px 40px;
+    max-width: 1100px; margin: 0 auto;
+  }
+  .parts-section-title {
+    font-size: 18px; font-weight: 900; letter-spacing: -0.3px; margin-bottom: 8px;
+  }
+  .parts-section-sub {
+    font-size: 12px; color: #71717a; margin-bottom: 32px;
+  }
+
+  .parts-layout { display: flex; gap: 24px; align-items: flex-start; }
+
+  /* COMPONENT CARDS GRID */
+  .cards-grid {
+    flex: 1;
+    display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
+  }
+  .component-card {
+    border: 2px solid #111112; background: #f8f8f9;
+    box-shadow: 3px 3px 0 #111112; padding: 14px 16px;
+    cursor: pointer; transition: background 0.12s;
+  }
+  .component-card:hover { background: #ede9fe; }
+  .component-card.selected { border-color: #7c3aed; box-shadow: 3px 3px 0 #7c3aed; }
+  .component-card.empty { border-style: dashed; border-color: #d4d4d8; box-shadow: 3px 3px 0 #d4d4d8; background: #fafafa; }
+  .card-slot {
+    font-size: 9px; font-weight: 800; letter-spacing: 1.5px; text-transform: uppercase;
+    color: #7c3aed; margin-bottom: 6px;
+  }
+  .card-slot.empty-label { color: #a1a1aa; }
+  .card-name { font-size: 12px; font-weight: 600; color: #111112; margin-bottom: 3px; line-height: 1.3; }
+  .card-name.placeholder { color: #a1a1aa; font-weight: 400; font-style: italic; }
+  .card-price { font-size: 11px; color: #3f3f46; font-weight: 500; }
+  .card-price.empty-price { color: #d4d4d8; }
+  .card-source { font-size: 9px; color: #a1a1aa; margin-top: 2px; }
+
+  /* SUMMARY PANEL */
+  .summary-panel {
+    width: 220px; flex-shrink: 0;
+    border: 2px solid #111112; background: #f8f8f9;
+    box-shadow: 4px 4px 0 #111112;
+    position: sticky; top: 72px;
+  }
+  .summary-header {
+    background: #111112; color: white;
+    font-size: 10px; font-weight: 800; letter-spacing: 2px; text-transform: uppercase;
+    padding: 10px 14px;
+  }
+  .summary-body { padding: 14px; }
+  .summary-row {
+    display: flex; justify-content: space-between; align-items: baseline;
+    padding: 6px 0; border-bottom: 1px solid #e4e4e7; gap: 8px;
+  }
+  .summary-row:last-child { border-bottom: none; }
+  .summary-slot { font-size: 9px; font-weight: 700; color: #71717a; text-transform: uppercase; letter-spacing: 0.5px; flex-shrink: 0; }
+  .summary-price { font-size: 10px; color: #3f3f46; font-weight: 600; text-align: right; }
+  .summary-price.missing { color: #d4d4d8; }
+  .summary-total-row {
+    margin-top: 12px; padding-top: 12px; border-top: 2px solid #111112;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .summary-total-label { font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: 1px; }
+  .summary-total-price { font-size: 16px; font-weight: 900; color: #7c3aed; }
+  .export-btn {
+    width: 100%; margin-top: 14px; padding: 9px;
+    background: #7c3aed; color: white; border: 2px solid #111112;
+    box-shadow: 3px 3px 0 #111112; font-size: 10px; font-weight: 800;
+    letter-spacing: 1px; text-transform: uppercase; cursor: pointer;
+    transform: skewX(-6deg);
+  }
+  .export-btn:hover { background: #6d28d9; }
+</style>
+</head>
+<body>
+
+<!-- NAVBAR -->
+<nav>
+  <div class="logo">PakPC</div>
+  <span class="nav-link">Market</span>
+  <span class="nav-link active">Build PC</span>
+</nav>
+
+<!-- WIREFRAME HERO SECTION -->
+<section class="wireframe-section">
+  <div class="section-label">Configure your build</div>
+  <div class="section-title">Build a PC</div>
+
+  <div class="wireframe-container" style="width:620px;height:420px;position:relative">
+
+    <!-- SVG layer for connector lines -->
+    <svg style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none" viewBox="0 0 620 420">
+      <!-- CPU line: chip left → image -->
+      <line class="connector selected" x1="118" y1="108" x2="178" y2="148"/>
+      <!-- GPU line: chip left → image -->
+      <line class="connector" x1="118" y1="178" x2="178" y2="210"/>
+      <!-- RAM line: chip left → image -->
+      <line class="connector empty" x1="118" y1="248" x2="178" y2="230" stroke="#d4d4d8"/>
+      <!-- Motherboard: chip left → image -->
+      <line class="connector empty" x1="118" y1="318" x2="178" y2="290" stroke="#d4d4d8"/>
+      <!-- PSU line: chip right → image -->
+      <line class="connector empty" x1="502" y1="108" x2="442" y2="200" stroke="#d4d4d8"/>
+      <!-- Case line: chip right → image -->
+      <line class="connector selected" x1="502" y1="178" x2="442" y2="240"/>
+      <!-- SSD line: chip right → image -->
+      <line class="connector empty" x1="502" y1="248" x2="442" y2="270" stroke="#d4d4d8"/>
+      <!-- Cooling: chip right → image -->
+      <line class="connector empty" x1="502" y1="318" x2="442" y2="180" stroke="#d4d4d8"/>
+    </svg>
+
+    <!-- LEFT CHIPS -->
+    <div class="chip selected" style="left:10px;top:88px">CPU ✓</div>
+    <div class="chip" style="left:10px;top:158px">GPU</div>
+    <div class="chip empty" style="left:10px;top:228px">RAM</div>
+    <div class="chip empty" style="left:10px;top:298px">Mobo</div>
+
+    <!-- WIREFRAME IMAGE placeholder -->
+    <div style="position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:260px;height:260px;background:#e8e8ea;border:2px solid #111112;box-shadow:6px 6px 0 #111112;display:flex;align-items:center;justify-content:center;font-size:11px;color:#71717a;letter-spacing:1px;text-align:center;line-height:1.6">
+      PC WIREFRAME<br/><span style="font-size:9px;color:#a1a1aa">(600×600 webp)</span>
+    </div>
+
+    <!-- RIGHT CHIPS -->
+    <div class="chip empty" style="right:10px;top:88px">PSU</div>
+    <div class="chip selected" style="right:10px;top:158px">Case ✓</div>
+    <div class="chip empty" style="right:10px;top:228px">SSD</div>
+    <div class="chip empty" style="right:10px;top:298px">Cooling</div>
+  </div>
+
+  <div class="scroll-hint">
+    <div class="scroll-arrow">↓</div>
+    <span>configure parts below</span>
+  </div>
+</section>
+
+<!-- PARTS + SUMMARY SECTION -->
+<section class="parts-section">
+  <div class="parts-section-title">Your Build</div>
+  <div class="parts-section-sub">Click any component to browse and select parts from the marketplace.</div>
+
+  <div class="parts-layout">
+    <!-- CARDS GRID -->
+    <div class="cards-grid">
+
+      <div class="component-card selected">
+        <div class="card-slot">CPU</div>
+        <div class="card-name">AMD Ryzen 5 7600X</div>
+        <div class="card-price">Rs 42,000</div>
+        <div class="card-source">CZone</div>
+      </div>
+
+      <div class="component-card empty">
+        <div class="card-slot empty-label">GPU</div>
+        <div class="card-name placeholder">+ Select a GPU</div>
+        <div class="card-price empty-price">—</div>
+      </div>
+
+      <div class="component-card empty">
+        <div class="card-slot empty-label">RAM</div>
+        <div class="card-name placeholder">+ Select RAM</div>
+        <div class="card-price empty-price">—</div>
+      </div>
+
+      <div class="component-card empty">
+        <div class="card-slot empty-label">Motherboard</div>
+        <div class="card-name placeholder">+ Select a Motherboard</div>
+        <div class="card-price empty-price">—</div>
+      </div>
+
+      <div class="component-card empty">
+        <div class="card-slot empty-label">PSU</div>
+        <div class="card-name placeholder">+ Select a PSU</div>
+        <div class="card-price empty-price">—</div>
+      </div>
+
+      <div class="component-card selected">
+        <div class="card-slot">Case</div>
+        <div class="card-name">NZXT H5 Flow ATX Mid Tower</div>
+        <div class="card-price">Rs 18,500</div>
+        <div class="card-source">Zah Computers</div>
+      </div>
+
+      <div class="component-card empty">
+        <div class="card-slot empty-label">SSD</div>
+        <div class="card-name placeholder">+ Select an SSD</div>
+        <div class="card-price empty-price">—</div>
+      </div>
+
+      <div class="component-card empty">
+        <div class="card-slot empty-label">Cooling</div>
+        <div class="card-name placeholder">+ Select Cooling</div>
+        <div class="card-price empty-price">—</div>
+      </div>
+
+    </div>
+
+    <!-- SUMMARY PANEL -->
+    <div class="summary-panel">
+      <div class="summary-header">Build Summary</div>
+      <div class="summary-body">
+        <div class="summary-row">
+          <span class="summary-slot">CPU</span>
+          <span class="summary-price">Rs 42,000</span>
+        </div>
+        <div class="summary-row">
+          <span class="summary-slot">GPU</span>
+          <span class="summary-price missing">—</span>
+        </div>
+        <div class="summary-row">
+          <span class="summary-slot">RAM</span>
+          <span class="summary-price missing">—</span>
+        </div>
+        <div class="summary-row">
+          <span class="summary-slot">Mobo</span>
+          <span class="summary-price missing">—</span>
+        </div>
+        <div class="summary-row">
+          <span class="summary-slot">PSU</span>
+          <span class="summary-price missing">—</span>
+        </div>
+        <div class="summary-row">
+          <span class="summary-slot">Case</span>
+          <span class="summary-price">Rs 18,500</span>
+        </div>
+        <div class="summary-row">
+          <span class="summary-slot">SSD</span>
+          <span class="summary-price missing">—</span>
+        </div>
+        <div class="summary-row">
+          <span class="summary-slot">Cooling</span>
+          <span class="summary-price missing">—</span>
+        </div>
+
+        <div class="summary-total-row">
+          <span class="summary-total-label">Total</span>
+          <span class="summary-total-price">Rs 60,500</span>
+        </div>
+
+        <button class="export-btn">Copy Build List</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+</body>
+</html>

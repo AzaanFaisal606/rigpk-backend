@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Part Picker Modal v2</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', system-ui, sans-serif; background: #f4f4f5; color: #111112; display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 24px; }
+
+  .page-blur {
+    position: fixed; inset: 0;
+    background: rgba(244,244,245,0.7); backdrop-filter: blur(4px);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 100;
+  }
+
+  .modal {
+    width: 820px; max-width: 96vw;
+    background: #f8f8f9;
+    border: 2px solid #111112;
+    box-shadow: 10px 10px 0 #111112;
+    display: flex; flex-direction: column;
+    max-height: 86vh;
+  }
+
+  .modal-header {
+    background: #111112; color: white;
+    padding: 16px 22px;
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .modal-title { font-size: 12px; font-weight: 800; letter-spacing: 2px; text-transform: uppercase; }
+  .modal-close { font-size: 18px; cursor: pointer; background: none; border: none; color: white; font-weight: 800; line-height: 1; }
+
+  .modal-search {
+    padding: 16px 22px; border-bottom: 1px solid #e4e4e7;
+    display: flex; gap: 10px; align-items: center;
+  }
+  .search-input {
+    flex: 1; padding: 10px 14px;
+    border: 2px solid #111112; background: white;
+    font-size: 13px; outline: none;
+    box-shadow: 2px 2px 0 #111112;
+  }
+  .search-input:focus { border-color: #7c3aed; box-shadow: 2px 2px 0 #7c3aed; }
+
+  .filter-row {
+    padding: 12px 22px; border-bottom: 2px solid #111112;
+    display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+  }
+  .filter-label { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; color: #71717a; }
+  .filter-chip {
+    padding: 4px 12px;
+    border: 1.5px solid #d4d4d8; font-size: 10px; font-weight: 700;
+    color: #71717a; cursor: pointer; background: white;
+    transform: skewX(-8deg); letter-spacing: 0.5px;
+  }
+  .filter-chip.active {
+    border-color: #7c3aed; color: #7c3aed; background: #f0ebff;
+    box-shadow: 2px 2px 0 #7c3aed;
+  }
+
+  .modal-list { overflow-y: auto; flex: 1; }
+
+  .part-row {
+    display: flex; align-items: center; gap: 14px;
+    padding: 14px 22px; border-bottom: 1px solid #e4e4e7;
+    cursor: pointer; transition: background 0.1s;
+  }
+  .part-row:hover { background: #ede9fe; }
+  .part-row.current { background: #f0ebff; border-left: 3px solid #7c3aed; padding-left: 19px; }
+
+  .part-thumb {
+    width: 52px; height: 52px; background: #e8e8ea;
+    border: 1.5px solid #d4d4d8; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 8px; color: #a1a1aa;
+  }
+  .part-info { flex: 1; min-width: 0; }
+  .part-name { font-size: 13px; font-weight: 600; color: #111112; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .part-meta { font-size: 11px; color: #71717a; margin-top: 3px; }
+  .part-price-col { text-align: right; flex-shrink: 0; }
+  .part-price { font-size: 14px; font-weight: 800; color: #111112; }
+  .part-source { font-size: 9px; color: #a1a1aa; margin-top: 2px; }
+
+  .select-btn {
+    padding: 8px 18px;
+    background: #f4f4f5; border: 2px solid #111112;
+    box-shadow: 2px 2px 0 #111112;
+    font-size: 10px; font-weight: 800; letter-spacing: 1px; text-transform: uppercase;
+    cursor: pointer; transform: skewX(-8deg); flex-shrink: 0;
+  }
+  .select-btn:hover { background: #7c3aed; color: white; }
+  .select-btn.selected-btn { background: #7c3aed; color: white; }
+
+  .modal-footer {
+    padding: 14px 22px; border-top: 2px solid #111112;
+    display: flex; justify-content: space-between; align-items: center;
+    background: #f4f4f5;
+  }
+  .result-count { font-size: 11px; color: #71717a; font-weight: 600; }
+  .sort-select { border: 1.5px solid #d4d4d8; padding: 6px 10px; font-size: 11px; background: white; cursor: pointer; }
+</style>
+</head>
+<body>
+
+<div style="position:fixed;inset:0;background:#f4f4f5;display:flex;align-items:center;justify-content:center;font-size:12px;color:#a1a1aa;letter-spacing:1px">PAGE CONTENT BEHIND</div>
+
+<div class="page-blur">
+  <div class="modal">
+
+    <div class="modal-header">
+      <span class="modal-title">Select — GPU</span>
+      <button class="modal-close">✕</button>
+    </div>
+
+    <div class="modal-search">
+      <input class="search-input" placeholder="Search GPUs..." value="RTX">
+    </div>
+
+    <div class="filter-row">
+      <span class="filter-label">VRAM:</span>
+      <span class="filter-chip">All</span>
+      <span class="filter-chip active">8GB</span>
+      <span class="filter-chip">12GB</span>
+      <span class="filter-chip">16GB</span>
+      <span class="filter-label" style="margin-left:10px">Source:</span>
+      <span class="filter-chip">All</span>
+      <span class="filter-chip active">CZone</span>
+      <span class="filter-chip">Zah</span>
+      <span class="filter-chip">Junaid</span>
+    </div>
+
+    <div class="modal-list">
+
+      <div class="part-row">
+        <div class="part-thumb">IMG</div>
+        <div class="part-info">
+          <div class="part-name">MSI GeForce RTX 4060 Gaming X 8GB</div>
+          <div class="part-meta">8GB GDDR6 · MSI · GPU</div>
+        </div>
+        <div class="part-price-col">
+          <div class="part-price">Rs 89,000</div>
+          <div class="part-source">CZone</div>
+        </div>
+        <button class="select-btn">Select</button>
+      </div>
+
+      <div class="part-row current">
+        <div class="part-thumb">IMG</div>
+        <div class="part-info">
+          <div class="part-name">Gigabyte RTX 4060 Eagle OC 8GB</div>
+          <div class="part-meta">8GB GDDR6 · Gigabyte · GPU</div>
+        </div>
+        <div class="part-price-col">
+          <div class="part-price">Rs 85,500</div>
+          <div class="part-source">CZone</div>
+        </div>
+        <button class="select-btn selected-btn">Selected ✓</button>
+      </div>
+
+      <div class="part-row">
+        <div class="part-thumb">IMG</div>
+        <div class="part-info">
+          <div class="part-name">ASUS Dual RTX 4060 OC Edition 8GB</div>
+          <div class="part-meta">8GB GDDR6 · ASUS · GPU</div>
+        </div>
+        <div class="part-price-col">
+          <div class="part-price">Rs 92,000</div>
+          <div class="part-source">CZone</div>
+        </div>
+        <button class="select-btn">Select</button>
+      </div>
+
+      <div class="part-row">
+        <div class="part-thumb">IMG</div>
+        <div class="part-info">
+          <div class="part-name">Zotac Gaming RTX 4060 Twin Edge 8GB</div>
+          <div class="part-meta">8GB GDDR6 · Zotac · GPU</div>
+        </div>
+        <div class="part-price-col">
+          <div class="part-price">Rs 83,000</div>
+          <div class="part-source">Zah Computers</div>
+        </div>
+        <button class="select-btn">Select</button>
+      </div>
+
+      <div class="part-row">
+        <div class="part-thumb">IMG</div>
+        <div class="part-info">
+          <div class="part-name">MSI GeForce RTX 4060 Ti Ventus 8GB</div>
+          <div class="part-meta">8GB GDDR6 · MSI · GPU</div>
+        </div>
+        <div class="part-price-col">
+          <div class="part-price">Rs 118,000</div>
+          <div class="part-source">Junaid Tech</div>
+        </div>
+        <button class="select-btn">Select</button>
+      </div>
+
+      <div class="part-row">
+        <div class="part-thumb">IMG</div>
+        <div class="part-info">
+          <div class="part-name">PowerColor Hellhound RX 7600 8GB</div>
+          <div class="part-meta">8GB GDDR6 · PowerColor · GPU</div>
+        </div>
+        <div class="part-price-col">
+          <div class="part-price">Rs 78,000</div>
+          <div class="part-source">AMD House</div>
+        </div>
+        <button class="select-btn">Select</button>
+      </div>
+
+    </div>
+
+    <div class="modal-footer">
+      <span class="result-count">24 GPUs found</span>
+      <select class="sort-select">
+        <option>Price: Low → High</option>
+        <option>Price: High → Low</option>
+      </select>
+    </div>
+
+  </div>
+</div>
+
+</body>
+</html>

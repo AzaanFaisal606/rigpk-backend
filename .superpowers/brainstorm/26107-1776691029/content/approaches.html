@@ -1,0 +1,105 @@
+<h2>Build Page — Approach Options</h2>
+<p class="subtitle">All use full-width stacked layout, light theme, SVG labels, mini market picker. Difference is in the parts list section below the wireframe.</p>
+
+<div class="options">
+  <div class="option" data-choice="a" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>Component Cards Grid (Recommended)</h3>
+      <p>Parts list rendered as a 2-column card grid. Each card: component slot name, selected part (or "Not selected"), price. Clicking a card opens the picker. Total cost sticky bar at bottom.</p>
+      <div class="mockup" style="margin-top:10px">
+        <div class="mockup-header">Parts Section</div>
+        <div class="mockup-body" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:10px">
+          <div style="background:#f4f4f5;border:1px solid #d4d4d8;border-radius:6px;padding:8px">
+            <div style="font-size:9px;color:#7c3aed;font-weight:600;letter-spacing:1px;text-transform:uppercase">CPU</div>
+            <div style="font-size:10px;color:#111112;margin-top:3px">Ryzen 5 7600X</div>
+            <div style="font-size:9px;color:#71717a">Rs 42,000</div>
+          </div>
+          <div style="background:#f4f4f5;border:1px dashed #d4d4d8;border-radius:6px;padding:8px;display:flex;align-items:center;justify-content:center">
+            <div style="font-size:9px;color:#a1a1aa">+ Select GPU</div>
+          </div>
+          <div style="background:#f4f4f5;border:1px solid #d4d4d8;border-radius:6px;padding:8px">
+            <div style="font-size:9px;color:#7c3aed;font-weight:600;letter-spacing:1px;text-transform:uppercase">RAM</div>
+            <div style="font-size:10px;color:#111112;margin-top:3px">Corsair 32GB DDR5</div>
+            <div style="font-size:9px;color:#71717a">Rs 28,500</div>
+          </div>
+          <div style="background:#f4f4f5;border:1px dashed #d4d4d8;border-radius:6px;padding:8px;display:flex;align-items:center;justify-content:center">
+            <div style="font-size:9px;color:#a1a1aa">+ Select Motherboard</div>
+          </div>
+        </div>
+        <div style="background:#7c3aed;padding:8px 12px;display:flex;justify-content:space-between;align-items:center;border-radius:0 0 6px 6px">
+          <span style="color:white;font-size:10px;font-weight:600">TOTAL BUILD COST</span>
+          <span style="color:white;font-size:11px;font-weight:700">Rs 70,500</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="option" data-choice="b" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>Vertical Table List</h3>
+      <p>Parts list as a clean table: component | selected part name | price | action button. Same PartRow visual language as the market page. Familiar and compact.</p>
+      <div class="mockup" style="margin-top:10px">
+        <div class="mockup-header">Parts Section</div>
+        <div class="mockup-body" style="padding:0">
+          <div style="display:grid;grid-template-columns:80px 1fr 60px 40px;gap:0;font-size:9px">
+            <div style="padding:7px 8px;background:#f4f4f5;border-bottom:1px solid #e4e4e7;color:#7c3aed;font-weight:700;text-transform:uppercase;letter-spacing:0.5px">CPU</div>
+            <div style="padding:7px 8px;background:#f4f4f5;border-bottom:1px solid #e4e4e7;color:#111112">Ryzen 5 7600X</div>
+            <div style="padding:7px 8px;background:#f4f4f5;border-bottom:1px solid #e4e4e7;color:#71717a">Rs 42,000</div>
+            <div style="padding:7px 8px;background:#f4f4f5;border-bottom:1px solid #e4e4e7;color:#7c3aed">Edit</div>
+            <div style="padding:7px 8px;border-bottom:1px solid #e4e4e7;color:#7c3aed;font-weight:700;text-transform:uppercase;letter-spacing:0.5px">GPU</div>
+            <div style="padding:7px 8px;border-bottom:1px solid #e4e4e7;color:#a1a1aa;font-style:italic">Not selected</div>
+            <div style="padding:7px 8px;border-bottom:1px solid #e4e4e7;color:#a1a1aa">—</div>
+            <div style="padding:7px 8px;border-bottom:1px solid #e4e4e7;color:#7c3aed">+ Add</div>
+            <div style="padding:7px 8px;background:#f4f4f5;border-bottom:1px solid #e4e4e7;color:#7c3aed;font-weight:700;text-transform:uppercase;letter-spacing:0.5px">RAM</div>
+            <div style="padding:7px 8px;background:#f4f4f5;border-bottom:1px solid #e4e4e7;color:#111112">Corsair 32GB</div>
+            <div style="padding:7px 8px;background:#f4f4f5;border-bottom:1px solid #e4e4e7;color:#71717a">Rs 28,500</div>
+            <div style="padding:7px 8px;background:#f4f4f5;border-bottom:1px solid #e4e4e7;color:#7c3aed">Edit</div>
+          </div>
+          <div style="background:#7c3aed;padding:8px 12px;display:flex;justify-content:space-between;align-items:center">
+            <span style="color:white;font-size:10px;font-weight:600">TOTAL</span>
+            <span style="color:white;font-size:11px;font-weight:700">Rs 70,500</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="option" data-choice="c" onclick="toggleSelect(this)">
+    <div class="letter">C</div>
+    <div class="content">
+      <h3>Hybrid — Cards + Sidebar Summary</h3>
+      <p>2-col layout in the parts section: left side has the component cards, right side is a sticky summary panel (selected parts, individual prices, total). More like a checkout page.</p>
+      <div class="mockup" style="margin-top:10px">
+        <div class="mockup-header">Parts Section</div>
+        <div class="mockup-body" style="display:flex;gap:0;padding:0">
+          <div style="flex:1;padding:10px;display:flex;flex-direction:column;gap:6px;border-right:1px solid #e4e4e7">
+            <div style="font-size:9px;color:#71717a;letter-spacing:1px;text-transform:uppercase">COMPONENTS</div>
+            <div style="background:#f4f4f5;border:1px solid #d4d4d8;border-radius:4px;padding:7px">
+              <div style="font-size:8px;color:#7c3aed;font-weight:600">CPU</div>
+              <div style="font-size:9px;color:#111112">Ryzen 5 7600X</div>
+            </div>
+            <div style="background:#f4f4f5;border:1px dashed #d4d4d8;border-radius:4px;padding:7px;display:flex;align-items:center;gap:4px">
+              <div style="font-size:9px;color:#a1a1aa">+ Select GPU</div>
+            </div>
+            <div style="background:#f4f4f5;border:1px solid #d4d4d8;border-radius:4px;padding:7px">
+              <div style="font-size:8px;color:#7c3aed;font-weight:600">RAM</div>
+              <div style="font-size:9px;color:#111112">Corsair 32GB</div>
+            </div>
+          </div>
+          <div style="width:100px;padding:10px;background:#f8f8f9">
+            <div style="font-size:9px;color:#71717a;letter-spacing:1px;text-transform:uppercase;margin-bottom:6px">SUMMARY</div>
+            <div style="font-size:8px;color:#3f3f46;margin-bottom:3px">CPU — Rs 42,000</div>
+            <div style="font-size:8px;color:#a1a1aa;margin-bottom:3px">GPU — —</div>
+            <div style="font-size:8px;color:#3f3f46;margin-bottom:8px">RAM — Rs 28,500</div>
+            <div style="border-top:1px solid #d4d4d8;padding-top:6px">
+              <div style="font-size:8px;color:#7c3aed;font-weight:700">TOTAL</div>
+              <div style="font-size:10px;color:#111112;font-weight:700">Rs 70,500</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
