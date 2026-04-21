@@ -103,6 +103,7 @@ class Database:
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(source, source_id) DO UPDATE SET
                     name          = excluded.name,
+                    category      = excluded.category,
                     thumbnail_url = COALESCE(excluded.thumbnail_url, parts.thumbnail_url),
                     specs         = excluded.specs,
                     updated_at    = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
@@ -167,6 +168,7 @@ class Database:
         min_price: Optional[int] = None,
         max_price: Optional[int] = None,
         specs_filter: Optional[dict] = None,
+        q: Optional[str] = None,
         sort: str = "price_asc",
         limit: int = 50,
         offset: int = 0,
@@ -191,6 +193,9 @@ class Database:
         if max_price is not None:
             conditions.append("pl.price_pkr <= ?")
             params.append(max_price)
+        if q:
+            conditions.append("p.name LIKE ?")
+            params.append(f"%{q}%")
         if specs_filter:
             for key, value in specs_filter.items():
                 if key in _VALID_SPEC_KEYS:

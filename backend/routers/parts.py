@@ -76,6 +76,7 @@ def get_parts(
     fan_size:    Optional[str] = Query(None),
     interface:   Optional[str] = Query(None),
     capacity:    Optional[str] = Query(None),
+    q:           Optional[str] = Query(None),
 ):
     if category not in VALID_CATEGORIES:
         category = None
@@ -98,6 +99,7 @@ def get_parts(
             min_price=min_price,
             max_price=max_price,
             specs_filter=specs_filter,
+            q=q,
             sort=sort,
             limit=limit,
             offset=offset,
