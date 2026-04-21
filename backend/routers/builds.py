@@ -14,9 +14,6 @@ router = APIRouter(prefix="/api/builds")
 
 DB_PATH = Path(__file__).parent.parent.parent / "data" / "ppc.db"
 
-VALID_SLOTS = {"cpu", "gpu", "ram", "motherboard", "psu", "case", "ssd", "cooling"}
-
-
 class ShareBuildRequest(BaseModel):
     cpu: Optional[int] = None
     gpu: Optional[int] = None
@@ -35,9 +32,9 @@ class ShareBuildResponse(BaseModel):
 @router.post("/share", response_model=ShareBuildResponse)
 def share_build(body: ShareBuildRequest):
     build = {
-        slot: getattr(body, slot)
-        for slot in VALID_SLOTS
-        if getattr(body, slot) is not None
+        field: value
+        for field, value in body.model_dump().items()
+        if value is not None
     }
     if not build:
         raise HTTPException(status_code=400, detail="Build has no parts selected")
@@ -55,7 +52,9 @@ def get_shared_build(code: str):
     if result is None:
         raise HTTPException(status_code=404, detail="Share code not found")
     # Parse specs JSON for each part (DB layer returns raw string)
+    parsed = {}
     for slot, part in result.items():
-        specs_raw = part.get("specs")
-        part["specs"] = json.loads(specs_raw) if isinstance(specs_raw, str) else specs_raw
-    return result
+        specs_raw = part.pop("specs", None)
+        part["specs"] = json.loads(specs_raw) if specs_raw else None
+        parsed[slot] = part
+    return parsed
