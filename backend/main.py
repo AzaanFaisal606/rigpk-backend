@@ -10,6 +10,7 @@ if str(_backend_dir) not in sys.path:
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from routers.parts import router
+from routers.builds import router as builds_router
 
 app = FastAPI(title="PakPC API")
 
@@ -24,3 +25,4 @@ app.add_middleware(
 )
 
 app.include_router(router)
+app.include_router(builds_router)
