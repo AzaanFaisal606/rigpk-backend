@@ -29,7 +29,7 @@ from __future__ import annotations
 import os
 import re
 import sqlite3
-import random
+import secrets
 import string
 from pathlib import Path
 from typing import Optional
@@ -146,9 +146,8 @@ class Database:
             RuntimeError: if all 10 collision retries are exhausted
         """
         build_json = json.dumps(build)
-
-        for attempt in range(10):
-            code = "".join(random.choices(string.ascii_letters + string.digits, k=6))
+        for _ in range(10):
+            code = "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(6))
             try:
                 self._conn.execute(
                     "INSERT INTO shared_builds (code, build_json) VALUES (?, ?)",
@@ -157,9 +156,8 @@ class Database:
                 self._conn.commit()
                 return code
             except sqlite3.IntegrityError:
-                if attempt == 9:
-                    raise RuntimeError("Failed to generate unique shared build code after 10 attempts")
                 continue
+        raise RuntimeError("Failed to generate unique shared build code after 10 attempts")
 
     # ------------------------------------------------------------------
     # Read
@@ -324,7 +322,7 @@ class Database:
         ).fetchone()
         if row is None:
             return None
-        return json.loads(row[0])
+        return json.loads(row["build_json"])
 
     def resolve_shared_build(self, code: str) -> Optional[dict]:
         """
@@ -338,34 +336,33 @@ class Database:
             dict of {slot: part_dict} or None if code not found.
             part_dict includes: id, source, name, category, url, thumbnail_url, specs, price_pkr
         """
-        build_ids = self.get_shared_build(code)
-        if build_ids is None:
+        slot_ids = self.get_shared_build(code)
+        if slot_ids is None:
             return None
 
+        # Collect all valid part_ids
+        id_to_slot: dict[int, str] = {part_id: slot for slot, part_id in slot_ids.items()}
+        if not id_to_slot:
+            return {}
+
+        placeholders = ",".join("?" * len(id_to_slot))
+        rows = self._conn.execute(
+            f"""
+            SELECT p.id, p.source, p.name, p.category, p.url, p.thumbnail_url, p.specs, pl.price_pkr
+            FROM parts p
+            JOIN price_log pl ON pl.id = (
+                SELECT id FROM price_log WHERE part_id = p.id ORDER BY scraped_at DESC LIMIT 1
+            )
+            WHERE p.id IN ({placeholders})
+            """,
+            list(id_to_slot.keys()),
+        ).fetchall()
+
         result = {}
-        for slot, part_id in build_ids.items():
-            row = self._conn.execute(
-                """
-                SELECT p.id, p.source, p.name, p.category, p.url, p.thumbnail_url, p.specs, pl.price_pkr
-                FROM parts p
-                JOIN price_log pl ON pl.id = (
-                    SELECT id FROM price_log WHERE part_id = p.id ORDER BY scraped_at DESC LIMIT 1
-                )
-                WHERE p.id = ?
-                """,
-                (part_id,),
-            ).fetchone()
-
-            if row is None:
-                # Part was deleted; skip this slot
-                continue
-
+        for row in rows:
             d = dict(row)
-            # Parse specs JSON
-            specs_raw = d.pop("specs", None)
-            d["specs"] = json.loads(specs_raw) if specs_raw else None
+            slot = id_to_slot[d["id"]]
             result[slot] = d
-
         return result
 
     def stats(self) -> dict:
