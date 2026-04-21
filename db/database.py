@@ -147,7 +147,7 @@ class Database:
         """
         build_json = json.dumps(build)
         for _ in range(10):
-            code = "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(6))
+            code = "".join(secrets.choice(string.ascii_letters + string.digits) for __ in range(6))
             try:
                 self._conn.execute(
                     "INSERT INTO shared_builds (code, build_json) VALUES (?, ?)",
@@ -341,7 +341,7 @@ class Database:
             return None
 
         # Collect all valid part_ids
-        id_to_slot: dict[int, str] = {part_id: slot for slot, part_id in slot_ids.items()}
+        id_to_slot: dict[int, str] = {part_id: slot for slot, part_id in slot_ids.items() if part_id is not None}
         if not id_to_slot:
             return {}
 
