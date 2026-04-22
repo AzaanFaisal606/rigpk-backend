@@ -17,8 +17,7 @@ env/
 .coverage
 htmlcov/
 
-# Data — scraped DB and JSON dumps (not source, added separately for deployment)
-data/ppc.db
+# Data — scraped JSON dumps (not source)
 data/*.json
 
 # Environment / secrets

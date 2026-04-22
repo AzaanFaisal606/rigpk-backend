@@ -37,7 +37,7 @@ import json
 from scrapers.spec_extractor import extract_specs
 
 _SCHEMA = Path(__file__).parent / "schema.sql"
-_DEFAULT_DB = Path(__file__).parent.parent / "data" / "ppc.db"
+_DEFAULT_DB = Path(os.getenv("DB_PATH", str(Path(__file__).parent.parent / "data" / "ppc.db")))
 
 
 def _slug(url: str) -> str:

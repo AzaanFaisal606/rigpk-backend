@@ -1,3 +1,4 @@
+import os
 import sys
 from pathlib import Path
 
@@ -14,12 +15,16 @@ from routers.builds import router as builds_router
 
 app = FastAPI(title="PakPC API")
 
+_origins = [
+    "http://localhost:3000",
+    "http://localhost:3001",
+]
+if _frontend_url := os.getenv("FRONTEND_URL"):
+    _origins.append(_frontend_url)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://localhost:3001",
-    ],
+    allow_origins=_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
