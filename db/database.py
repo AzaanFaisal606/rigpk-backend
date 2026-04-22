@@ -48,6 +48,91 @@ def _slug(url: str) -> str:
     return url[:200]
 
 
+# Terms that — regardless of category — flag an item as non-PC-part junk.
+# Matched case-insensitively against the product name.
+_GLOBAL_BLOCKLIST: tuple[str, ...] = (
+    "flash drive",
+    "usb drive",
+    "external hard drive",
+    "portable hard drive",
+    "external ssd",
+    "portable ssd",
+    "optical drive",
+    "dvd writer",
+    "dvd drive",
+    "blu-ray",
+    "thermal paste",
+    "thermal grease",
+    "thermal compound",
+    "thermal grizzly",
+    "non-nand",
+    "non nand",
+)
+
+# Per-category extra blocklist terms.
+_CATEGORY_BLOCKLIST: dict[str, tuple[str, ...]] = {
+    "gpu": (
+        "card holder",
+        "graphics card holder",
+        "gpu holder",
+        "gpu support",
+        "card support",
+        "nvlink",
+        "sli bridge",
+    ),
+    "ssd": (
+        "enclosure",
+        "docking station",
+        "microsd",
+        "micro sd",
+        "sdxc",
+        "sdhc",
+        "adapter card",
+        "pcie adapter",
+        "m.2 adapter",
+        "nvme adapter",
+        "fulfill kit",
+    ),
+    "cooling": (
+        "thermal pad",
+        "fan controller",
+        "fan hub",
+        "rpd grease",
+        "thermal grease",
+        "thermal paste",
+    ),
+    "psu": (
+        "case with",       # "Case with 300W Power Supply" combos
+        "chassis with",    # "Chassis with 300W Power Supply" combos
+    ),
+}
+
+
+# Minimum sane price in PKR per category.
+# Items below these thresholds are accessories or price-parse errors, not real parts.
+_MIN_PRICE: dict[str, int] = {
+    "gpu":         4000,
+    "cpu":         8000,
+    "ram":         1000,
+    "motherboard": 8000,
+    "ssd":         2500,
+    "psu":         5000,
+    "case":        3000,
+    "cooling":      500,
+}
+
+
+def _is_blocked(name: str, category: str) -> bool:
+    lower = name.lower()
+    for term in _GLOBAL_BLOCKLIST:
+        if term in lower:
+            return True
+    for term in _CATEGORY_BLOCKLIST.get(category, ()):
+        if term in lower:
+            return True
+    return False
+
+
 _VALID_SPEC_KEYS = frozenset({
     "brand", "socket", "vram", "ddr_type", "speed", "chipset",
     "wattage", "rating", "form_factor", "type", "aio_size",
@@ -91,8 +176,20 @@ class Database:
         Returns the number of price_log rows inserted.
         """
         inserted = 0
+        skipped = 0
         cur = self._conn.cursor()
         for p in products:
+            price = p.get("price_pkr")
+            if price is None:
+                skipped += 1
+                continue
+            min_price = _MIN_PRICE.get(p["category"])
+            if min_price is not None and price < min_price:
+                skipped += 1
+                continue
+            if _is_blocked(p["name"], p["category"]):
+                skipped += 1
+                continue
             source_id = _slug(p["url"])
             thumbnail = p.get("thumbnail_url")
 
@@ -204,10 +301,10 @@ class Database:
     ) -> tuple[list[dict], int]:
         """
         Return (items, total) for the market listing page.
-        Items have the latest price per part. NULL-price rows sort last.
+        Items have the latest price per part. NULL-price rows excluded.
         specs_filter: e.g. {"brand": "AMD", "socket": "AM5"}
         """
-        conditions: list[str] = []
+        conditions: list[str] = ["pl.price_pkr IS NOT NULL"]
         params: list = []
 
         if category:
@@ -234,9 +331,9 @@ class Database:
         where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
 
         order = (
-            "ORDER BY pl.price_pkr IS NULL, pl.price_pkr ASC"
+            "ORDER BY pl.price_pkr ASC"
             if sort == "price_asc"
-            else "ORDER BY pl.price_pkr IS NULL, pl.price_pkr DESC"
+            else "ORDER BY pl.price_pkr DESC"
         )
 
         base_query = f"""

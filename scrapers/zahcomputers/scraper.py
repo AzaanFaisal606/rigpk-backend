@@ -129,13 +129,11 @@ class ZahComputersScraper(BaseScraper):
                 )
                 price_pkr = int(reg_m.group(1).replace(",", "")) if reg_m else None
 
-            # Thumbnail from inside product image anchor
-            anchor_end = block.find("</a>")
-            chunk = block[:anchor_end] if anchor_end != -1 else block[:600]
-            img_m = re.search(r'<img[^>]+src="([^"]+)"', chunk)
+            # Thumbnail from data-image-url on first .wd-product-grid-slide
             thumbnail = None
-            if img_m and _PLACEHOLDER not in img_m.group(1):
-                thumbnail = img_m.group(1)
+            data_img_m = re.search(r'class="wd-product-grid-slide[^"]*"[^>]*data-image-url="([^"]+)"', block)
+            if data_img_m and _PLACEHOLDER not in data_img_m.group(1):
+                thumbnail = data_img_m.group(1)
 
             results.append({
                 "name": name,
