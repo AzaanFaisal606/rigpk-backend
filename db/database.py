@@ -507,6 +507,8 @@ class Database:
         min_price: Optional[int] = None,
         max_price: Optional[int] = None,
         q: Optional[str] = None,
+        cpu_brand: Optional[str] = None,
+        gpu_brand: Optional[str] = None,
         sort: str = "price_asc",
         limit: int = 50,
         offset: int = 0,
@@ -527,6 +529,20 @@ class Database:
         if q:
             conditions.append("name LIKE ?")
             params.append(f"%{q}%")
+        if cpu_brand:
+            brand = cpu_brand.lower()
+            if brand == "amd":
+                conditions.append("(LOWER(json_extract(components, '$.cpu')) LIKE '%ryzen%' OR LOWER(json_extract(components, '$.cpu')) LIKE '%amd%')")
+            elif brand == "intel":
+                conditions.append("(LOWER(json_extract(components, '$.cpu')) LIKE '%intel%' OR LOWER(json_extract(components, '$.cpu')) LIKE '%core i%')")
+        if gpu_brand:
+            brand = gpu_brand.lower()
+            if brand == "nvidia":
+                conditions.append("(LOWER(json_extract(components, '$.gpu')) LIKE '%rtx%' OR LOWER(json_extract(components, '$.gpu')) LIKE '%gtx%' OR LOWER(json_extract(components, '$.gpu')) LIKE '%nvidia%')")
+            elif brand == "amd":
+                conditions.append("(LOWER(json_extract(components, '$.gpu')) LIKE '%amd%' OR LOWER(json_extract(components, '$.gpu')) LIKE '%radeon%')")
+            elif brand == "intel":
+                conditions.append("LOWER(json_extract(components, '$.gpu')) LIKE '%arc%'")
 
         where = "WHERE " + " AND ".join(conditions)
         order = "ORDER BY price_pkr ASC" if sort == "price_asc" else "ORDER BY price_pkr DESC"

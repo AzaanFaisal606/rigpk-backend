@@ -12,6 +12,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from routers.parts import router
 from routers.builds import router as builds_router
+from routers.prebuilts import router as prebuilts_router
 
 app = FastAPI(title="PakPC API")
 
@@ -31,3 +32,4 @@ app.add_middleware(
 
 app.include_router(router)
 app.include_router(builds_router)
+app.include_router(prebuilts_router)
