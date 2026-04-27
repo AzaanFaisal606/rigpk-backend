@@ -462,6 +462,104 @@ class Database:
             result[slot] = d
         return result
 
+    # ------------------------------------------------------------------
+    # Prebuilts
+    # ------------------------------------------------------------------
+
+    def upsert_prebuilts(self, prebuilts: list[dict]) -> int:
+        """
+        Upsert a list of scraped prebuilt PCs.
+        Each dict must have: name, url, source, scraped_at, price_pkr (int|None),
+        thumbnail_url (str|None), components (dict|None).
+        Returns number of rows upserted.
+        """
+        upserted = 0
+        cur = self._conn.cursor()
+        for p in prebuilts:
+            source_id = _slug(p["url"])
+            components_json = json.dumps(p["components"], ensure_ascii=False) if p.get("components") else None
+            cur.execute(
+                """
+                INSERT INTO prebuilts (source, source_id, name, url, thumbnail_url, price_pkr, components, scraped_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source, source_id) DO UPDATE SET
+                    name          = excluded.name,
+                    thumbnail_url = COALESCE(excluded.thumbnail_url, prebuilts.thumbnail_url),
+                    price_pkr     = excluded.price_pkr,
+                    components    = excluded.components,
+                    scraped_at    = excluded.scraped_at,
+                    updated_at    = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                """,
+                (
+                    p["source"], source_id, p["name"], p["url"],
+                    p.get("thumbnail_url"), p.get("price_pkr"),
+                    components_json, p["scraped_at"],
+                ),
+            )
+            upserted += 1
+        self._conn.commit()
+        return upserted
+
+    def list_prebuilts(
+        self,
+        *,
+        source: Optional[str] = None,
+        min_price: Optional[int] = None,
+        max_price: Optional[int] = None,
+        q: Optional[str] = None,
+        sort: str = "price_asc",
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[dict], int]:
+        """Return (items, total) for the prebuilts listing page."""
+        conditions: list[str] = ["price_pkr IS NOT NULL"]
+        params: list = []
+
+        if source:
+            conditions.append("source = ?")
+            params.append(source)
+        if min_price is not None:
+            conditions.append("price_pkr >= ?")
+            params.append(min_price)
+        if max_price is not None:
+            conditions.append("price_pkr <= ?")
+            params.append(max_price)
+        if q:
+            conditions.append("name LIKE ?")
+            params.append(f"%{q}%")
+
+        where = "WHERE " + " AND ".join(conditions)
+        order = "ORDER BY price_pkr ASC" if sort == "price_asc" else "ORDER BY price_pkr DESC"
+
+        total = self._conn.execute(
+            f"SELECT COUNT(*) FROM prebuilts {where}", params
+        ).fetchone()[0]
+
+        rows = self._conn.execute(
+            f"""
+            SELECT id, source, source_id, name, url, thumbnail_url, price_pkr, components, scraped_at
+            FROM prebuilts {where} {order}
+            LIMIT ? OFFSET ?
+            """,
+            params + [limit, offset],
+        ).fetchall()
+
+        return [dict(r) for r in rows], total
+
+    def get_prebuilt(self, prebuilt_id: int) -> Optional[dict]:
+        """Return a single prebuilt by id."""
+        row = self._conn.execute(
+            "SELECT * FROM prebuilts WHERE id = ?", (prebuilt_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def prebuilt_stats(self) -> dict:
+        total = self._conn.execute("SELECT COUNT(*) FROM prebuilts").fetchone()[0]
+        by_source = self._conn.execute(
+            "SELECT source, COUNT(*) as n FROM prebuilts GROUP BY source"
+        ).fetchall()
+        return {"total": total, "by_source": {r["source"]: r["n"] for r in by_source}}
+
     def stats(self) -> dict:
         """Quick summary — useful for CLI output."""
         parts_total = self._conn.execute("SELECT COUNT(*) FROM parts").fetchone()[0]

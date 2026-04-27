@@ -49,3 +49,23 @@ CREATE TABLE IF NOT EXISTS shared_builds (
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 CREATE INDEX IF NOT EXISTS idx_shared_builds_code ON shared_builds(code);
+
+-- Prebuilt PCs scraped from retailers (separate from individual parts)
+-- components is a JSON object: {"cpu": "...", "gpu": "...", "ram": "...", ...}
+CREATE TABLE IF NOT EXISTS prebuilts (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    source        TEXT    NOT NULL,          -- e.g. "zestrogaming.com"
+    source_id     TEXT    NOT NULL,          -- stable slug from URL
+    name          TEXT    NOT NULL,
+    url           TEXT    NOT NULL,
+    thumbnail_url TEXT,
+    price_pkr     INTEGER,                   -- NULL = price hidden / out of stock
+    components    TEXT    DEFAULT NULL,      -- JSON: {"cpu":..., "gpu":..., "ram":..., ...}
+    scraped_at    TEXT    NOT NULL,
+    created_at    TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at    TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    UNIQUE (source, source_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_prebuilts_source    ON prebuilts(source);
+CREATE INDEX IF NOT EXISTS idx_prebuilts_price     ON prebuilts(price_pkr);
