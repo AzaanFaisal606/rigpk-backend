@@ -107,7 +107,7 @@ class CzoneAllScraper(BaseScraper):
         return all_products
 
     def _parse_page(self, html: str) -> list[dict]:
-        scraped_at = self._now()
+        scraped_at = self.now()
         items = self._extract_jsonld_items(html)
         if not items:
             return []
@@ -168,12 +168,6 @@ class CzoneAllScraper(BaseScraper):
         if href.startswith("/"):
             return f"{BASE}{href}"
         return f"{BASE}/{href}"
-
-    @staticmethod
-    def _now() -> str:
-        from datetime import datetime, timezone
-        return datetime.now(timezone.utc).isoformat()
-
 
 def main():
     import sys

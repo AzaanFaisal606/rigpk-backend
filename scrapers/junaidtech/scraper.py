@@ -92,7 +92,7 @@ class JunaidTechScraper(BaseScraper):
         return all_products
 
     def _api_fetch(self, token: str, category_id: str, start_row: int, results: int, category: str = "") -> tuple[list[dict], int]:
-        scraped_at = self._now()
+        scraped_at = self.now()
         s3 = "https://static.webx.pk/files"
 
         body = json.dumps({
@@ -196,12 +196,6 @@ class JunaidTechScraper(BaseScraper):
                 category_id = m.group(1)
 
         return access_token, category_id
-
-    @staticmethod
-    def _now() -> str:
-        from datetime import datetime, timezone
-        return datetime.now(timezone.utc).isoformat()
-
 
 def main():
     scraper = JunaidTechScraper()

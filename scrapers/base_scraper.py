@@ -4,7 +4,7 @@ import time
 import urllib.request
 import urllib.error
 from abc import ABC, abstractmethod
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 class BaseScraper(ABC):
@@ -74,6 +74,10 @@ class BaseScraper(ABC):
     @staticmethod
     def timestamp() -> str:
         return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    @staticmethod
+    def now() -> str:
+        return datetime.now(timezone.utc).isoformat()
 
     @staticmethod
     def parse_price(price_text: str) -> int | None:
