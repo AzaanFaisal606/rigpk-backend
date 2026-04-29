@@ -196,7 +196,7 @@ class Database:
             raw_specs = extract_specs(p["name"], p["category"])
             specs_json = json.dumps(raw_specs, ensure_ascii=False) if raw_specs else None
 
-            cur.execute(
+            row = cur.execute(
                 """
                 INSERT INTO parts (source, source_id, name, category, url, thumbnail_url, specs)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -206,13 +206,11 @@ class Database:
                     thumbnail_url = COALESCE(excluded.thumbnail_url, parts.thumbnail_url),
                     specs         = excluded.specs,
                     updated_at    = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                RETURNING id
                 """,
                 (p["source"], source_id, p["name"], p["category"], p["url"], thumbnail, specs_json),
-            )
-            part_id = cur.execute(
-                "SELECT id FROM parts WHERE source=? AND source_id=?",
-                (p["source"], source_id),
-            ).fetchone()["id"]
+            ).fetchone()
+            part_id = row["id"]
 
             try:
                 cur.execute(
@@ -259,32 +257,6 @@ class Database:
     # ------------------------------------------------------------------
     # Read
     # ------------------------------------------------------------------
-
-    def get_latest_prices(self, category: Optional[str] = None) -> list[dict]:
-        """
-        Return the most recent price for every product, optionally filtered
-        by category.  Suitable for the web API's listing endpoint.
-        """
-        where = "WHERE p.category = ?" if category else ""
-        params = (category,) if category else ()
-        rows = self._conn.execute(
-            f"""
-            SELECT
-                p.id, p.source, p.name, p.category, p.url, p.thumbnail_url,
-                pl.price_pkr, pl.scraped_at
-            FROM parts p
-            JOIN price_log pl ON pl.id = (
-                SELECT id FROM price_log
-                WHERE part_id = p.id
-                ORDER BY scraped_at DESC
-                LIMIT 1
-            )
-            {where}
-            ORDER BY p.category, p.name
-            """,
-            params,
-        ).fetchall()
-        return [dict(r) for r in rows]
 
     def list_parts(
         self,
