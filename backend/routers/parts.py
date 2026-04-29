@@ -1,7 +1,7 @@
 from __future__ import annotations
 import json
 from typing import Any, Optional
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, HTTPException
 from pydantic import BaseModel
 
 from db.database import get_db
@@ -74,9 +74,9 @@ def get_parts(
     capacity:    Optional[str] = Query(None),
     q:           Optional[str] = Query(None),
 ):
-    if category not in VALID_CATEGORIES:
-        category = None
-    if source not in VALID_SOURCES:
+    if category and category not in VALID_CATEGORIES:
+        raise HTTPException(status_code=400, detail=f"Invalid category '{category}'. Valid: {sorted(VALID_CATEGORIES)}")
+    if source and source not in VALID_SOURCES:
         source = None
 
     raw_spec_filters = {
