@@ -499,6 +499,30 @@ line-length = 100
 - ✅ `API_BASE` duplicated — exported from `lib/api.ts`
 - ✅ `SPEC_KEYS` duplicated — extracted to `lib/constants.ts`
 
+**MEDIUM/LOW (backend)**
+- ✅ `VALID_CATEGORIES`/`VALID_SOURCES` scattered — centralised in `backend/constants.py`
+- ✅ `prebuilts.py` router prefix `/api` — changed to `/api/prebuilts`
+- ✅ `spec_extractor.py` missing `hdd`/`monitor` stanzas — added explicit `elif` with `pass`
+- ✅ Scraper empty category not guarded — `upsert_products()` now raises `ValueError`
+- ✅ `render.yaml` service name `ppc-api` — renamed to `rigpk-api`
+- ✅ `description.md` stale planning doc — deleted
+- ✅ `db/enrich_specs.py` + `migrate_add_specs.py` one-shot scripts — moved to `scripts/migrations/`
+- ✅ `data/.gitkeep` — replaced with `data/README.md`
+- ✅ No root `.env.example` — added
+
+**MEDIUM/LOW (frontend)**
+- ✅ `FilterBar.tsx` eslint dep suppression — removed, `push` added to dep array
+- ✅ `next.config.ts` missing prebuilt domains — added zestrogaming, redtech, techmatched
+- ✅ `ToggleChip` trapped in `PrebuiltFilterBar.tsx` — extracted to `components/ui/ToggleChip.tsx`
+- ✅ Footer duplicated in both market pages — extracted to `components/Footer.tsx`
+- ✅ `prebuilt-tags.ts` magic numbers — extracted to named constants
+- ✅ Hardcoded `BASE` URL — replaced with `NEXT_PUBLIC_SITE_URL` env var
+- ✅ No `frontend/.env.example` — added
+
+**Project structure**
+- ✅ No `Makefile` — added with `dev-backend`, `dev-frontend`, `scrape`, `test` targets
+- ✅ `docs/superpowers/` gitignore — already covered in `.gitignore`
+
 ### Remaining
 
-All MEDIUM and LOW issues from the original audit remain unimplemented. See the original sections above for details.
+All issues from the original audit are now implemented. See git log for details.
