@@ -6,17 +6,9 @@ from pydantic import BaseModel
 
 from db.database import get_db
 from backend.config import DB_PATH
+from backend.constants import VALID_CATEGORIES, VALID_SOURCES
 
 router = APIRouter(prefix="/api")
-
-VALID_CATEGORIES = {
-    "gpu", "cpu", "ram", "ssd", "hdd", "psu",
-    "case", "motherboard", "cooling", "monitor",
-}
-VALID_SOURCES = {
-    "czone.com.pk", "zahcomputers.pk", "amdhouse.pk",
-    "rbtechngames.com", "junaidtech.pk",
-}
 
 
 class PartItem(BaseModel):

@@ -8,12 +8,9 @@ import sys
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-DB_PATH = Path(__file__).parent.parent / "data" / "ppc.db"
+from backend.constants import VALID_SOURCES as EXPECTED_SOURCES
 
-EXPECTED_SOURCES = {
-    "czone.com.pk", "zahcomputers.pk", "amdhouse.pk",
-    "rbtechngames.com", "junaidtech.pk",
-}
+DB_PATH = Path(__file__).parent.parent / "data" / "ppc.db"
 
 passed = 0
 failed = 0

@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from db.database import get_db
 from backend.config import DB_PATH
 
-router = APIRouter(prefix="/api")
+router = APIRouter(prefix="/api/prebuilts")
 
 
 class PrebuiltItem(BaseModel):
@@ -50,7 +50,7 @@ def _row_to_item(row: dict) -> PrebuiltItem:
     )
 
 
-@router.get("/prebuilts", response_model=PrebuiltsResponse)
+@router.get("", response_model=PrebuiltsResponse)
 def list_prebuilts(
     source:     Optional[str] = Query(None),
     min_price:  Optional[int] = Query(None, ge=0),
@@ -80,7 +80,7 @@ def list_prebuilts(
     )
 
 
-@router.get("/prebuilts/{item_id}", response_model=PrebuiltItem)
+@router.get("/{item_id}", response_model=PrebuiltItem)
 def get_prebuilt(item_id: int):
     with get_db(DB_PATH) as db:
         row = db.get_prebuilt(item_id)

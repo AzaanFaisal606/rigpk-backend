@@ -179,6 +179,8 @@ class Database:
         skipped = 0
         cur = self._conn.cursor()
         for p in products:
+            if not p.get("category"):
+                raise ValueError(f"Product missing category: {p.get('name', '<unknown>')!r}")
             price = p.get("price_pkr")
             if price is None:
                 skipped += 1

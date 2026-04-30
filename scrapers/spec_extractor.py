@@ -313,4 +313,7 @@ def extract_specs(name: str, category: str) -> dict:
         if cap:
             specs["capacity"] = cap
 
+    elif category in ("hdd", "monitor"):
+        pass  # brand-only; _extract_brand() above already handles it
+
     return specs
