@@ -50,3 +50,13 @@ docs/superpowers/
 description.md
 capacity-dropdown.png
 CLAUDE.md
+
+# Frontend is a separate repo (rigpk-front)
+frontend/
+
+# Local DB backups
+*.db.bak
+
+# Local backup of pre-filter history
+frontend.pre-filter-backup/
+PPC.pre-filter-backup/
