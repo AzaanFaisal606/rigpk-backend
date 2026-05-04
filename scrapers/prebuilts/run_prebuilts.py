@@ -33,29 +33,37 @@ def main():
         print(f"Unknown sources: {requested}. Valid: {list(SCRAPERS)}")
         sys.exit(1)
 
-    all_results: list[dict] = []
+    db_path = os.path.join(ROOT, "data", "ppc.db")
+    total_scraped = 0
+    total_written = 0
+
     for name, cls in targets.items():
         print(f"\n=== {name.upper()} ===")
         try:
             scraper = cls()
             results = scraper.scrape_all()
             print(f"  => {len(results)} prebuilts scraped")
-            all_results.extend(results)
+            if results:
+                with get_db(db_path) as db:
+                    n = db.upsert_prebuilts(results)
+                print(f"  => {n} rows written to DB")
+                total_scraped += len(results)
+                total_written += n
+            else:
+                print(f"  WARNING: 0 prebuilts from {name}")
         except Exception as e:
             print(f"  ERROR scraping {name}: {e}")
 
-    if not all_results:
+    if total_scraped == 0:
         print("\nNo prebuilts scraped.")
         sys.exit(1)
 
-    db_path = os.path.join(ROOT, "data", "ppc.db")
     with get_db(db_path) as db:
-        n = db.upsert_prebuilts(all_results)
         stats = db.prebuilt_stats()
 
     print(f"\n=== DONE ===")
-    print(f"Total scraped:  {len(all_results)}")
-    print(f"DB rows written: {n}")
+    print(f"Total scraped:  {total_scraped}")
+    print(f"DB rows written: {total_written}")
     print(f"DB prebuilt total: {stats['total']}")
     for source, count in stats["by_source"].items():
         print(f"  {source:30s} {count}")
