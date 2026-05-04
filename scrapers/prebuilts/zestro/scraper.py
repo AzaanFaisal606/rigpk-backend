@@ -59,18 +59,40 @@ class ZestroScraper(BasePrebuiltScraper):
 
     def scrape_all(self) -> list[dict]:
         all_products: list[dict] = []
+        seen_urls: set[str] = set()
         page = 1
+        consecutive_failures = 0
+
         while True:
             url = CAT_URL if page == 1 else f"{CAT_URL}page/{page}/"
             print(f"  [zestro] category page {page}: {url}")
-            html = self.fetch(url)
+            try:
+                html = self.fetch(url)
+            except Exception as e:
+                print(f"  [zestro] SKIP page {page} ({e})")
+                consecutive_failures += 1
+                if consecutive_failures >= 3:
+                    print(f"  [zestro] 3 consecutive page failures — stopping")
+                    break
+                page += 1
+                time.sleep(self.PAGE_DELAY)
+                continue
+            consecutive_failures = 0
 
             links = self._extract_product_links(html)
             if not links:
                 print(f"  [zestro] no products on page {page} — done.")
                 break
 
-            for product_url in links:
+            # Stop if all links on this page already seen (pagination loop)
+            new_links = [l for l in links if l not in seen_urls]
+            if not new_links:
+                print(f"  [zestro] all links on page {page} already seen — done.")
+                break
+            for l in new_links:
+                seen_urls.add(l)
+
+            for product_url in new_links:
                 print(f"    -> {product_url}")
                 try:
                     p_html = self.fetch(product_url)

@@ -1,18 +1,14 @@
 from __future__ import annotations
 import json
-from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from db.database import get_db
+from backend.config import DB_PATH
 
 router = APIRouter(prefix="/api/builds")
-
-DB_PATH = Path(__file__).parent.parent.parent / "data" / "ppc.db"
 
 class ShareBuildRequest(BaseModel):
     cpu: Optional[int] = None

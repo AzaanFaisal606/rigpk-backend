@@ -1,16 +1,13 @@
 from __future__ import annotations
 import json
-from pathlib import Path
 from typing import Optional, Any
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from db.database import get_db
+from backend.config import DB_PATH
 
-router = APIRouter(prefix="/api")
-DB_PATH = Path(__file__).parent.parent.parent / "data" / "ppc.db"
+router = APIRouter(prefix="/api/prebuilts")
 
 
 class PrebuiltItem(BaseModel):
@@ -53,7 +50,7 @@ def _row_to_item(row: dict) -> PrebuiltItem:
     )
 
 
-@router.get("/prebuilts", response_model=PrebuiltsResponse)
+@router.get("", response_model=PrebuiltsResponse)
 def list_prebuilts(
     source:     Optional[str] = Query(None),
     min_price:  Optional[int] = Query(None, ge=0),
@@ -83,7 +80,7 @@ def list_prebuilts(
     )
 
 
-@router.get("/prebuilts/{item_id}", response_model=PrebuiltItem)
+@router.get("/{item_id}", response_model=PrebuiltItem)
 def get_prebuilt(item_id: int):
     with get_db(DB_PATH) as db:
         row = db.get_prebuilt(item_id)

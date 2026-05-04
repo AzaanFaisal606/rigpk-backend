@@ -33,7 +33,11 @@ def run_czone() -> list[dict]:
     for path, category in CZONE_CATS:
         url = f"{CZONE_BASE}{path}"
         print(f"\n  [czone/{category.upper()}]")
-        products = scraper.scrape(url)
+        try:
+            products = scraper.scrape(url)
+        except Exception as e:
+            print(f"    ERROR: {e}")
+            continue
         for p in products:
             p["category"] = category
         results.extend(products)
@@ -99,7 +103,11 @@ def run_junaid() -> list[dict]:
     for path, category, cat_id in JT_CATS:
         url = f"{JT_BASE}{path}"
         print(f"\n  [junaid/{category.upper()}]")
-        products = scraper.scrape(url, known_category_id=cat_id, category=category)
+        try:
+            products = scraper.scrape(url, known_category_id=cat_id, category=category)
+        except Exception as e:
+            print(f"    ERROR: {e}")
+            continue
         results.extend(products)
     return results
 
@@ -135,6 +143,8 @@ def main():
         try:
             results = fn()
             print(f"\n  => {len(results)} products from {label}")
+            if not results:
+                print(f"  WARNING: 0 products from {label} — scraper may have failed silently")
             all_results.extend(results)
         except Exception as e:
             print(f"  SCRAPER FAILED: {e}")

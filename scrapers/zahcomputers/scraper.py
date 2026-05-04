@@ -92,7 +92,7 @@ class ZahComputersScraper(BaseScraper):
         return all_products
 
     def _parse_page(self, html: str) -> list[dict]:
-        scraped_at = self._now()
+        scraped_at = self.now()
         _PLACEHOLDER = "woocommerce-placeholder"
 
         blocks = re.split(r'class="wd-product-wrapper', html)[1:]
@@ -153,12 +153,6 @@ class ZahComputersScraper(BaseScraper):
         if m:
             return int(m.group(1).replace(",", ""))
         return None
-
-    @staticmethod
-    def _now() -> str:
-        from datetime import datetime, timezone
-        return datetime.now(timezone.utc).isoformat()
-
 
 def main():
     scraper = ZahComputersScraper()

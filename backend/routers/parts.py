@@ -1,26 +1,14 @@
 from __future__ import annotations
 import json
-from pathlib import Path
 from typing import Any, Optional
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, HTTPException
 from pydantic import BaseModel
 
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from db.database import get_db
+from backend.config import DB_PATH
+from backend.constants import VALID_CATEGORIES, VALID_SOURCES
 
 router = APIRouter(prefix="/api")
-
-DB_PATH = Path(__file__).parent.parent.parent / "data" / "ppc.db"
-
-VALID_CATEGORIES = {
-    "gpu", "cpu", "ram", "ssd", "hdd", "psu",
-    "case", "motherboard", "cooling", "monitor",
-}
-VALID_SOURCES = {
-    "czone.com.pk", "zahcomputers.pk", "amdhouse.pk",
-    "rbtechngames.com", "junaidtech.pk",
-}
 
 
 class PartItem(BaseModel):
@@ -78,9 +66,9 @@ def get_parts(
     capacity:    Optional[str] = Query(None),
     q:           Optional[str] = Query(None),
 ):
-    if category not in VALID_CATEGORIES:
-        category = None
-    if source not in VALID_SOURCES:
+    if category and category not in VALID_CATEGORIES:
+        raise HTTPException(status_code=400, detail=f"Invalid category '{category}'. Valid: {sorted(VALID_CATEGORIES)}")
+    if source and source not in VALID_SOURCES:
         source = None
 
     raw_spec_filters = {
