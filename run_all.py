@@ -9,7 +9,7 @@ Usage:
     python run_all.py --test               # run DB integrity checks after scraping
     python run_all.py --notify --test      # both
 
-Available scrapers: czone, zah, amd, rbt, junaid
+Available scrapers: czone, zah, amd, rbt, junaid, tech, pakbyte
 """
 
 import subprocess
@@ -23,6 +23,8 @@ from scrapers.zahcomputers.scraper import ZahComputersScraper, CATEGORIES as ZAH
 from scrapers.amdhouse.scraper import AmdHouseScraper, CATEGORIES as AMD_CATS, BASE as AMD_BASE
 from scrapers.rbtechngames.scraper import RbTechNGamesScraper, CATEGORIES as RBT_CATS, BASE as RBT_BASE
 from scrapers.junaidtech.scraper import JunaidTechScraper, CATEGORIES as JT_CATS, BASE as JT_BASE
+from scrapers.techarc.scraper import TechArcScraper, CATEGORIES as TECH_CATS, BASE as TECH_BASE
+from scrapers.pakbyte.scraper import PakByteScraper, CATEGORIES as PB_CATS, BASE as PB_BASE
 
 DB_PATH = "data/ppc.db"
 
@@ -112,12 +114,48 @@ def run_junaid() -> list[dict]:
     return results
 
 
+def run_tech() -> list[dict]:
+    scraper = TechArcScraper()
+    results = []
+    for slug, category in TECH_CATS:
+        url = f"{TECH_BASE}/{slug}/"
+        print(f"\n  [tech/{category.upper()}]")
+        try:
+            products = scraper.scrape(url)
+        except Exception as e:
+            print(f"    ERROR: {e}")
+            continue
+        for p in products:
+            p["category"] = category
+        results.extend(products)
+    return results
+
+
+def run_pakbyte() -> list[dict]:
+    scraper = PakByteScraper()
+    results = []
+    for slug, category in PB_CATS:
+        url = f"{PB_BASE}/collections/{slug}"
+        print(f"\n  [pakbyte/{category.upper()}]")
+        try:
+            products = scraper.scrape(url)
+        except Exception as e:
+            print(f"    ERROR: {e}")
+            continue
+        for p in products:
+            p["category"] = category
+        results.extend(products)
+    return results
+
+
 SCRAPERS = {
-    "czone":  ("czone.com.pk",       run_czone),
-    "zah":    ("zahcomputers.pk",     run_zah),
-    "amd":    ("amdhouse.pk",         run_amd),
-    "rbt":    ("rbtechngames.com",    run_rbt),
-    "junaid": ("junaidtech.pk",       run_junaid),
+    "czone":   ("czone.com.pk",       run_czone),
+    "zah":     ("zahcomputers.pk",    run_zah),
+    "amd":     ("amdhouse.pk",        run_amd),
+    "rbt":     ("rbtechngames.com",   run_rbt),
+    "junaid":  ("junaidtech.pk",      run_junaid),
+    "tech":    ("techarc.pk",         run_tech),
+    "pakbyte": ("pakbyte.pk",         run_pakbyte),
 }
 
 
