@@ -9,7 +9,7 @@ Usage:
     python run_all.py --test               # run DB integrity checks after scraping
     python run_all.py --notify --test      # both
 
-Available scrapers: czone, zah, amd, rbt, junaid, tech, pakbyte
+Available scrapers: czone, zah, amd, rbt, junaid, tech, pakbyte, redtech, techmatched
 """
 
 import subprocess
@@ -25,6 +25,8 @@ from scrapers.rbtechngames.scraper import RbTechNGamesScraper, CATEGORIES as RBT
 from scrapers.junaidtech.scraper import JunaidTechScraper, CATEGORIES as JT_CATS, BASE as JT_BASE
 from scrapers.techarc.scraper import TechArcScraper, CATEGORIES as TECH_CATS, BASE as TECH_BASE
 from scrapers.pakbyte.scraper import PakByteScraper, CATEGORIES as PB_CATS, BASE as PB_BASE
+from scrapers.redtech.scraper import RedTechScraper, CATEGORIES as RT_CATS, BASE as RT_BASE
+from scrapers.techmatched.scraper import TechMatchedScraper, CATEGORIES as TM_CATS, BASE as TM_BASE
 
 DB_PATH = "data/ppc.db"
 
@@ -148,14 +150,50 @@ def run_pakbyte() -> list[dict]:
     return results
 
 
+def run_redtech() -> list[dict]:
+    scraper = RedTechScraper()
+    results = []
+    for slug, category in RT_CATS:
+        url = f"{RT_BASE}/product-category/{slug}/"
+        print(f"\n  [redtech/{category.upper()}]")
+        try:
+            products = scraper.scrape(url)
+        except Exception as e:
+            print(f"    ERROR: {e}")
+            continue
+        for p in products:
+            p["category"] = category
+        results.extend(products)
+    return results
+
+
+def run_techmatched() -> list[dict]:
+    scraper = TechMatchedScraper()
+    results = []
+    for slug, category in TM_CATS:
+        url = f"{TM_BASE}/product-category/{slug}/"
+        print(f"\n  [techmatched/{category.upper()}]")
+        try:
+            products = scraper.scrape(url)
+        except Exception as e:
+            print(f"    ERROR: {e}")
+            continue
+        for p in products:
+            p["category"] = category
+        results.extend(products)
+    return results
+
+
 SCRAPERS = {
-    "czone":   ("czone.com.pk",       run_czone),
-    "zah":     ("zahcomputers.pk",    run_zah),
-    "amd":     ("amdhouse.pk",        run_amd),
-    "rbt":     ("rbtechngames.com",   run_rbt),
-    "junaid":  ("junaidtech.pk",      run_junaid),
-    "tech":    ("techarc.pk",         run_tech),
-    "pakbyte": ("pakbyte.pk",         run_pakbyte),
+    "czone":       ("czone.com.pk",       run_czone),
+    "zah":         ("zahcomputers.pk",    run_zah),
+    "amd":         ("amdhouse.pk",        run_amd),
+    "rbt":         ("rbtechngames.com",   run_rbt),
+    "junaid":      ("junaidtech.pk",      run_junaid),
+    "tech":        ("techarc.pk",         run_tech),
+    "pakbyte":     ("pakbyte.pk",         run_pakbyte),
+    "redtech":     ("redtech.pk",         run_redtech),
+    "techmatched": ("techmatched.pk",     run_techmatched),
 }
 
 
