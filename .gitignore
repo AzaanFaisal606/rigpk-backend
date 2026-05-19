@@ -60,3 +60,10 @@ frontend/
 # Local backup of pre-filter history
 frontend.pre-filter-backup/
 PPC.pre-filter-backup/
+
+# local docs (scratch / reference)
+/docs/
+
+# local DB backups (manual snapshots before risky operations)
+/data/*.bak*
+/data/*.testbak
