@@ -84,6 +84,12 @@ class RbTechNGamesScraper(BaseScraper):
 
         results = []
         for block in blocks:
+            # Skip out-of-stock — Flatsome marks the card class "out-of-stock"
+            # (same token as amdhouse). rbt currently lists in-stock only, so
+            # this is a fail-safe that activates if sold-out items ever appear.
+            if "out-of-stock" in block:
+                continue
+
             # Name
             name_m = re.search(
                 r'woocommerce-loop-product__title[^>]*><a[^>]+>([^<]+)', block

@@ -85,6 +85,11 @@ class AmdHouseScraper(BaseScraper):
 
         results = []
         for block in blocks:
+            # Skip out-of-stock — Flatsome marks the card class "out-of-stock"
+            # (hyphenated) and emits a <div class="out-of-stock-label">.
+            if "out-of-stock" in block:
+                continue
+
             # Name
             name_m = re.search(
                 r'woocommerce-loop-product__title[^>]*><a[^>]+>([^<]+)', block

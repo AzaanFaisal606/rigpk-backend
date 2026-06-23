@@ -99,7 +99,7 @@ class JunaidTechScraper(BaseScraper):
             "keyword": "", "categoryID": category_id, "collectionID": "0",
             "brands": "", "variants": "", "searchFields": "", "priceRange": "",
             "sortBy": "2", "startRow": str(start_row), "results": str(results),
-            "stockStatus": "",
+            "stockStatus": "1",  # server-side filter: "1"=instock only (excludes sold-out)
         }).encode()
 
         req = urllib.request.Request(
@@ -124,6 +124,10 @@ class JunaidTechScraper(BaseScraper):
         for item in items:
             name = (item.get("productName") or "").strip()
             if not name:
+                continue
+
+            # Skip out-of-stock (defensive — server already filters via stockStatus="1")
+            if (item.get("productStock") or {}).get("stockStatus") == "outofstock":
                 continue
 
             slug = item.get("productURL", "")

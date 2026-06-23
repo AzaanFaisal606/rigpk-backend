@@ -120,8 +120,17 @@ class CzoneAllScraper(BaseScraper):
 
         prices = re.findall(r'class="product-price">Rs\.\s*([\d,]+)', html)
 
+        # Per-card stock flags — index-aligned to JSON-LD items and prices.
+        # Each product card carries an "Out Of Stock" button when sold out.
+        cards = re.split(r'(?=<div class="price-wrapper")', html)[1:]
+        sold_out = ["Out Of Stock" in c for c in cards]
+
         results = []
         for i, item in enumerate(items):
+            # Skip out-of-stock items (position-matched to product cards)
+            if i < len(sold_out) and sold_out[i]:
+                continue
+
             name = item.get("name", "").strip()
             product_url = self._resolve_url(item.get("url", ""))
             price_str = prices[i] if i < len(prices) else None
