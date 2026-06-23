@@ -6,9 +6,10 @@ Backend for [RigPK](https://github.com/AzaanFaisal606/rigpk) — a PCPartPicker-
 
 ## What It Does
 
-- Scrapes 5 Pakistani retailers for GPU, CPU, RAM, SSD, PSU, case, motherboard, cooling parts
-- Stores ~4,800 parts with price history in SQLite
+- Scrapes 9 Pakistani retailers for GPU, CPU, RAM, SSD, PSU, case, motherboard, cooling parts
+- Stores ~9,300 parts with price history in SQLite
 - Tracks 121 prebuilt PCs from 3 retailers
+- Filters out sold-out items at scrape time — server-side where the platform supports it, otherwise per-product during parsing
 - Exposes a REST API for filtering, searching, build sharing, and prebuilt browsing
 
 ## Tech Stack
@@ -25,11 +26,15 @@ Backend for [RigPK](https://github.com/AzaanFaisal606/rigpk) — a PCPartPicker-
 
 | Site | Notes |
 |---|---|
-| czone.com.pk | 10 categories, largest source |
+| pakbyte.pk | Shopify storefront — `/collections/<slug>` pagination |
+| junaidtech.pk | webx.pk Nuxt SSR — Bearer token from `__NUXT_DATA__`, POST JSON API, server-side stock filter |
 | zahcomputers.pk | WooCommerce / Woodmart theme |
-| junaidtech.pk | Nuxt SSR — Bearer token from `__NUXT_DATA__`, POST JSON API |
+| techarc.pk | WooCommerce / Woodmart — flat permalinks (no `/product-category/`) |
+| czone.com.pk | webx.pk Nuxt SSR — JSON-LD CollectionPage, 10 categories |
 | amdhouse.pk | WooCommerce / Flatsome |
+| techmatched.pk | WooCommerce / Woostify |
 | rbtechngames.com | WooCommerce / Flatsome |
+| redtech.pk | WooCommerce / Woodmart |
 
 Prebuilts scraped from: zestrogaming.com, redtech.pk, techmatched.pk
 
@@ -68,8 +73,8 @@ cd backend && uvicorn main:app --reload
 # Run all scrapers
 python run_all.py
 
-# Run specific scrapers
-python run_all.py czone zahcomputers
+# Run specific scrapers (names: czone zah amd rbt junaid tech pakbyte redtech techmatched)
+python run_all.py czone zah
 
 # Run prebuilt scrapers
 python -m scrapers.prebuilts.run_prebuilts
@@ -91,7 +96,7 @@ backend/
 db/
   schema.sql           # SQLite DDL
   database.py          # All DB operations
-scrapers/
+scrapers/              # 9 part retailers
   base_scraper.py      # Shared fetch + parse logic
   spec_extractor.py    # Regex spec extraction from product names
   czone/
@@ -99,7 +104,11 @@ scrapers/
   junaidtech/
   amdhouse/
   rbtechngames/
-  prebuilts/           # Prebuilt PC scrapers
+  pakbyte/
+  techarc/
+  redtech/
+  techmatched/
+  prebuilts/           # Prebuilt PC scrapers (zestro, redtech, techmatched)
 tests/
   test_spec_extractor.py   # 56 unit tests
   test_db_integrity.py     # 8 DB integrity checks
