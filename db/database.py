@@ -26,6 +26,7 @@ AUTOINCREMENT -> SERIAL, remove PRAGMAs, adjust placeholder %s vs ?.
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import sqlite3
@@ -46,6 +47,27 @@ def _slug(url: str) -> str:
     url = re.sub(r"[^\w-]", "-", url)
     url = re.sub(r"-{2,}", "-", url)
     return url[:200]
+
+
+def _median(values: list[int]) -> float:
+    """Median of a non-empty list."""
+    s = sorted(values)
+    n = len(s)
+    mid = n // 2
+    if n % 2:
+        return float(s[mid])
+    return (s[mid - 1] + s[mid]) / 2
+
+
+def _trimmed_mean(values: list[int], frac: float = 0.10) -> tuple[float, int]:
+    """
+    Drop ceil(frac) of items from each end (by value), return (mean, kept_count).
+    Caller guarantees len(values) >= 5 so at least one item always survives.
+    """
+    s = sorted(values)
+    k = math.ceil(len(s) * frac)
+    trimmed = s[k: len(s) - k] or s  # safety: never empty
+    return sum(trimmed) / len(trimmed), len(trimmed)
 
 
 # Terms that — regardless of category — flag an item as non-PC-part junk.
@@ -136,13 +158,13 @@ def _is_blocked(name: str, category: str) -> bool:
 _VALID_SPEC_KEYS = frozenset({
     "brand", "socket", "vram", "ddr_type", "speed", "chipset",
     "wattage", "rating", "form_factor", "type", "aio_size",
-    "fan_size", "interface", "capacity",
+    "fan_size", "interface", "capacity", "model",
 })
 
 _CATEGORY_SPEC_KEYS: dict[str, list[str]] = {
-    "cpu":         ["brand", "socket"],
-    "gpu":         ["brand", "vram"],
-    "ram":         ["brand", "ddr_type", "speed"],
+    "cpu":         ["brand", "socket", "model"],
+    "gpu":         ["brand", "vram", "model"],
+    "ram":         ["brand", "ddr_type", "speed", "capacity"],
     "motherboard": ["brand", "socket", "chipset"],
     "psu":         ["brand", "wattage", "rating"],
     "case":        ["brand", "form_factor"],
@@ -374,6 +396,186 @@ class Database:
             ORDER BY pl.scraped_at
             """,
             (source_id, source),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Price trends (precomputed aggregate per model/spec per scrape date)
+    # ------------------------------------------------------------------
+
+    # Minimum listings in a bucket to use a trimmed mean; below this we fall
+    # back to a plain median (too few points to trim meaningfully).
+    _TREND_MIN_TRIM = 5
+    _TREND_TRIM_FRAC = 0.10
+
+    # Standard RAM speeds we track (one-off/overclock speeds with few listings
+    # are excluded to keep buckets meaningful). Keyed by DDR generation.
+    _RAM_STD_SPEEDS = {
+        "DDR4": {"2666", "3000", "3200", "3600"},
+        "DDR5": {"4800", "5200", "5600", "6000", "6400"},
+    }
+    # RAM capacities we track (separate buckets per size).
+    _RAM_TRACK_CAPS = {"16GB", "32GB"}
+
+    @classmethod
+    def _trend_group(cls, category: str, specs: Optional[dict]) -> Optional[tuple[str, str]]:
+        """
+        Map a part's category + specs to its trend (group_type, group_key),
+        or None if the part isn't trendable.
+          - gpu/cpu  -> ('model', <model>)              e.g. ('model', 'RTX 4070')
+          - ram      -> ('spec',  '<DDR>-<speed>-<cap>') e.g. ('spec', 'DDR4-3200-16GB')
+
+        RAM is gated to standard speeds (_RAM_STD_SPEEDS) and tracked capacities
+        (_RAM_TRACK_CAPS, i.e. 16GB/32GB) so each bucket holds genuinely
+        comparable kits; 8GB/64GB+ and one-off speeds are dropped.
+        """
+        if not specs:
+            return None
+        if category in ("gpu", "cpu"):
+            model = specs.get("model")
+            return ("model", model) if model else None
+        if category == "ram":
+            ddr = specs.get("ddr_type")
+            speed = specs.get("speed")
+            cap = specs.get("capacity")
+            if not (ddr and speed and cap):
+                return None
+            if cap not in cls._RAM_TRACK_CAPS:
+                return None
+            speed_num = re.sub(r"\D", "", speed)  # "3200MHz" -> "3200"
+            if speed_num not in cls._RAM_STD_SPEEDS.get(ddr, ()):
+                return None
+            return ("spec", f"{ddr}-{speed_num}-{cap}")
+        return None
+
+    def rebuild_price_trends(self) -> int:
+        """
+        Wipe and recompute the entire price_trends table from price_log.
+        One row per (category, group_type, group_key, scrape_date). Idempotent.
+        Returns the number of trend rows written.
+        """
+        # One price per (part, calendar date): if a part is scraped twice on the
+        # same day (e.g. a retry after a partial run), keep only its latest row
+        # so a single listing isn't double-counted in a date bucket.
+        rows = self._conn.execute(
+            """
+            SELECT p.category AS category,
+                   p.specs    AS specs,
+                   d.scrape_date AS scrape_date,
+                   d.price_pkr AS price
+            FROM (
+                SELECT part_id,
+                       substr(scraped_at, 1, 10) AS scrape_date,
+                       price_pkr,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY part_id, substr(scraped_at, 1, 10)
+                           ORDER BY scraped_at DESC
+                       ) AS rn
+                FROM price_log
+                WHERE price_pkr IS NOT NULL
+            ) d
+            JOIN parts p ON p.id = d.part_id
+            WHERE d.rn = 1
+            """
+        ).fetchall()
+
+        # Bucket: (category, group_type, group_key, date) -> [prices]
+        buckets: dict[tuple[str, str, str, str], list[int]] = {}
+        for r in rows:
+            try:
+                specs = json.loads(r["specs"]) if r["specs"] else None
+            except (json.JSONDecodeError, TypeError):
+                specs = None
+            grp = self._trend_group(r["category"], specs)
+            if grp is None:
+                continue
+            group_type, group_key = grp
+            key = (r["category"], group_type, group_key, r["scrape_date"])
+            buckets.setdefault(key, []).append(int(r["price"]))
+
+        records = []
+        for (category, group_type, group_key, date), prices in buckets.items():
+            n = len(prices)
+            if n >= self._TREND_MIN_TRIM:
+                center, used = _trimmed_mean(prices, self._TREND_TRIM_FRAC)
+                method = "trimmed_mean"
+            else:
+                # median uses 1 value (odd n) or the middle 2 (even n)
+                center, used = _median(prices), (1 if n % 2 else 2)
+                method = "median"
+            records.append((
+                category, group_type, group_key, date,
+                n, used, round(center), method, min(prices), max(prices),
+            ))
+
+        with self._conn:  # transaction
+            self._conn.execute("DELETE FROM price_trends")
+            self._conn.executemany(
+                """
+                INSERT INTO price_trends
+                    (category, group_type, group_key, scrape_date,
+                     sample_count, used_count, center_price, method, min_price, max_price)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                records,
+            )
+        return len(records)
+
+    @staticmethod
+    def _trend_group_type(category: str) -> str:
+        """The group_type a category's trends are stored under."""
+        return "spec" if category == "ram" else "model"
+
+    def get_price_trends(
+        self, category: str, group_key: Optional[str] = None,
+        group_type: Optional[str] = None,
+    ) -> list[dict]:
+        """
+        Trend series for a category. With group_key -> one group's time series;
+        without -> all groups in the category. Ordered by group then date.
+        group_type defaults to the category's axis (ram='spec', else 'model').
+        """
+        if group_type is None:
+            group_type = self._trend_group_type(category)
+        sql = """
+            SELECT group_key, scrape_date, center_price, method,
+                   min_price, max_price, sample_count, used_count
+            FROM price_trends
+            WHERE category = ? AND group_type = ?
+        """
+        params: list = [category, group_type]
+        if group_key is not None:
+            sql += " AND group_key = ?"
+            params.append(group_key)
+        sql += " ORDER BY group_key, scrape_date"
+        return [dict(r) for r in self._conn.execute(sql, params).fetchall()]
+
+    def list_trend_groups(
+        self, category: str, group_type: Optional[str] = None,
+    ) -> list[dict]:
+        """
+        Distinct trend groups in a category with their latest center_price and
+        most-recent sample_count, for a model/group selector. Latest = max date.
+        group_type defaults to the category's axis (ram='spec', else 'model').
+        """
+        if group_type is None:
+            group_type = self._trend_group_type(category)
+        rows = self._conn.execute(
+            """
+            SELECT t.group_key,
+                   t.center_price AS latest_price,
+                   t.sample_count
+            FROM price_trends t
+            JOIN (
+                SELECT group_key, MAX(scrape_date) AS d
+                FROM price_trends
+                WHERE category = ? AND group_type = ?
+                GROUP BY group_key
+            ) last ON last.group_key = t.group_key AND last.d = t.scrape_date
+            WHERE t.category = ? AND t.group_type = ?
+            ORDER BY t.group_key
+            """,
+            (category, group_type, category, group_type),
         ).fetchall()
         return [dict(r) for r in rows]
 

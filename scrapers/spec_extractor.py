@@ -112,6 +112,151 @@ def _extract_vram(name: str) -> Optional[str]:
     return None
 
 
+# ----------------------------------------------------------------------
+# GPU / CPU model extraction — STRICT curated allowlist
+# ----------------------------------------------------------------------
+# Only models in these sets get a `model` spec. The regexes pull a candidate
+# from the (messy) product name; the candidate is normalized to canonical form
+# and kept only if it's on the allowlist. Unlisted/obscure models -> no model
+# (excluded from trends). Lists are curated to the popular desktop parts that
+# matter in the Pakistani market (incl. older used-market gens). Extend as new
+# generations launch.
+
+# --- GPU allowlist (canonical form: "<FAMILY> <NUM><suffix>") ---
+_GPU_MODELS = frozenset({
+    # NVIDIA RTX 50 (Blackwell)
+    "RTX 5090", "RTX 5080", "RTX 5070 Ti", "RTX 5070", "RTX 5060 Ti", "RTX 5060",
+    # NVIDIA RTX 40 (Ada)
+    "RTX 4090", "RTX 4080 Super", "RTX 4080", "RTX 4070 Ti Super", "RTX 4070 Ti",
+    "RTX 4070 Super", "RTX 4070", "RTX 4060 Ti", "RTX 4060",
+    # NVIDIA RTX 30 (Ampere)
+    "RTX 3090 Ti", "RTX 3090", "RTX 3080 Ti", "RTX 3080", "RTX 3070 Ti", "RTX 3070",
+    "RTX 3060 Ti", "RTX 3060", "RTX 3050",
+    # NVIDIA RTX 20 (Turing)
+    "RTX 2080 Ti", "RTX 2080 Super", "RTX 2080", "RTX 2070 Super", "RTX 2070",
+    "RTX 2060 Super", "RTX 2060",
+    # NVIDIA GTX 16 (Turing, budget/used)
+    "GTX 1660 Ti", "GTX 1660 Super", "GTX 1660", "GTX 1650 Super", "GTX 1650", "GTX 1630",
+    # AMD RX 9000 (RDNA4)
+    "RX 9070 XT", "RX 9070 GRE", "RX 9070", "RX 9060 XT", "RX 9060",
+    # AMD RX 7000 (RDNA3)
+    "RX 7900 XTX", "RX 7900 XT", "RX 7900 GRE", "RX 7800 XT", "RX 7700 XT",
+    "RX 7600 XT", "RX 7600",
+    # AMD RX 6000 (RDNA2)
+    "RX 6950 XT", "RX 6900 XT", "RX 6800 XT", "RX 6800", "RX 6750 XT", "RX 6700 XT",
+    "RX 6650 XT", "RX 6600 XT", "RX 6600", "RX 6500 XT", "RX 6400",
+    # Intel Arc
+    "Arc B580", "Arc B570", "Arc A770", "Arc A750", "Arc A580", "Arc A380",
+})
+
+# NVIDIA GeForce: RTX/GTX + 4-digit number + optional Ti/Super (incl. "Ti Super").
+#   Handles glued forms ("3060Ti") and the trademark char ("RTX™ 4070").
+_GPU_NVIDIA_RE = re.compile(
+    r'\b(RTX|GTX)\s*™?\s*(\d{4})\s*(Ti\s*Super|Ti|Super)?',
+    re.IGNORECASE,
+)
+# AMD Radeon: RX + 4-digit number + optional XTX/XT/GRE.
+_GPU_AMD_RE = re.compile(r'\bRX\s*(\d{4})\s*(XTX|XT|GRE)?', re.IGNORECASE)
+# Intel Arc: "Arc A770", "Arc B580".
+_GPU_ARC_RE = re.compile(r'\bArc\s+([AB]\d{3})\b', re.IGNORECASE)
+
+
+def _norm_gpu_suffix(suffix: Optional[str]) -> str:
+    if not suffix:
+        return ""
+    s = re.sub(r'\s+', ' ', suffix.strip()).lower()
+    return {
+        "ti super": " Ti Super",
+        "ti": " Ti",
+        "super": " Super",
+        "xt": " XT",
+        "xtx": " XTX",
+        "gre": " GRE",
+    }.get(s, "")
+
+
+def _extract_gpu_model(name: str) -> Optional[str]:
+    """Return canonical GPU model if it's on the allowlist, else None."""
+    candidates = []
+
+    m = _GPU_AMD_RE.search(name)
+    if m:
+        candidates.append(f"RX {m.group(1)}{_norm_gpu_suffix(m.group(2))}")
+
+    m = _GPU_ARC_RE.search(name)
+    if m:
+        candidates.append(f"Arc {m.group(1).upper()}")
+
+    m = _GPU_NVIDIA_RE.search(name)
+    if m:
+        candidates.append(f"{m.group(1).upper()} {m.group(2)}{_norm_gpu_suffix(m.group(3))}")
+
+    for c in candidates:
+        if c in _GPU_MODELS:
+            return c
+    return None
+
+
+# --- CPU allowlist (canonical: "i<t>-<num><sfx>", "Ryzen <t> <num><sfx>", "Ultra <t> <num><sfx>") ---
+_CPU_MODELS = frozenset({
+    # AMD Ryzen 9000 (Zen 5)
+    "Ryzen 9 9950X3D", "Ryzen 9 9950X", "Ryzen 9 9900X3D", "Ryzen 9 9900X",
+    "Ryzen 7 9850X3D", "Ryzen 7 9800X3D", "Ryzen 7 9700X", "Ryzen 5 9600X", "Ryzen 5 9600",
+    # AMD Ryzen 7000 (Zen 4)
+    "Ryzen 9 7950X3D", "Ryzen 9 7950X", "Ryzen 9 7900X3D", "Ryzen 9 7900X", "Ryzen 9 7900",
+    "Ryzen 7 7800X3D", "Ryzen 7 7700X", "Ryzen 7 7700", "Ryzen 5 7600X", "Ryzen 5 7600",
+    "Ryzen 5 7500F",
+    # AMD Ryzen 5000 (Zen 3)
+    "Ryzen 9 5950X", "Ryzen 9 5900X", "Ryzen 7 5800X3D", "Ryzen 7 5800X", "Ryzen 7 5700X3D",
+    "Ryzen 7 5700X", "Ryzen 7 5700G", "Ryzen 5 5600X", "Ryzen 5 5600G", "Ryzen 5 5600",
+    "Ryzen 5 5500",
+    # AMD Ryzen 3000 (Zen 2)
+    "Ryzen 9 3900X", "Ryzen 7 3700X", "Ryzen 5 3600X", "Ryzen 5 3600", "Ryzen 5 3400G",
+    "Ryzen 3 3300X", "Ryzen 3 3100",
+    # Intel Core Ultra 200S (Arrow Lake)
+    "Ultra 9 285K", "Ultra 7 265K", "Ultra 7 265KF", "Ultra 5 245K", "Ultra 5 245KF",
+    # Intel 14th gen
+    "i9-14900K", "i9-14900KF", "i9-14900F", "i7-14700K", "i7-14700KF", "i7-14700F",
+    "i5-14600K", "i5-14600KF", "i5-14400F", "i3-14100F",
+    # Intel 13th gen
+    "i9-13900K", "i9-13900KF", "i9-13900F", "i7-13700K", "i7-13700KF", "i7-13700F",
+    "i5-13600K", "i5-13600KF", "i5-13400F", "i3-13100F",
+    # Intel 12th gen
+    "i9-12900K", "i9-12900KF", "i7-12700K", "i7-12700KF", "i7-12700F", "i5-12600K",
+    "i5-12600KF", "i5-12400F", "i3-12100F",
+})
+
+# Intel Core (legacy naming): i3/i5/i7/i9 + 4-5 digit number + optional letter suffix.
+#   Handles "i5-12400F", "i5 14600K", "Core i7-14700K".
+_CPU_INTEL_RE = re.compile(r'\bi([3579])[\s-]?(\d{4,5})([A-Z]{1,2})?\b', re.IGNORECASE)
+# Intel Core Ultra 200S: "Core Ultra 9 285K", "Ultra 5 245KF".
+_CPU_ULTRA_RE = re.compile(r'\bUltra\s+([579])\s+(\d{3})(KF|K)?\b', re.IGNORECASE)
+# AMD Ryzen: "Ryzen 5 5600X", "Ryzen 7 7800X3D", "Ryzen 9 9950X3D".
+_CPU_AMD_RE = re.compile(r'\bRyzen\s+([3579])\s+(\d{3,4})([A-Z0-9]{0,3})?\b', re.IGNORECASE)
+
+
+def _extract_cpu_model(name: str) -> Optional[str]:
+    """Return canonical CPU model if it's on the allowlist, else None."""
+    candidates = []
+
+    m = _CPU_ULTRA_RE.search(name)
+    if m:
+        candidates.append(f"Ultra {m.group(1)} {m.group(2)}{(m.group(3) or '').upper()}")
+
+    m = _CPU_INTEL_RE.search(name)
+    if m:
+        candidates.append(f"i{m.group(1)}-{m.group(2)}{(m.group(3) or '').upper()}")
+
+    m = _CPU_AMD_RE.search(name)
+    if m:
+        candidates.append(f"Ryzen {m.group(1)} {m.group(2)}{(m.group(3) or '').upper()}")
+
+    for c in candidates:
+        if c in _CPU_MODELS:
+            return c
+    return None
+
+
 _DDR_TYPE_RE = re.compile(r'\b(L?P?DDR[45]X?)\b', re.IGNORECASE)
 _RAM_SPEED_DDR_RE = re.compile(r'DDR[45]-?(\d{4,5})', re.IGNORECASE)
 _RAM_SPEED_MHZ_RE = re.compile(r'(\d{4,5})\s*(?:MHz|MT/s)', re.IGNORECASE)
@@ -131,6 +276,37 @@ def _extract_ram_speed(name: str) -> Optional[str]:
         speed = int(m.group(1))
         if 1600 <= speed <= 12000:
             return f"{speed}MHz"
+    return None
+
+
+# Kit notation: "2x8GB", "2 x 16GB", "16GBx2" -> total = count * per-stick.
+_RAM_KIT_RE = re.compile(r'(\d+)\s*x\s*(\d+)\s*GB', re.IGNORECASE)
+_RAM_KIT_REV_RE = re.compile(r'(\d+)\s*GB\s*x\s*(\d+)', re.IGNORECASE)
+# Plain total: first "<N>GB" token (after kit notation is handled).
+_RAM_CAP_RE = re.compile(r'\b(\d+)\s*GB\b', re.IGNORECASE)
+_VALID_RAM_CAP = {16, 32}
+
+
+def _extract_ram_capacity(name: str) -> Optional[str]:
+    """
+    Total kit capacity, restricted to the standard sizes we track (16GB, 32GB).
+    Prefers explicit kit math ("2x8GB" -> 16GB) over a bare "<N>GB" token.
+    Returns None for sizes we don't track (8GB, 64GB+) or unparseable names.
+    """
+    total = None
+    m = _RAM_KIT_RE.search(name)          # "2x8GB"
+    if m:
+        total = int(m.group(1)) * int(m.group(2))
+    if total is None:
+        m = _RAM_KIT_REV_RE.search(name)  # "16GBx2"
+        if m:
+            total = int(m.group(1)) * int(m.group(2))
+    if total is None:
+        m = _RAM_CAP_RE.search(name)      # bare "16GB"
+        if m:
+            total = int(m.group(1))
+    if total in _VALID_RAM_CAP:
+        return f"{total}GB"
     return None
 
 
@@ -259,11 +435,17 @@ def extract_specs(name: str, category: str) -> dict:
         s = _extract_socket(name)
         if s:
             specs["socket"] = s
+        m = _extract_cpu_model(name)
+        if m:
+            specs["model"] = m
 
     elif category == "gpu":
         v = _extract_vram(name)
         if v:
             specs["vram"] = v
+        m = _extract_gpu_model(name)
+        if m:
+            specs["model"] = m
 
     elif category == "ram":
         d = _extract_ddr_type(name)
@@ -272,6 +454,9 @@ def extract_specs(name: str, category: str) -> dict:
         sp = _extract_ram_speed(name)
         if sp:
             specs["speed"] = sp
+        cap = _extract_ram_capacity(name)
+        if cap:
+            specs["capacity"] = cap
 
     elif category == "motherboard":
         s = _extract_socket(name)

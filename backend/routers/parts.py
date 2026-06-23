@@ -52,6 +52,7 @@ def get_parts(
     offset:      int           = Query(0, ge=0),
     brand:       Optional[str] = Query(None),
     socket:      Optional[str] = Query(None),
+    model:       Optional[str] = Query(None),
     vram:        Optional[str] = Query(None),
     ddr_type:    Optional[str] = Query(None),
     speed:       Optional[str] = Query(None),
@@ -72,7 +73,7 @@ def get_parts(
         source = None
 
     raw_spec_filters = {
-        "brand": brand, "socket": socket, "vram": vram,
+        "brand": brand, "socket": socket, "model": model, "vram": vram,
         "ddr_type": ddr_type, "speed": speed, "chipset": chipset,
         "wattage": wattage, "rating": rating, "form_factor": form_factor,
         "type": cooling_type, "aio_size": aio_size, "fan_size": fan_size,

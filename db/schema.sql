@@ -69,3 +69,27 @@ CREATE TABLE IF NOT EXISTS prebuilts (
 
 CREATE INDEX IF NOT EXISTS idx_prebuilts_source    ON prebuilts(source);
 CREATE INDEX IF NOT EXISTS idx_prebuilts_price     ON prebuilts(price_pkr);
+
+-- Precomputed price trends — one row per (category, group, scrape_date).
+-- A "group" is either a model (gpu/cpu, e.g. "RTX 4070") or a spec bucket
+-- (e.g. ram "DDR4-3200"); group_type discriminates. Rebuilt after each scrape
+-- from price_log via rebuild_price_trends(). Denormalized rollup — no FK to
+-- parts, so a trend point survives even after its source listings go OOS.
+CREATE TABLE IF NOT EXISTS price_trends (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    category      TEXT    NOT NULL,          -- gpu | cpu | ram | ...
+    group_type    TEXT    NOT NULL,          -- 'model' | 'spec'
+    group_key     TEXT    NOT NULL,          -- "RTX 4070" | "Ryzen 5 5600X" | "DDR4-3200"
+    scrape_date   TEXT    NOT NULL,          -- YYYY-MM-DD (one snapshot bucket)
+    sample_count  INTEGER NOT NULL,          -- listings before trim
+    used_count    INTEGER NOT NULL,          -- listings the center value used
+    center_price  INTEGER NOT NULL,          -- trend-line value (trimmed mean or median)
+    method        TEXT    NOT NULL,          -- 'trimmed_mean' (n>=5) | 'median' (n<5)
+    min_price     INTEGER NOT NULL,          -- band low  (full pre-trim range)
+    max_price     INTEGER NOT NULL,          -- band high (full pre-trim range)
+    computed_at   TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    UNIQUE (category, group_type, group_key, scrape_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_trends_lookup
+    ON price_trends(category, group_type, group_key, scrape_date);

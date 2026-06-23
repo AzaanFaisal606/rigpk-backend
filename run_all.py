@@ -237,8 +237,10 @@ def main():
 
     with get_db(DB_PATH) as db:
         inserted = db.upsert_products(all_results)
+        trend_rows = db.rebuild_price_trends()
         s = db.stats()
         print(f"\nDB: {inserted} new price rows written to {DB_PATH}")
+        print(f"DB: {trend_rows} price-trend rows computed")
         print(f"DB: {s['total_parts']} total parts, {s['total_price_rows']} total price rows")
         print(f"\nBy category:")
         for cat, n in sorted(s["by_category"].items()):

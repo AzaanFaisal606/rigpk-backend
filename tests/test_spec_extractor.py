@@ -86,6 +86,27 @@ def test_ram_no_speed():
     result = extract_specs("Corsair Vengeance 8GB DDR4", "ram")
     assert "speed" not in result
 
+def test_ram_capacity_plain_16():
+    assert extract_specs("Apacer 16GB DDR4 3200MHz", "ram")["capacity"] == "16GB"
+
+def test_ram_capacity_kit_2x8():
+    # 2x8GB kit totals 16GB
+    assert extract_specs("Corsair Vengeance LPX 16GB 2x8GB DDR4 3200MHz", "ram")["capacity"] == "16GB"
+
+def test_ram_capacity_kit_2x16():
+    assert extract_specs("XPG Spectrix 32GB 2x16GB DDR4 3600MHz", "ram")["capacity"] == "32GB"
+
+def test_ram_capacity_kit_reversed():
+    # "16GBx2" notation totals 32GB
+    assert extract_specs("G.Skill 16GBx2 DDR5 6000MHz", "ram")["capacity"] == "32GB"
+
+def test_ram_capacity_8gb_excluded():
+    # 8GB not a tracked capacity
+    assert "capacity" not in extract_specs("Lexar 8GB DDR4-3200 UDIMM", "ram")
+
+def test_ram_capacity_64gb_excluded():
+    assert "capacity" not in extract_specs("Kingston Fury 64GB 2x32GB DDR5 6000", "ram")
+
 
 # ── Motherboard ──────────────────────────────────────────────────────────────
 
@@ -209,3 +230,76 @@ def test_ram_does_not_extract_vram():
 
 def test_empty_name():
     assert extract_specs("", "cpu") == {}
+
+
+# ── GPU model (strict allowlist) ─────────────────────────────────────────────
+
+def test_gpu_model_rtx_basic():
+    assert extract_specs("MSI GeForce RTX 5070 Gaming OC 12GB", "gpu")["model"] == "RTX 5070"
+
+def test_gpu_model_ti_super():
+    assert extract_specs("MSI RTX 4070 Ti Super 16GB", "gpu")["model"] == "RTX 4070 Ti Super"
+
+def test_gpu_model_glued_ti():
+    # "3060Ti" with no space must still resolve to "RTX 3060 Ti"
+    assert extract_specs("Gainward RTX 3060Ti Dual Fan", "gpu")["model"] == "RTX 3060 Ti"
+
+def test_gpu_model_trademark_char():
+    assert extract_specs("ASUS Dual GeForce RTX™ 4070 12GB", "gpu")["model"] == "RTX 4070"
+
+def test_gpu_model_amd_xt():
+    assert extract_specs("Sapphire Pulse RX 7800 XT 16GB", "gpu")["model"] == "RX 7800 XT"
+
+def test_gpu_model_amd_rdna4():
+    assert extract_specs("Sapphire PURE Radeon RX 9070 XT", "gpu")["model"] == "RX 9070 XT"
+
+def test_gpu_model_intel_arc():
+    assert extract_specs("Intel Arc B580 12GB", "gpu")["model"] == "Arc B580"
+
+def test_gpu_model_rtx20():
+    assert extract_specs("EVGA GeForce RTX 2080 Super", "gpu")["model"] == "RTX 2080 Super"
+
+def test_gpu_model_not_on_allowlist_rdna1():
+    # RX 5600 XT (RDNA1) deliberately excluded
+    assert "model" not in extract_specs("AMD YESTON Radeon RX 5600 XT 6GB", "gpu")
+
+def test_gpu_model_not_on_allowlist_workstation():
+    assert "model" not in extract_specs("LEADTEK Quadro RTX A5000 24GB", "gpu")
+
+def test_gpu_model_not_on_allowlist_entry():
+    assert "model" not in extract_specs("MSI GeForce GT 730 4GB", "gpu")
+
+
+# ── CPU model (strict allowlist) ─────────────────────────────────────────────
+
+def test_cpu_model_intel_dash():
+    assert extract_specs("Intel Core i5-12400F Desktop", "cpu")["model"] == "i5-12400F"
+
+def test_cpu_model_intel_space():
+    # "i5 14600K" (space, not dash) must normalize to "i5-14600K"
+    assert extract_specs("Intel i5 14600K Tray", "cpu")["model"] == "i5-14600K"
+
+def test_cpu_model_amd_x3d():
+    assert extract_specs("AMD Ryzen 7 7800X3D 8-Core", "cpu")["model"] == "Ryzen 7 7800X3D"
+
+def test_cpu_model_amd_plain():
+    assert extract_specs("AMD Ryzen 5 5600 Desktop", "cpu")["model"] == "Ryzen 5 5600"
+
+def test_cpu_model_intel_ultra():
+    assert extract_specs("Intel Core Ultra 9 285K", "cpu")["model"] == "Ultra 9 285K"
+
+def test_cpu_model_intel_ultra_kf():
+    assert extract_specs("Intel Core Ultra 5 245KF Processor", "cpu")["model"] == "Ultra 5 245KF"
+
+def test_cpu_model_not_on_allowlist_apu():
+    # Ryzen 5 8500G not on the curated list
+    assert "model" not in extract_specs("AMD Ryzen 5 8500G Desktop", "cpu")
+
+def test_cpu_model_not_on_allowlist_nonf():
+    # plain i3-12100 (non-F) excluded; only the -F variant is listed
+    assert "model" not in extract_specs("Intel Core i3-12100 Tray", "cpu")
+
+def test_cpu_socket_still_extracted_with_model():
+    r = extract_specs("AMD Ryzen 5 5600X AM4 Processor", "cpu")
+    assert r["model"] == "Ryzen 5 5600X"
+    assert r["socket"] == "AM4"
