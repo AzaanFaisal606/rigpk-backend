@@ -70,6 +70,22 @@ def _trimmed_mean(values: list[int], frac: float = 0.10) -> tuple[float, int]:
     return sum(trimmed) / len(trimmed), len(trimmed)
 
 
+def _trimmed_band(values: list[int], frac: float = 0.05) -> tuple[int, int]:
+    """
+    Robust (min, max) band: drop the most extreme listings from each end so a
+    mispriced outlier (data-entry error, junk SKU) doesn't blow out the range.
+    Buckets large enough to trim-mean (n>=5) always shed at least one item per
+    end (ceil), which catches lone outliers in small buckets too; tiny buckets
+    (n<5, shown as a median) keep their full range. Returns surviving low/high.
+    """
+    s = sorted(values)
+    if len(s) < 5:
+        return s[0], s[-1]
+    k = max(1, math.ceil(len(s) * frac))
+    kept = s[k: len(s) - k] or s  # safety: never empty
+    return kept[0], kept[-1]
+
+
 # Terms that — regardless of category — flag an item as non-PC-part junk.
 # Matched case-insensitively against the product name.
 _GLOBAL_BLOCKLIST: tuple[str, ...] = (
@@ -407,6 +423,10 @@ class Database:
     # back to a plain median (too few points to trim meaningfully).
     _TREND_MIN_TRIM = 5
     _TREND_TRIM_FRAC = 0.10
+    # Band (min/max) trim: drop the most extreme 5% each end so mispriced
+    # outlier listings don't blow out the displayed range. Center uses the
+    # 10% trim above; the band is wider (5%) to still show a real spread.
+    _TREND_BAND_FRAC = 0.05
 
     # Standard RAM speeds we track (one-off/overclock speeds with few listings
     # are excluded to keep buckets meaningful). Keyed by DDR generation.
@@ -503,9 +523,10 @@ class Database:
                 # median uses 1 value (odd n) or the middle 2 (even n)
                 center, used = _median(prices), (1 if n % 2 else 2)
                 method = "median"
+            band_lo, band_hi = _trimmed_band(prices, self._TREND_BAND_FRAC)
             records.append((
                 category, group_type, group_key, date,
-                n, used, round(center), method, min(prices), max(prices),
+                n, used, round(center), method, band_lo, band_hi,
             ))
 
         with self._conn:  # transaction
@@ -554,9 +575,11 @@ class Database:
         self, category: str, group_type: Optional[str] = None,
     ) -> list[dict]:
         """
-        Distinct trend groups in a category with their latest center_price and
-        most-recent sample_count, for a model/group selector. Latest = max date.
-        group_type defaults to the category's axis (ram='spec', else 'model').
+        Distinct trend groups in a category with their latest center_price,
+        latest min/max band and most-recent sample_count, plus a representative
+        thumbnail (one in-stock listing's image per group), for the trends page.
+        Latest = max date. group_type defaults to the category's axis
+        (ram='spec', else 'model').
         """
         if group_type is None:
             group_type = self._trend_group_type(category)
@@ -564,6 +587,8 @@ class Database:
             """
             SELECT t.group_key,
                    t.center_price AS latest_price,
+                   t.min_price,
+                   t.max_price,
                    t.sample_count
             FROM price_trends t
             JOIN (
@@ -577,7 +602,35 @@ class Database:
             """,
             (category, group_type, category, group_type),
         ).fetchall()
-        return [dict(r) for r in rows]
+        groups = [dict(r) for r in rows]
+        if group_type == "model":
+            self._attach_model_thumbnails(category, groups)
+        return groups
+
+    def _attach_model_thumbnails(self, category: str, groups: list[dict]) -> None:
+        """
+        Add a `thumbnail_url` to each model group: pick one current listing's
+        non-null thumbnail whose extracted specs.model matches the group_key.
+        Cheapest matching listing wins (most representative of the segment).
+        """
+        rows = self._conn.execute(
+            """
+            SELECT json_extract(p.specs, '$.model') AS model,
+                   p.thumbnail_url AS thumbnail_url,
+                   MIN(pl.price_pkr)               AS _min
+            FROM parts p
+            JOIN price_log pl ON pl.part_id = p.id
+            WHERE p.category = ?
+              AND pl.price_pkr IS NOT NULL
+              AND p.thumbnail_url IS NOT NULL
+              AND json_extract(p.specs, '$.model') IS NOT NULL
+            GROUP BY json_extract(p.specs, '$.model')
+            """,
+            (category,),
+        ).fetchall()
+        thumbs = {r["model"]: r["thumbnail_url"] for r in rows}
+        for g in groups:
+            g["thumbnail_url"] = thumbs.get(g["group_key"])
 
     def get_shared_build(self, code: str) -> Optional[dict]:
         """

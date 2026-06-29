@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from backend.routers.parts import router
 from backend.routers.builds import router as builds_router
 from backend.routers.prebuilts import router as prebuilts_router
+from backend.routers.trends import router as trends_router
 
 app = FastAPI(title="RigPK API")
 
@@ -24,3 +25,4 @@ app.add_middleware(
 app.include_router(router)
 app.include_router(builds_router)
 app.include_router(prebuilts_router)
+app.include_router(trends_router)

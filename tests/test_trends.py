@@ -78,8 +78,27 @@ def test_rebuild_groups_gpu_models(db):
     row = series[0]
     assert row["method"] == "trimmed_mean"
     assert row["sample_count"] == 6
-    assert row["min_price"] == 200000
-    assert row["max_price"] == 205000
+    # band is 5%-trimmed (ceil(6*.05)=1 dropped each end): 200000 and 205000 shed
+    assert row["min_price"] == 201000
+    assert row["max_price"] == 204000
+
+def test_band_trims_lone_outlier(db):
+    # 8 sane RTX 5080 listings + 1 absurd 9,999,999 typo -> band must not blow out
+    for i in range(8):
+        _seed(db, f"Gigabyte RTX 5080 v{i}", "gpu", {"2026-01-01": 500000 + i * 1000})
+    _seed(db, "Gigabyte RTX 5080 typo", "gpu", {"2026-01-01": 9999999})
+    db.rebuild_price_trends()
+    row = db.get_price_trends("gpu", "RTX 5080")[0]
+    assert row["sample_count"] == 9
+    assert row["max_price"] < 1000000  # 9,999,999 outlier trimmed off the band
+
+def test_small_bucket_band_untrimmed(db):
+    # n<5 (median bucket) keeps its full range — too few points to trim a band
+    for i, p in enumerate([100000, 110000, 130000]):
+        _seed(db, f"MSI RTX 5070 v{i}", "gpu", {"2026-01-01": p})
+    db.rebuild_price_trends()
+    row = db.get_price_trends("gpu", "RTX 5070")[0]
+    assert row["min_price"] == 100000 and row["max_price"] == 130000
 
 def test_rebuild_small_bucket_uses_median(db):
     # 3 listings -> below trim threshold -> median fallback
@@ -185,10 +204,14 @@ def test_same_day_rescrape_not_double_counted(db):
     db._conn.commit()
     db.rebuild_price_trends()
     row = db.get_price_trends("gpu", "RTX 5070")[0]
-    # 5 listings, not 6 — the same-day re-scrape collapses to its latest row
+    # 5 listings, not 6 — the same-day re-scrape collapses to its latest row.
+    # (If it had double-counted, sample_count would be 6.)
     assert row["sample_count"] == 5
-    # latest price for the re-scraped part is 999999 (kept over 100000)
-    assert row["max_price"] == 999999
+    # The re-scrape kept the latest price (999999, not 100000). With dedup it's
+    # one listing of 999999 among four 100000s; the 5% band trim sheds that lone
+    # high outlier, so the band stays at 100000 — proving the value isn't doubled
+    # AND that the band is outlier-robust.
+    assert row["max_price"] == 100000
 
 
 def test_get_price_trends_ram_default_group_type(db):

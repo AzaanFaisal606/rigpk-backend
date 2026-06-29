@@ -85,8 +85,8 @@ CREATE TABLE IF NOT EXISTS price_trends (
     used_count    INTEGER NOT NULL,          -- listings the center value used
     center_price  INTEGER NOT NULL,          -- trend-line value (trimmed mean or median)
     method        TEXT    NOT NULL,          -- 'trimmed_mean' (n>=5) | 'median' (n<5)
-    min_price     INTEGER NOT NULL,          -- band low  (full pre-trim range)
-    max_price     INTEGER NOT NULL,          -- band high (full pre-trim range)
+    min_price     INTEGER NOT NULL,          -- band low  (5%-trimmed range; n<5 full)
+    max_price     INTEGER NOT NULL,          -- band high (5%-trimmed range; n<5 full)
     computed_at   TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     UNIQUE (category, group_type, group_key, scrape_date)
 );
