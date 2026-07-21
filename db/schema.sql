@@ -97,3 +97,26 @@ CREATE TABLE IF NOT EXISTS price_trends (
 
 CREATE INDEX IF NOT EXISTS idx_trends_lookup
     ON price_trends(category, group_type, group_key, scrape_date);
+
+-- One row per scraper run per source. Written by the orchestrators whether the
+-- run succeeded or not, so "this retailer's data is stale" is a recorded fact
+-- rather than something inferred from row counts. The landing page reads the
+-- latest row per source to decide whether to show the STALE ribbon.
+--
+-- ok = 1 means the run is trusted and the freshness sweep ran. ok = 0 means the
+-- source could not be scraped (0 products, exception, or circuit breaker) — the
+-- sweep was skipped and its existing rows were left active but are now stale.
+CREATE TABLE IF NOT EXISTS scrape_runs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    source      TEXT    NOT NULL,          -- e.g. "amdhouse.pk"
+    kind        TEXT    NOT NULL DEFAULT 'parts',   -- 'parts' | 'prebuilt'
+    started_at  TEXT    NOT NULL,          -- ISO 8601 UTC
+    finished_at TEXT    NOT NULL,          -- ISO 8601 UTC
+    products    INTEGER NOT NULL DEFAULT 0,-- items the scraper returned
+    ok          INTEGER NOT NULL DEFAULT 0,-- 1 = trusted run, sweep applied
+    swept       INTEGER NOT NULL DEFAULT 0,-- rows marked inactive by the sweep
+    error       TEXT                        -- failure summary when ok = 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_scrape_runs_source
+    ON scrape_runs(source, kind, finished_at);

@@ -13,15 +13,18 @@ import os
 ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, ROOT)
 
-from scrapers.prebuilts.zestro.scraper import ZestroScraper
-from scrapers.prebuilts.redtech.scraper import RedTechScraper
-from scrapers.prebuilts.techmatched.scraper import TechMatchedScraper
+from datetime import datetime, timezone
+
+from scrapers.base_scraper import blocked_hosts, reset_host_state
+from scrapers.prebuilts.zestro.scraper import ZestroScraper, SOURCE as ZESTRO_SOURCE
+from scrapers.prebuilts.redtech.scraper import RedTechScraper, SOURCE as REDTECH_SOURCE
+from scrapers.prebuilts.techmatched.scraper import TechMatchedScraper, SOURCE as TM_SOURCE
 from db.database import backup_db, get_db
 
 SCRAPERS = {
-    "zestro":      ZestroScraper,
-    "redtech":     RedTechScraper,
-    "techmatched": TechMatchedScraper,
+    "zestro":      (ZESTRO_SOURCE,  ZestroScraper),
+    "redtech":     (REDTECH_SOURCE, RedTechScraper),
+    "techmatched": (TM_SOURCE,      TechMatchedScraper),
 }
 
 
@@ -41,30 +44,52 @@ def main():
     if backup:
         print(f"DB: backup written to {backup}")
 
-    for name, cls in targets.items():
+    reset_host_state()
+
+    for name, (source, cls) in targets.items():
         print(f"\n=== {name.upper()} ===")
+        started = datetime.now(timezone.utc).isoformat()
+        blocked_before = blocked_hosts()
+        results: list[dict] = []
+        error: str | None = None
         try:
             scraper = cls()
             results = scraper.scrape_all()
             print(f"  => {len(results)} prebuilts scraped")
-            if results:
-                with get_db(db_path) as db:
-                    n = db.upsert_prebuilts(results)
-                    # Only sweep sources that actually returned products, so a
-                    # blocked scrape can't hide a live retailer's prebuilts.
-                    for src in {p["source"] for p in results}:
-                        gone = db.deactivate_unseen_prebuilts(src)
-                        if gone:
-                            print(f"  => {src}: {gone} prebuilts marked inactive")
-                print(f"  => {n} rows written to DB")
-                total_scraped += len(results)
-                total_written += n
-            else:
-                print(f"  WARNING: 0 prebuilts from {name}")
-                print(f"  SKIP sweep for {name} — keeping existing rows")
         except Exception as e:
-            print(f"  ERROR scraping {name}: {e}")
-            print(f"  SKIP sweep for {name} — keeping existing rows")
+            error = f"{type(e).__name__}: {e}"
+            print(f"  ERROR scraping {name}: {error}")
+
+        newly_blocked = blocked_hosts() - blocked_before
+        if newly_blocked:
+            error = error or f"host blocked mid-run: {', '.join(sorted(newly_blocked))}"
+            print(f"  BLOCKED: {', '.join(sorted(newly_blocked))} stopped responding")
+
+        # Same rule as the parts orchestrator: sweep only a run we trust, so a
+        # blocked host keeps its existing prebuilts instead of losing them.
+        ok = bool(results) and error is None
+        if not ok and not results and error is None:
+            error = "returned 0 prebuilts"
+            print(f"  WARNING: 0 prebuilts from {name}")
+        if not ok:
+            print(f"  SKIP sweep for {name} — keeping existing rows (marked stale)")
+
+        n = swept = 0
+        with get_db(db_path) as db:
+            if results:
+                n = db.upsert_prebuilts(results)
+                print(f"  => {n} rows written to DB")
+            if ok:
+                swept = db.deactivate_unseen_prebuilts(source)
+                if swept:
+                    print(f"  => {source}: {swept} prebuilts marked inactive")
+            db.record_scrape_run(
+                source, kind="prebuilt", started_at=started,
+                products=len(results), ok=ok, swept=swept, error=error,
+            )
+
+        total_scraped += len(results)
+        total_written += n
 
     if total_scraped == 0:
         print("\nNo prebuilts scraped.")

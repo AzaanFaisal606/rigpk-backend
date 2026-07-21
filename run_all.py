@@ -16,8 +16,11 @@ import subprocess
 import sys
 import time
 from collections import Counter
+from datetime import datetime, timezone
+from pathlib import Path
 
 from db.database import backup_db, get_db
+from scrapers.base_scraper import blocked_hosts, reset_host_state
 from scrapers.czone.all_scraper import CzoneAllScraper, CATEGORIES as CZONE_CATS, BASE as CZONE_BASE
 from scrapers.zahcomputers.scraper import ZahComputersScraper, CATEGORIES as ZAH_CATS, BASE as ZAH_BASE
 from scrapers.amdhouse.scraper import AmdHouseScraper, CATEGORIES as AMD_CATS, BASE as AMD_BASE
@@ -28,7 +31,10 @@ from scrapers.pakbyte.scraper import PakByteScraper, CATEGORIES as PB_CATS, BASE
 from scrapers.redtech.scraper import RedTechScraper, CATEGORIES as RT_CATS, BASE as RT_BASE
 from scrapers.techmatched.scraper import TechMatchedScraper, CATEGORIES as TM_CATS, BASE as TM_BASE
 
-DB_PATH = "data/ppc.db"
+# Absolute, not "data/ppc.db": a cron job or CI runner invoking this from
+# another directory would otherwise silently create and populate an empty DB
+# next to whatever its cwd happened to be.
+DB_PATH = str(Path(__file__).resolve().parent / "data" / "ppc.db")
 
 
 def run_czone() -> list[dict]:
@@ -210,31 +216,58 @@ def main():
         sys.exit(1)
 
     all_results: list[dict] = []
-    # Sources whose scrape actually produced products this run. Only these get
-    # swept — a source that returned 0 (or raised) keeps its existing rows, so
-    # a transient block (e.g. HTTP 429) can't hide a live retailer's catalogue.
-    ok_sources: set[str] = set()
+    # One entry per source attempted, recorded to scrape_runs afterwards.
+    # `ok` decides two things at once: whether the freshness sweep runs, and
+    # whether the retailer shows a STALE ribbon on the landing page.
+    runs: list[dict] = []
     t0 = time.time()
+    reset_host_state()
 
     for key, (label, fn) in to_run.items():
         print(f"\n{'='*60}")
         print(f"Running: {label}")
         print("="*60)
+        started = datetime.now(timezone.utc).isoformat()
+        blocked_before = blocked_hosts()
+        results: list[dict] = []
+        error: str | None = None
         try:
             results = fn()
             print(f"\n  => {len(results)} products from {label}")
-            if not results:
-                print(f"  WARNING: 0 products from {label} — scraper may have failed silently")
-                print(f"  SKIP sweep for {label} — keeping existing rows")
-            else:
-                ok_sources.update(p["source"] for p in results)
-            all_results.extend(results)
         except Exception as e:
-            print(f"  SCRAPER FAILED: {e}")
-            print(f"  SKIP sweep for {label} — keeping existing rows")
+            error = f"{type(e).__name__}: {e}"
+            print(f"  SCRAPER FAILED: {error}")
+
+        newly_blocked = blocked_hosts() - blocked_before
+        if newly_blocked:
+            error = error or f"host blocked mid-run: {', '.join(sorted(newly_blocked))}"
+            print(f"  BLOCKED: {', '.join(sorted(newly_blocked))} stopped responding")
+
+        # A run is trusted only if it finished cleanly AND returned something.
+        # Partial data from a blocked host is still upserted (fresh prices are
+        # worth keeping) but must not sweep — we can't tell "delisted" from
+        # "never reached" on a host that cut us off.
+        ok = bool(results) and error is None
+        if not ok:
+            if not results and error is None:
+                error = "returned 0 products"
+                print(f"  WARNING: 0 products from {label} — scraper may have failed silently")
+            print(f"  SKIP sweep for {label} — keeping existing rows (marked stale)")
+
+        runs.append({
+            "source": label, "started": started, "products": len(results),
+            "ok": ok, "error": error,
+        })
+        all_results.extend(results)
 
     if not all_results:
         print("\nNo products scraped across any site.")
+        with get_db(DB_PATH) as db:
+            for r in runs:
+                db.record_scrape_run(
+                    r["source"], kind="parts", started_at=r["started"],
+                    products=r["products"], ok=False, swept=0, error=r["error"],
+                )
         sys.exit(1)
 
     print(f"\n{'='*60}")
@@ -251,13 +284,23 @@ def main():
         inserted = db.upsert_products(all_results)
 
         # Per-retailer freshness sweep: parts not seen in this run go inactive
-        # (hidden from the site) but keep their rows and price history.
+        # (hidden from the site) but keep their rows and price history. Sweeping
+        # is whole-source on purpose — a retailer's listing should be entirely
+        # from one run, never a mix of this run's rows and older leftovers.
         deactivated = 0
-        for src in sorted(ok_sources):
-            n = db.deactivate_unseen_parts(src)
-            deactivated += n
-            if n:
-                print(f"DB: {src} — {n} parts marked inactive (not seen this run)")
+        for r in runs:
+            swept = db.deactivate_unseen_parts(r["source"]) if r["ok"] else 0
+            deactivated += swept
+            if swept:
+                print(f"DB: {r['source']} — {swept} parts marked inactive (not seen this run)")
+            db.record_scrape_run(
+                r["source"], kind="parts", started_at=r["started"],
+                products=r["products"], ok=r["ok"], swept=swept, error=r["error"],
+            )
+
+        stale = [r["source"] for r in runs if not r["ok"]]
+        if stale:
+            print(f"DB: marked stale — {', '.join(stale)}")
 
         trend_rows = db.rebuild_price_trends()
         s = db.stats()

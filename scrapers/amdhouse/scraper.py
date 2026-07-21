@@ -22,17 +22,28 @@ SOURCE = "amdhouse.pk"
 BASE = "https://amdhouse.pk"
 PAGE_DELAY = 1.2
 
+# amdhouse splits its catalogue into flat sibling categories rather than a
+# parent/child tree — "intel-motherboards" is not under "motherboards", and the
+# two share no products. Several of ours must therefore map many slugs to one
+# category. Slugs verified live 2026-07-21; `_find_valid_categories()` skips any
+# that 404, so a retired slug costs one request, not a broken scrape.
 CATEGORIES: list[tuple[str, str]] = [
-    ("graphics-cards", "gpu"),
-    ("processors",     "cpu"),
-    ("motherboards",   "motherboard"),
-    ("ram",            "ram"),
-    ("ssd",            "ssd"),
-    ("hdd",            "hdd"),
-    ("power-supply",   "psu"),
-    ("casing",         "case"),
-    ("cooling",        "cooling"),
-    ("monitors",       "monitor"),
+    ("graphics-cards",          "gpu"),
+    ("itx-graphics-cards",      "gpu"),
+    ("processors",              "cpu"),
+    ("intel-processors",        "cpu"),
+    ("motherboards",            "motherboard"),
+    ("intel-motherboards",      "motherboard"),
+    ("itx-motherboards",        "motherboard"),
+    ("ram",                     "ram"),
+    ("storage-devices",         "ssd"),      # covers SSD + HDD
+    ("pc-power-supplies",       "psu"),
+    ("itx-psu",                 "psu"),
+    ("pc-cases",                "case"),
+    ("itx-pc-cases",            "case"),
+    ("cpu-cooler",              "cooling"),
+    ("low-profile-cpu-coolers", "cooling"),
+    ("monitors",                "monitor"),
 ]
 
 

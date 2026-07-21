@@ -160,6 +160,12 @@ _MIN_PRICE: dict[str, int] = {
     "cooling":      500,
 }
 
+# How many of the most recent scrape dates a trend series shows. Scrape dates
+# are irregular, so this is "the last N scrapes", not a time window. At ~300px
+# of sparkline the points and their hover targets get unusable past a handful.
+# Temporary ceiling until the trends page grows a proper range filter.
+_TREND_MAX_DATES = 5
+
 
 def _is_blocked(name: str, category: str) -> bool:
     lower = name.lower()
@@ -329,6 +335,85 @@ class Database:
                 [source, *seen],
             )
         return cur.rowcount
+
+    # ------------------------------------------------------------------
+    # Scrape run log
+    # ------------------------------------------------------------------
+
+    def record_scrape_run(
+        self,
+        source: str,
+        *,
+        kind: str = "parts",
+        started_at: str,
+        finished_at: str | None = None,
+        products: int = 0,
+        ok: bool = False,
+        swept: int = 0,
+        error: str | None = None,
+    ) -> None:
+        """
+        Log the outcome of one source's scrape. Called for failures too — a
+        missing row and a failed row mean different things, and the landing
+        page's STALE ribbon is driven by the failed ones.
+        """
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO scrape_runs
+                    (source, kind, started_at, finished_at, products, ok, swept, error)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    source,
+                    kind,
+                    started_at,
+                    finished_at or datetime.now(timezone.utc).isoformat(),
+                    products,
+                    1 if ok else 0,
+                    swept,
+                    error,
+                ),
+            )
+
+    def source_health(self, kind: str = "parts") -> dict[str, dict]:
+        """
+        Latest scrape outcome per source, for the landing-page freshness ribbon.
+
+        `stale` is true when the most recent run for that source failed — its
+        listings are the ones from some earlier run and nothing swept them.
+        A source with no recorded runs at all is reported as not stale: we have
+        no evidence either way, and flagging it would be a guess.
+        """
+        latest = self._conn.execute(
+            """
+            SELECT source, ok, products, finished_at, error
+            FROM scrape_runs r
+            WHERE kind = ?
+              AND id = (SELECT MAX(id) FROM scrape_runs s
+                        WHERE s.source = r.source AND s.kind = r.kind)
+            """,
+            (kind,),
+        ).fetchall()
+        successes = self._conn.execute(
+            """
+            SELECT source, MAX(finished_at) AS at
+            FROM scrape_runs WHERE kind = ? AND ok = 1 GROUP BY source
+            """,
+            (kind,),
+        ).fetchall()
+        last_ok = {r["source"]: r["at"] for r in successes}
+
+        return {
+            r["source"]: {
+                "stale": not r["ok"],
+                "last_run_at": r["finished_at"],
+                "last_success_at": last_ok.get(r["source"]),
+                "last_products": r["products"],
+                "last_error": r["error"],
+            }
+            for r in latest
+        }
 
     def create_shared_build(self, build: dict) -> str:
         """
@@ -614,11 +699,16 @@ class Database:
     def get_price_trends(
         self, category: str, group_key: Optional[str] = None,
         group_type: Optional[str] = None,
+        max_dates: Optional[int] = _TREND_MAX_DATES,
     ) -> list[dict]:
         """
         Trend series for a category. With group_key -> one group's time series;
         without -> all groups in the category. Ordered by group then date.
         group_type defaults to the category's axis (ram='spec', else 'model').
+
+        `max_dates` keeps only the N most recent scrape dates in the category.
+        The cut is per-category, not per-group, so every group on the page spans
+        the same x-axis. Pass None for the full history.
         """
         if group_type is None:
             group_type = self._trend_group_type(category)
@@ -632,6 +722,15 @@ class Database:
         if group_key is not None:
             sql += " AND group_key = ?"
             params.append(group_key)
+        if max_dates is not None:
+            sql += """
+              AND scrape_date IN (
+                    SELECT DISTINCT scrape_date FROM price_trends
+                    WHERE category = ? AND group_type = ?
+                    ORDER BY scrape_date DESC LIMIT ?
+              )
+            """
+            params += [category, group_type, max_dates]
         sql += " ORDER BY group_key, scrape_date"
         return [dict(r) for r in self._conn.execute(sql, params).fetchall()]
 
@@ -915,6 +1014,7 @@ class Database:
             "total_price_rows": price_rows,
             "by_source": {r["source"]: r["n"] for r in by_source},
             "by_category": {r["category"]: r["n"] for r in by_cat},
+            "sources": self.source_health("parts"),
         }
 
     def close(self):

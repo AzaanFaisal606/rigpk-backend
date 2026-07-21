@@ -73,6 +73,9 @@ def list_trend_groups(category: str = Query(...)):
                 used_count=r["used_count"],
             )
         )
+    # Series are capped to the most recent scrapes (db._TREND_MAX_DATES), so a
+    # model that hasn't been listed since before that window has no points left.
+    # Drop it rather than render a row with a price and an empty chart.
     out = [
         TrendGroup(
             group_key=g["group_key"],
@@ -81,9 +84,10 @@ def list_trend_groups(category: str = Query(...)):
             max_price=g["max_price"],
             sample_count=g["sample_count"],
             thumbnail_url=g.get("thumbnail_url"),
-            series=by_group.get(g["group_key"], []),
+            series=by_group[g["group_key"]],
         )
         for g in groups
+        if by_group.get(g["group_key"])
     ]
     return TrendGroupsResponse(category=category, groups=out)
 

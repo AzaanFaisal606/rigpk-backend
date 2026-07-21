@@ -106,7 +106,7 @@ class JunaidTechScraper(BaseScraper):
             API,
             data=body,
             headers={
-                "User-Agent": "Mozilla/5.0",
+                "User-Agent": self.USER_AGENT,
                 "Accept": "application/json",
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {token}",

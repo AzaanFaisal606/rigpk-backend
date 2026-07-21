@@ -235,3 +235,67 @@ def test_median_even_used_count(db):
     assert row["method"] == "median"
     assert row["sample_count"] == 4
     assert row["used_count"] == 2
+
+
+# --- recent-scrapes window -------------------------------------------------
+
+_EIGHT_DATES = [f"2026-0{m}-01" for m in range(1, 9)]
+
+
+def _seed_many_dates(db, n_parts=6):
+    """n_parts RTX 4070 listings priced across 8 scrape dates."""
+    for i in range(n_parts):
+        _seed(db, f"MSI RTX 4070 {i}", "gpu",
+              {d: 200000 + 1000 * j for j, d in enumerate(_EIGHT_DATES)})
+
+
+def test_series_limited_to_last_five_scrapes(db):
+    _seed_many_dates(db)
+    db.rebuild_price_trends()
+    dates = [r["scrape_date"] for r in db.get_price_trends("gpu", "RTX 4070")]
+    assert dates == _EIGHT_DATES[-5:]
+
+
+def test_series_window_is_opt_out(db):
+    """The full history is still there — the cut is a read-time view."""
+    _seed_many_dates(db)
+    db.rebuild_price_trends()
+    dates = [r["scrape_date"] for r in db.get_price_trends("gpu", "RTX 4070", max_dates=None)]
+    assert dates == _EIGHT_DATES
+
+
+def test_series_window_respects_explicit_size(db):
+    _seed_many_dates(db)
+    db.rebuild_price_trends()
+    dates = [r["scrape_date"] for r in db.get_price_trends("gpu", "RTX 4070", max_dates=2)]
+    assert dates == _EIGHT_DATES[-2:]
+
+
+def test_fewer_scrapes_than_window_returns_all(db):
+    _seed(db, "MSI RTX 4070 a", "gpu", {"2026-01-01": 210000, "2026-02-01": 205000})
+    for i in range(5):
+        _seed(db, f"MSI RTX 4070 b{i}", "gpu", {"2026-01-01": 210000, "2026-02-01": 205000})
+    db.rebuild_price_trends()
+    dates = [r["scrape_date"] for r in db.get_price_trends("gpu", "RTX 4070")]
+    assert dates == ["2026-01-01", "2026-02-01"]
+
+
+def test_window_is_per_category_so_groups_share_an_axis(db):
+    """
+    A group missing from the newest scrapes must not pull older dates in to
+    fill its five — every series on the page has to sit on one x-axis.
+    """
+    _seed_many_dates(db)  # RTX 4070 across all 8 dates
+    for i in range(6):    # RTX 4060 only in the first three
+        _seed(db, f"MSI RTX 4060 {i}", "gpu", dict.fromkeys(_EIGHT_DATES[:3], 90000))
+    db.rebuild_price_trends()
+
+    rows = db.get_price_trends("gpu")
+    by_group: dict[str, list[str]] = {}
+    for r in rows:
+        by_group.setdefault(r["group_key"], []).append(r["scrape_date"])
+
+    assert by_group["RTX 4070"] == _EIGHT_DATES[-5:]
+    # Every one of the 4060's dates falls outside the window, so it contributes
+    # no points at all rather than back-filling with older ones.
+    assert "RTX 4060" not in by_group
