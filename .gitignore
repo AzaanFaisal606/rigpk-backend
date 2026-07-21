@@ -67,3 +67,6 @@ PPC.pre-filter-backup/
 # local DB backups (manual snapshots before risky operations)
 /data/*.bak*
 /data/*.testbak
+
+# Scraper run logs
+logs/

@@ -23,6 +23,8 @@ CREATE TABLE IF NOT EXISTS parts (
     url           TEXT    NOT NULL,
     thumbnail_url TEXT,                      -- product image URL (may be NULL)
     specs         TEXT    DEFAULT NULL,      -- JSON dict e.g. {"brand":"AMD","socket":"AM5"}
+    is_active     INTEGER NOT NULL DEFAULT 1, -- 0 = not seen in last successful scrape of its source
+    last_seen_at  TEXT    DEFAULT NULL,       -- ISO 8601 UTC of the last scrape that saw this part
     created_at    TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at    TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     UNIQUE (source, source_id)
@@ -62,6 +64,8 @@ CREATE TABLE IF NOT EXISTS prebuilts (
     price_pkr     INTEGER,                   -- NULL = price hidden / out of stock
     components    TEXT    DEFAULT NULL,      -- JSON: {"cpu":..., "gpu":..., "ram":..., ...}
     scraped_at    TEXT    NOT NULL,
+    is_active     INTEGER NOT NULL DEFAULT 1, -- 0 = not seen in last successful scrape of its source
+    last_seen_at  TEXT    DEFAULT NULL,       -- ISO 8601 UTC of the last scrape that saw this prebuilt
     created_at    TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at    TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     UNIQUE (source, source_id)

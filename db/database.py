@@ -32,6 +32,7 @@ import re
 import sqlite3
 import secrets
 import string
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 import json
@@ -202,7 +203,34 @@ class Database:
     def _apply_schema(self):
         with open(_SCHEMA, encoding="utf-8") as f:
             self._conn.executescript(f.read())
+        self._migrate()
         self._conn.commit()
+
+    def _migrate(self):
+        """
+        Idempotent column adds for DBs created before a column existed.
+        schema.sql uses CREATE TABLE IF NOT EXISTS, so it never alters an
+        existing table — new columns must be added here.
+        """
+        for table in ("parts", "prebuilts"):
+            cols = {
+                r["name"]
+                for r in self._conn.execute(f"PRAGMA table_info({table})").fetchall()
+            }
+            if "is_active" not in cols:
+                self._conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1"
+                )
+            if "last_seen_at" not in cols:
+                self._conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN last_seen_at TEXT DEFAULT NULL"
+                )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_parts_active ON parts(is_active)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_prebuilts_active ON prebuilts(is_active)"
+        )
 
     # ------------------------------------------------------------------
     # Write
@@ -215,6 +243,7 @@ class Database:
         """
         inserted = 0
         skipped = 0
+        seen_ids: dict[str, set[int]] = {}
         cur = self._conn.cursor()
         for p in products:
             if not p.get("category"):
@@ -238,19 +267,24 @@ class Database:
 
             row = cur.execute(
                 """
-                INSERT INTO parts (source, source_id, name, category, url, thumbnail_url, specs)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO parts (source, source_id, name, category, url, thumbnail_url, specs,
+                                   is_active, last_seen_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)
                 ON CONFLICT(source, source_id) DO UPDATE SET
                     name          = excluded.name,
                     category      = excluded.category,
                     thumbnail_url = COALESCE(excluded.thumbnail_url, parts.thumbnail_url),
                     specs         = excluded.specs,
+                    is_active     = 1,
+                    last_seen_at  = excluded.last_seen_at,
                     updated_at    = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
                 RETURNING id
                 """,
-                (p["source"], source_id, p["name"], p["category"], p["url"], thumbnail, specs_json),
+                (p["source"], source_id, p["name"], p["category"], p["url"], thumbnail, specs_json,
+                 p["scraped_at"]),
             ).fetchone()
             part_id = row["id"]
+            seen_ids.setdefault(p["source"], set()).add(part_id)
 
             try:
                 cur.execute(
@@ -265,7 +299,36 @@ class Database:
                 pass
 
         self._conn.commit()
+        self._last_seen_ids = seen_ids
         return inserted
+
+    def deactivate_unseen_parts(self, source: str) -> int:
+        """
+        Mark every part of `source` that the most recent upsert_products() call
+        did NOT see as inactive (is_active = 0). Inactive parts keep their rows
+        and full price history — they are only hidden from the site listings,
+        and flip back to active if the product reappears in a later scrape.
+
+        Caller must gate this on a successful scrape: a source that returned 0
+        products (or raised) must NOT be swept, or a transient block would hide
+        its entire catalogue.
+
+        Returns the number of parts newly marked inactive.
+        """
+        seen = getattr(self, "_last_seen_ids", {}).get(source, set())
+        if not seen:
+            return 0
+        placeholders = ",".join("?" * len(seen))
+        with self._conn:
+            cur = self._conn.execute(
+                f"""
+                UPDATE parts SET is_active = 0,
+                                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                WHERE source = ? AND is_active = 1 AND id NOT IN ({placeholders})
+                """,
+                [source, *seen],
+            )
+        return cur.rowcount
 
     def create_shared_build(self, build: dict) -> str:
         """
@@ -316,7 +379,7 @@ class Database:
         Items have the latest price per part. NULL-price rows excluded.
         specs_filter: e.g. {"brand": "AMD", "socket": "AM5"}
         """
-        conditions: list[str] = ["pl.price_pkr IS NOT NULL"]
+        conditions: list[str] = ["pl.price_pkr IS NOT NULL", "p.is_active = 1"]
         params: list = []
 
         if category:
@@ -391,6 +454,7 @@ class Database:
                 SELECT DISTINCT json_extract(specs, ?) AS val
                 FROM parts
                 WHERE category = ?
+                  AND is_active = 1
                   AND json_extract(specs, ?) IS NOT NULL
                 ORDER BY val
                 """,
@@ -703,31 +767,58 @@ class Database:
         Returns number of rows upserted.
         """
         upserted = 0
+        seen_ids: dict[str, set[int]] = {}
         cur = self._conn.cursor()
         for p in prebuilts:
             source_id = _slug(p["url"])
             components_json = json.dumps(p["components"], ensure_ascii=False) if p.get("components") else None
-            cur.execute(
+            row = cur.execute(
                 """
-                INSERT INTO prebuilts (source, source_id, name, url, thumbnail_url, price_pkr, components, scraped_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO prebuilts (source, source_id, name, url, thumbnail_url, price_pkr, components, scraped_at,
+                                       is_active, last_seen_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
                 ON CONFLICT(source, source_id) DO UPDATE SET
                     name          = excluded.name,
                     thumbnail_url = COALESCE(excluded.thumbnail_url, prebuilts.thumbnail_url),
                     price_pkr     = excluded.price_pkr,
                     components    = excluded.components,
                     scraped_at    = excluded.scraped_at,
+                    is_active     = 1,
+                    last_seen_at  = excluded.last_seen_at,
                     updated_at    = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                RETURNING id
                 """,
                 (
                     p["source"], source_id, p["name"], p["url"],
                     p.get("thumbnail_url"), p.get("price_pkr"),
-                    components_json, p["scraped_at"],
+                    components_json, p["scraped_at"], p["scraped_at"],
                 ),
-            )
+            ).fetchone()
+            seen_ids.setdefault(p["source"], set()).add(row["id"])
             upserted += 1
         self._conn.commit()
+        self._last_seen_prebuilt_ids = seen_ids
         return upserted
+
+    def deactivate_unseen_prebuilts(self, source: str) -> int:
+        """
+        Prebuilt equivalent of deactivate_unseen_parts(). Same gating rule:
+        only call after a scrape that actually returned products.
+        """
+        seen = getattr(self, "_last_seen_prebuilt_ids", {}).get(source, set())
+        if not seen:
+            return 0
+        placeholders = ",".join("?" * len(seen))
+        with self._conn:
+            cur = self._conn.execute(
+                f"""
+                UPDATE prebuilts SET is_active = 0,
+                                     updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                WHERE source = ? AND is_active = 1 AND id NOT IN ({placeholders})
+                """,
+                [source, *seen],
+            )
+        return cur.rowcount
 
     def list_prebuilts(
         self,
@@ -743,7 +834,7 @@ class Database:
         offset: int = 0,
     ) -> tuple[list[dict], int]:
         """Return (items, total) for the prebuilts listing page."""
-        conditions: list[str] = ["price_pkr IS NOT NULL"]
+        conditions: list[str] = ["price_pkr IS NOT NULL", "is_active = 1"]
         params: list = []
 
         if source:
@@ -799,20 +890,24 @@ class Database:
         return dict(row) if row else None
 
     def prebuilt_stats(self) -> dict:
-        total = self._conn.execute("SELECT COUNT(*) FROM prebuilts").fetchone()[0]
+        total = self._conn.execute(
+            "SELECT COUNT(*) FROM prebuilts WHERE is_active = 1"
+        ).fetchone()[0]
         by_source = self._conn.execute(
-            "SELECT source, COUNT(*) as n FROM prebuilts GROUP BY source"
+            "SELECT source, COUNT(*) as n FROM prebuilts WHERE is_active = 1 GROUP BY source"
         ).fetchall()
         return {"total": total, "by_source": {r["source"]: r["n"] for r in by_source}}
 
     def stats(self) -> dict:
         """Quick summary — useful for CLI output."""
-        parts_total = self._conn.execute("SELECT COUNT(*) FROM parts").fetchone()[0]
+        parts_total = self._conn.execute(
+            "SELECT COUNT(*) FROM parts WHERE is_active = 1"
+        ).fetchone()[0]
         by_source = self._conn.execute(
-            "SELECT source, COUNT(*) as n FROM parts GROUP BY source"
+            "SELECT source, COUNT(*) as n FROM parts WHERE is_active = 1 GROUP BY source"
         ).fetchall()
         by_cat = self._conn.execute(
-            "SELECT category, COUNT(*) as n FROM parts GROUP BY category ORDER BY category"
+            "SELECT category, COUNT(*) as n FROM parts WHERE is_active = 1 GROUP BY category ORDER BY category"
         ).fetchall()
         price_rows = self._conn.execute("SELECT COUNT(*) FROM price_log").fetchone()[0]
         return {
@@ -835,3 +930,34 @@ class Database:
 def get_db(path: str | Path = _DEFAULT_DB) -> Database:
     """Open (or create) the PPC database at the given path."""
     return Database(path)
+
+
+def backup_db(path: str | Path = _DEFAULT_DB, keep: int = 10) -> Optional[Path]:
+    """
+    Snapshot the DB to <name>.bak.<UTC timestamp> before a scrape mutates it.
+    Uses SQLite's online backup API so it is safe on a WAL database.
+    Keeps only the newest `keep` snapshots. Returns the backup path (None if
+    the source DB does not exist yet).
+    """
+    src = Path(path)
+    if not src.exists():
+        return None
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    dest = src.with_name(f"{src.name}.bak.{stamp}")
+    con = sqlite3.connect(str(src))
+    try:
+        bck = sqlite3.connect(str(dest))
+        try:
+            con.backup(bck)
+        finally:
+            bck.close()
+    finally:
+        con.close()
+
+    snaps = sorted(src.parent.glob(f"{src.name}.bak.*"))
+    for old in snaps[:-keep] if keep > 0 else []:
+        try:
+            old.unlink()
+        except OSError:
+            pass
+    return dest

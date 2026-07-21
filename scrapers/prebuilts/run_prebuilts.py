@@ -16,7 +16,7 @@ sys.path.insert(0, ROOT)
 from scrapers.prebuilts.zestro.scraper import ZestroScraper
 from scrapers.prebuilts.redtech.scraper import RedTechScraper
 from scrapers.prebuilts.techmatched.scraper import TechMatchedScraper
-from db.database import get_db
+from db.database import backup_db, get_db
 
 SCRAPERS = {
     "zestro":      ZestroScraper,
@@ -37,6 +37,10 @@ def main():
     total_scraped = 0
     total_written = 0
 
+    backup = backup_db(db_path)
+    if backup:
+        print(f"DB: backup written to {backup}")
+
     for name, cls in targets.items():
         print(f"\n=== {name.upper()} ===")
         try:
@@ -46,13 +50,21 @@ def main():
             if results:
                 with get_db(db_path) as db:
                     n = db.upsert_prebuilts(results)
+                    # Only sweep sources that actually returned products, so a
+                    # blocked scrape can't hide a live retailer's prebuilts.
+                    for src in {p["source"] for p in results}:
+                        gone = db.deactivate_unseen_prebuilts(src)
+                        if gone:
+                            print(f"  => {src}: {gone} prebuilts marked inactive")
                 print(f"  => {n} rows written to DB")
                 total_scraped += len(results)
                 total_written += n
             else:
                 print(f"  WARNING: 0 prebuilts from {name}")
+                print(f"  SKIP sweep for {name} — keeping existing rows")
         except Exception as e:
             print(f"  ERROR scraping {name}: {e}")
+            print(f"  SKIP sweep for {name} — keeping existing rows")
 
     if total_scraped == 0:
         print("\nNo prebuilts scraped.")

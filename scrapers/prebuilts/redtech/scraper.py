@@ -21,10 +21,13 @@ from scrapers.prebuilts.base_prebuilt_scraper import BasePrebuiltScraper
 SOURCE  = "redtech.pk"
 BASE    = "https://redtech.pk"
 
-# RedTech organises prebuilts under /custom-pc-packages/ and a WooCommerce
-# product category. Try both entry points.
+# RedTech's prebuilt WooCommerce category. The old /product-category/packages/
+# slug was retired sometime after 2026-06-04 and now 404s — note the host
+# answers a dead path with 429 for browser-like UAs, so the failure looked like
+# rate limiting rather than a bad URL (see docs/scraper-solutions.md).
+# Current slug confirmed from the breadcrumb links on a live product page.
 CAT_URLS = [
-    BASE + "/product-category/packages/",
+    BASE + "/product-category/custom-gaming-pc-packages/",
 ]
 
 _PLACEHOLDER = "woocommerce-placeholder"

@@ -17,7 +17,7 @@ import sys
 import time
 from collections import Counter
 
-from db.database import get_db
+from db.database import backup_db, get_db
 from scrapers.czone.all_scraper import CzoneAllScraper, CATEGORIES as CZONE_CATS, BASE as CZONE_BASE
 from scrapers.zahcomputers.scraper import ZahComputersScraper, CATEGORIES as ZAH_CATS, BASE as ZAH_BASE
 from scrapers.amdhouse.scraper import AmdHouseScraper, CATEGORIES as AMD_CATS, BASE as AMD_BASE
@@ -210,6 +210,10 @@ def main():
         sys.exit(1)
 
     all_results: list[dict] = []
+    # Sources whose scrape actually produced products this run. Only these get
+    # swept — a source that returned 0 (or raised) keeps its existing rows, so
+    # a transient block (e.g. HTTP 429) can't hide a live retailer's catalogue.
+    ok_sources: set[str] = set()
     t0 = time.time()
 
     for key, (label, fn) in to_run.items():
@@ -221,9 +225,13 @@ def main():
             print(f"\n  => {len(results)} products from {label}")
             if not results:
                 print(f"  WARNING: 0 products from {label} — scraper may have failed silently")
+                print(f"  SKIP sweep for {label} — keeping existing rows")
+            else:
+                ok_sources.update(p["source"] for p in results)
             all_results.extend(results)
         except Exception as e:
             print(f"  SCRAPER FAILED: {e}")
+            print(f"  SKIP sweep for {label} — keeping existing rows")
 
     if not all_results:
         print("\nNo products scraped across any site.")
@@ -235,11 +243,26 @@ def main():
     for k, n in sorted(counts.items()):
         print(f"  {k:40s} {n}")
 
+    backup = backup_db(DB_PATH)
+    if backup:
+        print(f"\nDB: backup written to {backup}")
+
     with get_db(DB_PATH) as db:
         inserted = db.upsert_products(all_results)
+
+        # Per-retailer freshness sweep: parts not seen in this run go inactive
+        # (hidden from the site) but keep their rows and price history.
+        deactivated = 0
+        for src in sorted(ok_sources):
+            n = db.deactivate_unseen_parts(src)
+            deactivated += n
+            if n:
+                print(f"DB: {src} — {n} parts marked inactive (not seen this run)")
+
         trend_rows = db.rebuild_price_trends()
         s = db.stats()
         print(f"\nDB: {inserted} new price rows written to {DB_PATH}")
+        print(f"DB: {deactivated} parts marked inactive this run")
         print(f"DB: {trend_rows} price-trend rows computed")
         print(f"DB: {s['total_parts']} total parts, {s['total_price_rows']} total price rows")
         print(f"\nBy category:")
