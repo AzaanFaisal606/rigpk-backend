@@ -64,6 +64,10 @@ PPC.pre-filter-backup/
 # local docs (scratch / reference)
 /docs/
 
+# Live DB + SQLite sidecars — data now lives in hosted Turso; the local file is
+# dev-only and must never be committed (data/README.md keeps the dir tracked).
+/data/*.db*
+
 # local DB backups (manual snapshots before risky operations)
 /data/*.bak*
 /data/*.testbak
