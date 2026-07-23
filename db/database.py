@@ -1049,6 +1049,17 @@ class Database:
         ).fetchall()
         return {"total": total, "by_source": {r["source"]: r["n"] for r in by_source}}
 
+    def counts_by_source_category(self) -> dict[tuple[str, str], int]:
+        """
+        Active-row count keyed by (source, category). Feeds the health check's
+        per-category anomaly detection (a category that had rows but scraped 0).
+        """
+        rows = self._conn.execute(
+            "SELECT source, category, COUNT(*) AS n FROM parts "
+            "WHERE is_active = 1 GROUP BY source, category"
+        ).fetchall()
+        return {(r["source"], r["category"]): r["n"] for r in rows}
+
     def stats(self) -> dict:
         """Quick summary — useful for CLI output."""
         parts_total = self._conn.execute(

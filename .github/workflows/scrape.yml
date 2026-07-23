@@ -37,15 +37,17 @@ jobs:
 
       # continue-on-error so a failure here still reaches the notify + fail
       # steps below instead of aborting the job silently.
+      # --strict: any anomaly (failed source, suspicious count drop, a category
+      # that scraped zero) exits non-zero → job goes red → self-heal fires.
       - name: Scrape parts
         id: parts
         continue-on-error: true
-        run: python run_all.py
+        run: python run_all.py --strict
 
       - name: Scrape prebuilts
         id: prebuilts
         continue-on-error: true
-        run: python -m scrapers.prebuilts.run_prebuilts
+        run: python -m scrapers.prebuilts.run_prebuilts --strict
 
       # always() → posts even when a scrape step failed. Per-source detail comes
       # from the scrape_runs log; the step outcomes are passed for hard crashes.

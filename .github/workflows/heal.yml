@@ -1,0 +1,81 @@
+name: Self-Heal
+
+# Fires after "Weekly Scrape" finishes FAILED — which now includes the small
+# stuff: a failed source, a suspicious count drop, or a category that scraped
+# zero (run_all/run_prebuilts run with --strict). Diagnoses the break and opens
+# a PR for review. Never pushes to master.
+on:
+  workflow_run:
+    workflows: ["Weekly Scrape"]
+    types: [completed]
+
+# One heal at a time; a newer failure supersedes an in-flight heal.
+concurrency:
+  group: self-heal
+  cancel-in-progress: true
+
+permissions:
+  contents: write        # create the fix branch
+  pull-requests: write   # open the PR
+  actions: read          # read the failed run's logs
+
+jobs:
+  heal:
+    # Only on failure — a green scrape never triggers this.
+    if: ${{ github.event.workflow_run.conclusion == 'failure' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Pull the failed run's logs into a file for Claude to read. --log-failed
+      # is the failed steps only; fall back to the full log if that's empty.
+      - name: Fetch failed scrape logs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          {
+            echo "Failed run: ${{ github.event.workflow_run.html_url }}"
+            echo "Head SHA:   ${{ github.event.workflow_run.head_sha }}"
+            echo "==================== LOGS ===================="
+            gh run view "$RUN_ID" --repo "${{ github.repository }}" --log-failed 2>/dev/null \
+              || gh run view "$RUN_ID" --repo "${{ github.repository }}" --log 2>/dev/null \
+              || echo "(could not fetch logs)"
+          } > scrape_failure.log
+          echo "wrote $(wc -l < scrape_failure.log) lines"
+
+      - name: Claude diagnose + open PR
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          claude_args: "--max-turns 40 --model claude-opus-4-8"
+          prompt: |
+            The weekly price scrape failed. Its logs are in ./scrape_failure.log at the repo root.
+
+            Do this:
+            1. Read scrape_failure.log and find the "ANOMALIES DETECTED" section plus any
+               "SCRAPER FAILED" / "BLOCKED" / "WARNING" lines. Identify exactly which
+               source(s) or (source/category) broke and the root cause.
+            2. Locate the cause in the scrapers/ code (a scraper is one module under
+               scrapers/<name>/). Common causes: a retailer changed its HTML/JSON layout,
+               a category slug/URL changed, or a selector/regex no longer matches.
+            3. Make the SMALLEST correct fix. Do not refactor unrelated code. Do not touch
+               db/, backend/, or the workflow files.
+            4. Create a new branch named heal/<source>-<short-desc> off the failed run's
+               head SHA, commit the fix, and open a pull request against master with:
+               - a title summarising what broke,
+               - a body explaining the anomaly, the root cause, and the fix.
+            5. If the anomaly is legitimate and needs NO code change (e.g. a retailer
+               genuinely sold out of a category, or a real one-off block), do NOT open a
+               PR — just write your reasoning to the job output and stop.
+
+            Hard rules:
+            - Never push to master. Only ever open a PR.
+            - Do NOT add any AI/assistant attribution anywhere: no "Generated with",
+              no "Co-authored-by", no mention of Claude/AI in the branch name, commit
+              message, or PR title/body. Write them as a normal human contributor would.
+            - Keep the change minimal and scoped to the broken scraper.

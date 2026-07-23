@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from db.database import backup_db, get_db
+from scrapers import health
 from scrapers.base_scraper import blocked_hosts, reset_host_state
 from scrapers.czone.all_scraper import CzoneAllScraper, CATEGORIES as CZONE_CATS, BASE as CZONE_BASE
 from scrapers.zahcomputers.scraper import ZahComputersScraper, CATEGORIES as ZAH_CATS, BASE as ZAH_BASE
@@ -207,7 +208,8 @@ def main():
     args = sys.argv[1:]
     do_notify = "--notify" in args
     do_test   = "--test"   in args
-    args = [a for a in args if a not in ("--notify", "--test")]
+    do_strict = "--strict" in args   # CI: exit non-zero on any anomaly → self-heal
+    args = [a for a in args if a not in ("--notify", "--test", "--strict")]
 
     to_run = {k: v for k, v in SCRAPERS.items() if not args or k in args}
 
@@ -285,9 +287,10 @@ def main():
         print(f"\nDB: backup written to {backup}")
 
     with get_db(DB_PATH) as db:
-        # Active count per source before this run mutates anything — the "before"
-        # side of the scrape report. Captured pre-upsert so the sweep can't skew it.
+        # Active counts before this run mutates anything — the "before" side of the
+        # report and the health check. Captured pre-upsert so the sweep can't skew them.
         before_active = db.stats()["by_source"]
+        before_cat = db.counts_by_source_category()
 
         inserted = db.upsert_products(all_results)
 
@@ -306,6 +309,7 @@ def main():
 
         # "After" side, once upsert + all sweeps have landed.
         after_active = db.stats()["by_source"]
+        after_cat = db.counts_by_source_category()
 
         for r in runs:
             src = r["source"]
@@ -334,6 +338,21 @@ def main():
         for src, n in sorted(s["by_source"].items()):
             print(f"  {src:30s} {n}")
 
+        # Health check: stale sources, suspicious source-level drops, and
+        # categories that had rows but scraped zero. Sensitive by design.
+        anomalies = health.evaluate_parts(
+            runs, before_active, after_active, before_cat, after_cat
+        )
+
+    if anomalies:
+        print(f"\n{'='*60}")
+        print(f"ANOMALIES DETECTED ({len(anomalies)}) — scrape needs a look:")
+        print("="*60)
+        for a in anomalies:
+            print(f"  ✗ {a}")
+    else:
+        print("\nHealth check: no anomalies.")
+
     # Optional: DB integrity checks
     tests_ok = None
     if do_test:
@@ -358,6 +377,12 @@ def main():
             ["notify-send", "-a", "PPC Scraper", "PPC Scrape Complete", body],
             check=False,
         )
+
+    # --strict (CI): any anomaly fails the job so the self-heal workflow fires.
+    # Fresh data was still written above — this only flips the exit code.
+    if do_strict and anomalies:
+        print(f"\n--strict: exiting non-zero on {len(anomalies)} anomaly(ies).")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

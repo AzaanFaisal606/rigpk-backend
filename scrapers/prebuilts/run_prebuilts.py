@@ -15,6 +15,7 @@ sys.path.insert(0, ROOT)
 
 from datetime import datetime, timezone
 
+from scrapers import health
 from scrapers.base_scraper import blocked_hosts, reset_host_state
 from scrapers.prebuilts.zestro.scraper import ZestroScraper, SOURCE as ZESTRO_SOURCE
 from scrapers.prebuilts.redtech.scraper import RedTechScraper, SOURCE as REDTECH_SOURCE
@@ -29,7 +30,9 @@ SCRAPERS = {
 
 
 def main():
-    requested = [a.lower() for a in sys.argv[1:]]
+    argv = sys.argv[1:]
+    do_strict = "--strict" in argv   # CI: exit non-zero on any anomaly → self-heal
+    requested = [a.lower() for a in argv if a != "--strict"]
     targets = {k: v for k, v in SCRAPERS.items() if not requested or k in requested}
 
     if not targets:
@@ -39,6 +42,7 @@ def main():
     db_path = os.path.join(ROOT, "data", "ppc.db")
     total_scraped = 0
     total_written = 0
+    anomalies: list[str] = []
 
     backup = backup_db(db_path)
     if backup:
@@ -93,6 +97,8 @@ def main():
                 before_active=before_n, after_active=after_n, error=error,
             )
 
+        anomalies += health.source_anomalies(source, before_n, after_n, ok, error)
+
         total_scraped += len(results)
         total_written += n
 
@@ -109,6 +115,16 @@ def main():
     print(f"DB prebuilt total: {stats['total']}")
     for source, count in stats["by_source"].items():
         print(f"  {source:30s} {count}")
+
+    if anomalies:
+        print(f"\nANOMALIES DETECTED ({len(anomalies)}):")
+        for a in anomalies:
+            print(f"  ✗ {a}")
+        if do_strict:
+            print(f"\n--strict: exiting non-zero on {len(anomalies)} anomaly(ies).")
+            sys.exit(1)
+    else:
+        print("\nHealth check: no anomalies.")
 
 
 if __name__ == "__main__":
