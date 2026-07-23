@@ -38,8 +38,22 @@ from typing import Optional
 import json
 from scrapers.spec_extractor import extract_specs
 
+# Load repo-root .env (local dev) so TURSO_*/DB_PATH are available. override=False
+# so real environment vars (CI GitHub secrets, Render env) always win over .env.
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+except ImportError:
+    pass
+
 _SCHEMA = Path(__file__).parent / "schema.sql"
 _DEFAULT_DB = Path(os.getenv("DB_PATH", str(Path(__file__).parent.parent / "data" / "ppc.db")))
+
+# Schema/migrations only need to run once per process against a remote Turso DB
+# (the schema is a property of the DB, not the connection, and re-running the
+# full executescript on every per-request open would add needless round trips).
+# Local SQLite keeps applying on every open — it is cheap and offline.
+_REMOTE_SCHEMA_APPLIED: set[str] = set()
 
 
 def _slug(url: str) -> str:
@@ -199,18 +213,34 @@ _CATEGORY_SPEC_KEYS: dict[str, list[str]] = {
 
 
 class Database:
-    def __init__(self, path: str | Path):
-        self._path = Path(path)
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(self._path))
-        self._conn.row_factory = sqlite3.Row
+    def __init__(self, path: str | Path | None = None):
+        url = os.getenv("TURSO_DATABASE_URL")
+        if url:
+            # Remote Turso (libSQL). `path` is ignored in this mode.
+            from db import libsql_adapter  # local import: libsql optional offline
+            self._remote = True
+            self._target = url
+            self._conn = libsql_adapter.connect(url, os.getenv("TURSO_AUTH_TOKEN"))
+        else:
+            # Local SQLite file.
+            self._remote = False
+            self._path = Path(path or _DEFAULT_DB)
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            self._target = str(self._path)
+            self._conn = sqlite3.connect(str(self._path))
+            self._conn.row_factory = sqlite3.Row
         self._apply_schema()
 
     def _apply_schema(self):
+        # Remote DB: apply schema + migrations once per process (see module note).
+        if self._remote and self._target in _REMOTE_SCHEMA_APPLIED:
+            return
         with open(_SCHEMA, encoding="utf-8") as f:
             self._conn.executescript(f.read())
         self._migrate()
         self._conn.commit()
+        if self._remote:
+            _REMOTE_SCHEMA_APPLIED.add(self._target)
 
     def _migrate(self):
         """
@@ -1028,7 +1058,12 @@ class Database:
 
 
 def get_db(path: str | Path = _DEFAULT_DB) -> Database:
-    """Open (or create) the PPC database at the given path."""
+    """
+    Open (or create) the PPC database.
+
+    When TURSO_DATABASE_URL is set the connection is remote (Turso/libSQL) and
+    `path` is ignored; otherwise it is the local SQLite file at `path`.
+    """
     return Database(path)
 
 
@@ -1038,7 +1073,13 @@ def backup_db(path: str | Path = _DEFAULT_DB, keep: int = 10) -> Optional[Path]:
     Uses SQLite's online backup API so it is safe on a WAL database.
     Keeps only the newest `keep` snapshots. Returns the backup path (None if
     the source DB does not exist yet).
+
+    Remote (Turso) mode: the local online-backup API does not apply, so this is
+    a no-op returning None. Turso snapshots are taken with `turso db dump`
+    (or Turso PITR on paid tiers) — see docs/DB_migration.md.
     """
+    if os.getenv("TURSO_DATABASE_URL"):
+        return None
     src = Path(path)
     if not src.exists():
         return None

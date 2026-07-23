@@ -4,3 +4,9 @@ pydantic==2.13.1
 pydantic_core==2.46.1
 starlette==1.0.0
 uvicorn==0.44.0
+# Hosted DB (Turso/libSQL). Only needed when TURSO_DATABASE_URL is set;
+# local SQLite mode uses the stdlib sqlite3 module and does not import this.
+libsql==0.1.11
+# Loads .env for local dev (secrets never committed). No-op if a var is already
+# set in the real environment (CI secrets / hosting env vars take precedence).
+python-dotenv==1.2.2
