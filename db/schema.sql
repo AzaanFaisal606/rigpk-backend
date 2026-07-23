@@ -115,6 +115,8 @@ CREATE TABLE IF NOT EXISTS scrape_runs (
     products    INTEGER NOT NULL DEFAULT 0,-- items the scraper returned
     ok          INTEGER NOT NULL DEFAULT 0,-- 1 = trusted run, sweep applied
     swept       INTEGER NOT NULL DEFAULT 0,-- rows marked inactive by the sweep
+    before_active INTEGER,                   -- active rows for this source before the run
+    after_active  INTEGER,                   -- active rows for this source after the run
     error       TEXT                        -- failure summary when ok = 0
 );
 

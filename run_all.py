@@ -263,10 +263,14 @@ def main():
     if not all_results:
         print("\nNo products scraped across any site.")
         with get_db(DB_PATH) as db:
+            # Nothing scraped → nothing mutated, so before == after (rows kept).
+            active = db.stats()["by_source"]
             for r in runs:
+                n = active.get(r["source"], 0)
                 db.record_scrape_run(
                     r["source"], kind="parts", started_at=r["started"],
-                    products=r["products"], ok=False, swept=0, error=r["error"],
+                    products=r["products"], ok=False, swept=0,
+                    before_active=n, after_active=n, error=r["error"],
                 )
         sys.exit(1)
 
@@ -281,6 +285,10 @@ def main():
         print(f"\nDB: backup written to {backup}")
 
     with get_db(DB_PATH) as db:
+        # Active count per source before this run mutates anything — the "before"
+        # side of the scrape report. Captured pre-upsert so the sweep can't skew it.
+        before_active = db.stats()["by_source"]
+
         inserted = db.upsert_products(all_results)
 
         # Per-retailer freshness sweep: parts not seen in this run go inactive
@@ -288,14 +296,25 @@ def main():
         # is whole-source on purpose — a retailer's listing should be entirely
         # from one run, never a mix of this run's rows and older leftovers.
         deactivated = 0
+        swept_by_source: dict[str, int] = {}
         for r in runs:
             swept = db.deactivate_unseen_parts(r["source"]) if r["ok"] else 0
+            swept_by_source[r["source"]] = swept
             deactivated += swept
             if swept:
                 print(f"DB: {r['source']} — {swept} parts marked inactive (not seen this run)")
+
+        # "After" side, once upsert + all sweeps have landed.
+        after_active = db.stats()["by_source"]
+
+        for r in runs:
+            src = r["source"]
             db.record_scrape_run(
-                r["source"], kind="parts", started_at=r["started"],
-                products=r["products"], ok=r["ok"], swept=swept, error=r["error"],
+                src, kind="parts", started_at=r["started"],
+                products=r["products"], ok=r["ok"], swept=swept_by_source[src],
+                before_active=before_active.get(src, 0),
+                after_active=after_active.get(src, 0),
+                error=r["error"],
             )
 
         stale = [r["source"] for r in runs if not r["ok"]]

@@ -261,6 +261,15 @@ class Database:
                 self._conn.execute(
                     f"ALTER TABLE {table} ADD COLUMN last_seen_at TEXT DEFAULT NULL"
                 )
+        run_cols = {
+            r["name"]
+            for r in self._conn.execute("PRAGMA table_info(scrape_runs)").fetchall()
+        }
+        for col in ("before_active", "after_active"):
+            if col not in run_cols:
+                self._conn.execute(
+                    f"ALTER TABLE scrape_runs ADD COLUMN {col} INTEGER DEFAULT NULL"
+                )
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_parts_active ON parts(is_active)"
         )
@@ -380,19 +389,26 @@ class Database:
         products: int = 0,
         ok: bool = False,
         swept: int = 0,
+        before_active: int | None = None,
+        after_active: int | None = None,
         error: str | None = None,
     ) -> None:
         """
         Log the outcome of one source's scrape. Called for failures too — a
         missing row and a failed row mean different things, and the landing
         page's STALE ribbon is driven by the failed ones.
+
+        `before_active` / `after_active` are the source's active-row counts
+        either side of the run, for the before/after report. Left NULL when a
+        caller doesn't supply them.
         """
         with self._conn:
             self._conn.execute(
                 """
                 INSERT INTO scrape_runs
-                    (source, kind, started_at, finished_at, products, ok, swept, error)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (source, kind, started_at, finished_at, products, ok, swept,
+                     before_active, after_active, error)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     source,
@@ -402,6 +418,8 @@ class Database:
                     products,
                     1 if ok else 0,
                     swept,
+                    before_active,
+                    after_active,
                     error,
                 ),
             )
@@ -417,7 +435,8 @@ class Database:
         """
         latest = self._conn.execute(
             """
-            SELECT source, ok, products, finished_at, error
+            SELECT source, ok, products, finished_at, error,
+                   before_active, after_active, swept
             FROM scrape_runs r
             WHERE kind = ?
               AND id = (SELECT MAX(id) FROM scrape_runs s
@@ -440,6 +459,9 @@ class Database:
                 "last_run_at": r["finished_at"],
                 "last_success_at": last_ok.get(r["source"]),
                 "last_products": r["products"],
+                "before_active": r["before_active"],
+                "after_active": r["after_active"],
+                "last_swept": r["swept"],
                 "last_error": r["error"],
             }
             for r in latest

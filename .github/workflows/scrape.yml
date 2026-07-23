@@ -1,0 +1,63 @@
+name: Weekly Scrape
+
+# Weekly price scrape → hosted Turso DB, with a Discord summary.
+# Runs on a schedule and can be launched by hand from the Actions tab.
+on:
+  schedule:
+    # Sunday 20:00 UTC ≈ Monday 01:00 PKT (low traffic). Change this one line
+    # to reschedule; cron is always UTC. https://crontab.guru/#0_20_*_*_0
+    - cron: "0 20 * * 0"
+  workflow_dispatch: {}
+
+# Never let two scrape runs overlap — fetch() pacing assumes one process per
+# host. A manual run won't cancel an in-progress scheduled one; it queues.
+concurrency:
+  group: scrape
+  cancel-in-progress: false
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+      TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # continue-on-error so a failure here still reaches the notify + fail
+      # steps below instead of aborting the job silently.
+      - name: Scrape parts
+        id: parts
+        continue-on-error: true
+        run: python run_all.py
+
+      - name: Scrape prebuilts
+        id: prebuilts
+        continue-on-error: true
+        run: python -m scrapers.prebuilts.run_prebuilts
+
+      # always() → posts even when a scrape step failed. Per-source detail comes
+      # from the scrape_runs log; the step outcomes are passed for hard crashes.
+      - name: Notify Discord
+        if: always()
+        run: >
+          python scripts/notify_discord.py
+          --parts-status ${{ steps.parts.outcome }}
+          --prebuilts-status ${{ steps.prebuilts.outcome }}
+
+      # Make the run show red in the Actions UI if either scrape actually failed.
+      - name: Mark job failed if a scrape failed
+        if: steps.parts.outcome == 'failure' || steps.prebuilts.outcome == 'failure'
+        run: |
+          echo "A scrape step exited non-zero — see the step logs above."
+          exit 1

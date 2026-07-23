@@ -76,6 +76,9 @@ def main():
 
         n = swept = 0
         with get_db(db_path) as db:
+            # Active count for this source before/after — the scrape report's
+            # before → after columns. before captured pre-upsert.
+            before_n = db.prebuilt_stats()["by_source"].get(source, 0)
             if results:
                 n = db.upsert_prebuilts(results)
                 print(f"  => {n} rows written to DB")
@@ -83,9 +86,11 @@ def main():
                 swept = db.deactivate_unseen_prebuilts(source)
                 if swept:
                     print(f"  => {source}: {swept} prebuilts marked inactive")
+            after_n = db.prebuilt_stats()["by_source"].get(source, 0)
             db.record_scrape_run(
                 source, kind="prebuilt", started_at=started,
-                products=len(results), ok=ok, swept=swept, error=error,
+                products=len(results), ok=ok, swept=swept,
+                before_active=before_n, after_active=after_n, error=error,
             )
 
         total_scraped += len(results)
