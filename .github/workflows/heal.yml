@@ -6,7 +6,10 @@ name: Self-Heal
 # a PR for review. Never pushes to master.
 on:
   workflow_run:
-    workflows: ["Weekly Scrape"]
+    # Fires on either the weekly scrape OR a heal rerun that still failed, so a
+    # bad fix loops back into another diagnosis (each cycle still gated by your
+    # merge — never an unattended loop).
+    workflows: ["Weekly Scrape", "Heal Rerun"]
     types: [completed]
 
 # One heal at a time; a newer failure supersedes an in-flight heal.
@@ -65,10 +68,22 @@ jobs:
                a category slug/URL changed, or a selector/regex no longer matches.
             3. Make the SMALLEST correct fix. Do not refactor unrelated code. Do not touch
                db/, backend/, or the workflow files.
-            4. Create a new branch named heal/<source>-<short-desc> off the failed run's
-               head SHA, commit the fix, and open a pull request against master with:
-               - a title summarising what broke,
-               - a body explaining the anomaly, the root cause, and the fix.
+            4. Create a new branch and commit the fix, then open a pull request against
+               master with a title summarising what broke and a body explaining the
+               anomaly, the root cause, and the fix.
+
+               The branch name MUST be exactly:  heal/<kind>-<key>-<short-desc>
+               where <kind> is "parts" or "prebuilt" and <key> is the scraper key from
+               this table (map the broken retailer's domain to its key+kind):
+
+                 parts:    czone.com.pk=czone  zahcomputers.pk=zah  amdhouse.pk=amd
+                           rbtechngames.com=rbt  junaidtech.pk=junaid  techarc.pk=tech
+                           pakbyte.pk=pakbyte  redtech.pk=redtech  techmatched.pk=techmatched
+                 prebuilt: zestrogaming.com=zestro  redtech.pk=redtech  techmatched.pk=techmatched
+
+               Example: heal/parts-techmatched-ram-slug-fix
+               This exact format matters: merging the PR auto-reruns that one scraper.
+               If several sources broke, fix the most impactful one in this PR.
             5. If the anomaly is legitimate and needs NO code change (e.g. a retailer
                genuinely sold out of a category, or a real one-off block), do NOT open a
                PR — just write your reasoning to the job output and stop.

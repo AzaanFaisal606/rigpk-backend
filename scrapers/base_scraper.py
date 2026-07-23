@@ -67,6 +67,29 @@ def reset_host_state(host: str | None = None) -> None:
         _host_state.pop(host.lower(), None)
 
 
+def scraped_at_now() -> str:
+    """
+    UTC ISO-8601 timestamp for a product's `scraped_at`.
+
+    If the env var SCRAPE_AS_OF_DATE (YYYY-MM-DD) is set, its date replaces the
+    date part while the current time-of-day is kept. The heal rerun sets it to
+    the most recent scrape date so a fix merged on a later calendar day still
+    lands in the weekly scrape's trend bucket (buckets are the UTC date prefix of
+    scraped_at) instead of creating a stray one-source bucket. A malformed value
+    is ignored so a bad env can never corrupt the timestamp.
+    """
+    ts = datetime.now(timezone.utc)
+    override = os.getenv("SCRAPE_AS_OF_DATE")
+    if override:
+        try:
+            datetime.strptime(override, "%Y-%m-%d")
+        except ValueError:
+            override = None
+    if override:
+        return f"{override}T{ts.strftime('%H:%M:%S.%f')}+00:00"
+    return ts.isoformat()
+
+
 class BaseScraper(ABC):
     """
     Abstract base class for all PPC scrapers.
@@ -211,7 +234,7 @@ class BaseScraper(ABC):
 
     @staticmethod
     def now() -> str:
-        return datetime.now(timezone.utc).isoformat()
+        return scraped_at_now()
 
     @staticmethod
     def parse_price(price_text: str) -> int | None:

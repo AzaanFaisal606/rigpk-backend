@@ -84,7 +84,7 @@ class AmdHouseScraper(BaseScraper):
         return all_products
 
     def _parse_page(self, html: str) -> list[dict]:
-        scraped_at = self._now()
+        scraped_at = self.now()
 
         # Product blocks — split on product div class
         blocks = re.split(r'(?=<div[^>]+class="[^"]*product-small\s)', html)
@@ -141,11 +141,6 @@ class AmdHouseScraper(BaseScraper):
             })
 
         return results
-
-    @staticmethod
-    def _now() -> str:
-        from datetime import datetime, timezone
-        return datetime.now(timezone.utc).isoformat()
 
 
 def _find_valid_categories() -> list[tuple[str, str]]:

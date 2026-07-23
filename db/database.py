@@ -1049,6 +1049,18 @@ class Database:
         ).fetchall()
         return {"total": total, "by_source": {r["source"]: r["n"] for r in by_source}}
 
+    def latest_scrape_date(self) -> str | None:
+        """
+        Most recent scrape date (YYYY-MM-DD) present in price_log — i.e. the
+        current trend bucket. The heal rerun pins its rows to this via
+        SCRAPE_AS_OF_DATE so a late-merged fix joins the weekly bucket instead of
+        splitting trends onto a new day. None if price_log is empty.
+        """
+        row = self._conn.execute(
+            "SELECT substr(MAX(scraped_at), 1, 10) FROM price_log"
+        ).fetchone()
+        return row[0] if row and row[0] else None
+
     def counts_by_source_category(self) -> dict[tuple[str, str], int]:
         """
         Active-row count keyed by (source, category). Feeds the health check's

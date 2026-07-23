@@ -73,7 +73,7 @@ class RbTechNGamesScraper(BaseScraper):
         return all_products
 
     def _parse_page(self, html: str) -> list[dict]:
-        scraped_at = self._now()
+        scraped_at = self.now()
 
         # Split into product blocks
         blocks = re.split(r'(?=<div[^>]+class="[^"]*product-small\s)', html)
@@ -131,11 +131,6 @@ class RbTechNGamesScraper(BaseScraper):
             })
 
         return results
-
-    @staticmethod
-    def _now() -> str:
-        from datetime import datetime, timezone
-        return datetime.now(timezone.utc).isoformat()
 
 
 def main():

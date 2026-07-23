@@ -1,0 +1,106 @@
+name: Heal Rerun
+
+# When YOU merge a heal/* PR, re-scrape just the source it fixed and write the
+# result to Turso — the DB self-corrects (stale rows refreshed, emptied
+# categories reactivated). Gated entirely by your merge; nothing runs unattended.
+on:
+  pull_request:
+    types: [closed]
+
+# Different sources may rerun in parallel (different hosts); same branch dedups.
+concurrency:
+  group: heal-rerun-${{ github.event.pull_request.head.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  rerun:
+    if: >
+      github.event.pull_request.merged == true &&
+      startsWith(github.event.pull_request.head.ref, 'heal/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+      TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+    steps:
+      # Run the MERGED code (base branch = master, now includes the fix).
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.ref }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # Branch convention: heal/<kind>-<key>-<desc>. Pull kind + key back out and
+      # validate against the known scraper keys; anything unparseable skips the
+      # rerun (and does NOT fail the job, so it won't trigger self-heal).
+      - name: Resolve broken source from branch
+        id: resolve
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          rest="${HEAD_REF#heal/}"
+          KIND="${rest%%-*}"
+          keyrest="${rest#*-}"
+          KEY="${keyrest%%-*}"
+          PARTS="czone zah amd rbt junaid tech pakbyte redtech techmatched"
+          PRE="zestro redtech techmatched"
+          valid=no
+          if [ "$KIND" = parts ]; then
+            for k in $PARTS; do [ "$k" = "$KEY" ] && valid=yes; done
+          elif [ "$KIND" = prebuilt ]; then
+            for k in $PRE; do [ "$k" = "$KEY" ] && valid=yes; done
+          fi
+          echo "kind=$KIND"   >> "$GITHUB_OUTPUT"
+          echo "key=$KEY"     >> "$GITHUB_OUTPUT"
+          echo "valid=$valid" >> "$GITHUB_OUTPUT"
+          echo "Parsed kind=$KIND key=$KEY valid=$valid from '$HEAD_REF'"
+
+      # Pin the rerun's rows to the current trend bucket so a fix merged on a
+      # later calendar day still lands in the weekly scrape's date, not a new one.
+      - name: Find current trend-bucket date
+        id: asof
+        if: steps.resolve.outputs.valid == 'yes'
+        run: |
+          DATE=$(python -c "from db.database import get_db; d=get_db(); print(d.latest_scrape_date() or ''); d.close()")
+          echo "date=$DATE" >> "$GITHUB_OUTPUT"
+          echo "SCRAPE_AS_OF_DATE will be: '$DATE'"
+
+      - name: Rerun the fixed scraper
+        id: scrape
+        if: steps.resolve.outputs.valid == 'yes'
+        continue-on-error: true
+        env:
+          SCRAPE_AS_OF_DATE: ${{ steps.asof.outputs.date }}
+        run: |
+          if [ "${{ steps.resolve.outputs.kind }}" = "parts" ]; then
+            python run_all.py "${{ steps.resolve.outputs.key }}" --strict
+          else
+            python -m scrapers.prebuilts.run_prebuilts "${{ steps.resolve.outputs.key }}" --strict
+          fi
+
+      - name: Notify Discord
+        if: always() && steps.resolve.outputs.valid == 'yes'
+        run: >
+          python scripts/notify_discord.py
+          --parts-status ${{ steps.scrape.outcome }}
+          --prebuilts-status ${{ steps.scrape.outcome }}
+
+      - name: Skipped — unparseable branch
+        if: steps.resolve.outputs.valid != 'yes'
+        run: echo "Could not resolve a known scraper from the branch — skipping auto-rerun."
+
+      # If the rerun is still broken, go red so self-heal fires again on this run.
+      - name: Mark job failed if rerun failed
+        if: steps.resolve.outputs.valid == 'yes' && steps.scrape.outcome == 'failure'
+        run: |
+          echo "Rerun of '${{ steps.resolve.outputs.key }}' still failing — self-heal will re-diagnose."
+          exit 1
