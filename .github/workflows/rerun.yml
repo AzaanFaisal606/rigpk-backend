@@ -17,7 +17,11 @@ permissions:
 
 jobs:
   rerun:
+    # DEBUG_MODE (repo variable) short-circuits the auto-rerun too, so merging a
+    # branch while debugging can't write to the live DB. Set 'false'/delete to
+    # re-enable.
     if: >
+      vars.DEBUG_MODE != 'true' &&
       github.event.pull_request.merged == true &&
       startsWith(github.event.pull_request.head.ref, 'heal/')
     runs-on: ubuntu-latest

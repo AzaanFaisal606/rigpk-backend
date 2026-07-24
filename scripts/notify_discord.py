@@ -83,10 +83,10 @@ def build_embed(parts_status: str, prebuilts_status: str) -> dict:
         stats = db.stats()
         pre_stats = db.prebuilt_stats()
 
-    # A step "failure" means the orchestrator exited non-zero (total 0 or crash);
-    # a stale source means its latest recorded run didn't earn a sweep. Either
-    # colours the embed away from green.
-    step_failed = "failure" in (parts_status, prebuilts_status)
+    # A "failure" means the orchestrator exited non-zero (anomaly / crash); a
+    # "cancelled" means the job hit its timeout or hung. A stale source means its
+    # latest recorded run didn't earn a sweep. Any of these colours away from green.
+    step_failed = any(s in ("failure", "cancelled") for s in (parts_status, prebuilts_status))
     any_stale = any(h["stale"] for h in parts_health.values()) or any(
         h["stale"] for h in prebuilt_health.values()
     )

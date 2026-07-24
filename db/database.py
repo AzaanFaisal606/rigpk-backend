@@ -231,6 +231,18 @@ class Database:
             self._conn.row_factory = sqlite3.Row
         self._apply_schema()
 
+        # ── TEMP DRY-RUN SWITCH — remove when scrapers are fixed & verified ──
+        # While debugging the curl_cffi / datacenter-block work via manual CI
+        # runs, we don't want test scrapes bloating the live Turso DB. With
+        # SCRAPE_NO_DB_WRITE=1 the scrape runs completely normally (fetch, parse,
+        # counts, logs) but every data commit becomes a no-op, so nothing
+        # persists — uncommitted changes roll back on close(). Schema/migrations
+        # already committed just above (idempotent no-op on the live DB).
+        # Reverting = delete this block + the SCRAPE_NO_DB_WRITE env in scrape.yml.
+        # See CLAUDE.md "## TEMP — Dry-run switch".
+        if os.getenv("SCRAPE_NO_DB_WRITE") == "1":
+            self._conn.commit = lambda *a, **k: None
+
     def _apply_schema(self):
         # Remote DB: apply schema + migrations once per process (see module note).
         if self._remote and self._target in _REMOTE_SCHEMA_APPLIED:

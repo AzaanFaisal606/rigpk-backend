@@ -24,8 +24,18 @@ permissions:
 
 jobs:
   heal:
-    # Only on failure — a green scrape never triggers this.
-    if: ${{ github.event.workflow_run.conclusion == 'failure' }}
+    # Fire on failure OR cancelled. A timeout / hung run ends "cancelled", not
+    # "failure" — Claude may find nothing to fix there, but the PR (or its job
+    # output) still flags that a run broke instead of dying silently. A green
+    # scrape never triggers this.
+    #
+    # DEBUG_MODE (repo variable) short-circuits this entirely: while debugging
+    # scrapers, a dry-run failure must NOT open PRs. Set it 'false'/delete to
+    # re-enable self-heal.
+    if: >
+      vars.DEBUG_MODE != 'true' &&
+      (github.event.workflow_run.conclusion == 'failure' ||
+       github.event.workflow_run.conclusion == 'cancelled')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -57,7 +67,9 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           claude_args: "--max-turns 40 --model claude-opus-4-8"
           prompt: |
-            The weekly price scrape failed. Its logs are in ./scrape_failure.log at the repo root.
+            The weekly price scrape did not finish green. It either FAILED (a
+            scraper exited non-zero on an anomaly) or was CANCELLED (a job hit its
+            timeout / hung). Its logs are in ./scrape_failure.log at the repo root.
 
             Do this:
             1. Read scrape_failure.log and find the "ANOMALIES DETECTED" section plus any
@@ -87,6 +99,9 @@ jobs:
             5. If the anomaly is legitimate and needs NO code change (e.g. a retailer
                genuinely sold out of a category, or a real one-off block), do NOT open a
                PR — just write your reasoning to the job output and stop.
+            6. If the run was CANCELLED by a timeout with no fixable code cause (a
+               source was merely slow, not broken), there is nothing to patch — say
+               so plainly in the job output and stop. Do not open a PR for a timeout.
 
             Hard rules:
             - Never push to master. Only ever open a PR.

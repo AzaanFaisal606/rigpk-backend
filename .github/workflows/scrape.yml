@@ -2,6 +2,12 @@ name: Weekly Scrape
 
 # Weekly price scrape → hosted Turso DB, with a Discord summary.
 # Runs on a schedule and can be launched by hand from the Actions tab.
+#
+# Parts and prebuilts run as SEPARATE jobs (in parallel) so one can't starve the
+# other's time budget. The first combined run timed out because parts alone took
+# ~80 min, leaving prebuilts to hit the 90-min wall → the job ended "cancelled"
+# (not "failure"), which silently skipped self-heal. Separate jobs + generous
+# per-job timeouts fix that; a real anomaly now turns its own job red.
 on:
   schedule:
     # Friday 00:00 UTC = Friday 05:00 AM PKT (PKT = UTC+5). Starting at UTC
@@ -9,7 +15,17 @@ on:
     # in a single trend bucket (buckets are the UTC date of scraped_at). Change
     # this one line to reschedule; cron is always UTC. https://crontab.guru/#0_0_*_*_5
     - cron: "0 0 * * 5"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      sources:
+        description: "Parts source keys to scrape, space-separated (empty = all). e.g. `zah`"
+        required: false
+        default: ""
+      skip_prebuilts:
+        description: "Skip the prebuilts job (useful for a focused parts test)"
+        type: boolean
+        required: false
+        default: false
 
 # Never let two scrape runs overlap — fetch() pacing assumes one process per
 # host. A manual run won't cancel an in-progress scheduled one; it queues.
@@ -17,51 +33,120 @@ concurrency:
   group: scrape
   cancel-in-progress: false
 
+# ── DEBUG MODE ───────────────────────────────────────────────────────────────
+# Driven by the repo variable DEBUG_MODE (Settings → Variables, or
+# `gh variable set DEBUG_MODE --body true`). When 'true':
+#   • SCRAPE_NO_DB_WRITE=1 here → every data commit is a no-op (db/database.py
+#     guard) so test runs never touch the live Turso DB;
+#   • heal.yml and rerun.yml self-skip (they check the same variable) so a
+#     debug failure doesn't open PRs or auto-rerun.
+# Set it 'false' (or delete it) to return to normal live operation. Inherited by
+# all jobs/steps below.
+env:
+  SCRAPE_NO_DB_WRITE: ${{ vars.DEBUG_MODE == 'true' && '1' || '0' }}
+
 jobs:
-  scrape:
+  # ── Parts ────────────────────────────────────────────────────────────────
+  # 9 retailers with jittered per-host pacing; the slow ones (junaid, pakbyte)
+  # push a full run to ~80 min. 150 leaves real headroom for retries.
+  parts:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 150
+    env:
+      TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+      TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # continue-on-error so the "mark failed" step can run and turn the job red
+      # deliberately — that keeps the job's `result` a clean failure (not a
+      # mid-step abort) for the notify job and self-heal to read.
+      # --strict: any anomaly (failed source, suspicious count drop, a category
+      # that scraped zero) exits non-zero.
+      # inputs.sources is empty on schedule / a plain dispatch → scrape all.
+      # A manual run can pass e.g. "zah" to scrape one source (fast debug loop).
+      - name: Scrape parts
+        id: scrape
+        continue-on-error: true
+        run: python run_all.py ${{ github.event.inputs.sources }} --strict
+
+      - name: Mark job failed if parts scrape failed
+        if: steps.scrape.outcome == 'failure'
+        run: |
+          echo "Parts scrape exited non-zero — see the step log above."
+          exit 1
+
+  # ── Prebuilts ────────────────────────────────────────────────────────────
+  # 3 sources, ~4 min in practice. 60 is a big margin but cheap insurance
+  # against a slow/hung source (zestro has had stalled keep-alive reads).
+  #
+  # Runs AFTER parts, not in parallel: redtech + techmatched appear in both
+  # lists, and fetch() per-host pacing is per-process — two jobs hitting the same
+  # host at once would double the load and trip rate limiting. `if: always()` so
+  # a failed parts job still lets prebuilts run (it just waits its turn).
+  prebuilts:
+    needs: parts
+    # Runs after parts on any outcome, but a manual run can skip it entirely.
+    # On schedule, github.event.inputs is null → the check is true → it runs.
+    if: ${{ always() && github.event.inputs.skip_prebuilts != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+      TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Scrape prebuilts
+        id: scrape
+        continue-on-error: true
+        run: python -m scrapers.prebuilts.run_prebuilts --strict
+
+      - name: Mark job failed if prebuilts scrape failed
+        if: steps.scrape.outcome == 'failure'
+        run: |
+          echo "Prebuilts scrape exited non-zero — see the step log above."
+          exit 1
+
+  # ── Notify ───────────────────────────────────────────────────────────────
+  # Runs after BOTH scrape jobs, whatever their outcome (always()), and posts a
+  # single combined Discord embed. Per-source detail comes from the scrape_runs
+  # log; the job results are passed in so a hard crash / timeout is still
+  # reported. This job never fails the workflow — notify_discord.py exits 0.
+  notify:
+    needs: [parts, prebuilts]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     env:
       TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
       TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
       DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
-
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # continue-on-error so a failure here still reaches the notify + fail
-      # steps below instead of aborting the job silently.
-      # --strict: any anomaly (failed source, suspicious count drop, a category
-      # that scraped zero) exits non-zero → job goes red → self-heal fires.
-      - name: Scrape parts
-        id: parts
-        continue-on-error: true
-        run: python run_all.py --strict
-
-      - name: Scrape prebuilts
-        id: prebuilts
-        continue-on-error: true
-        run: python -m scrapers.prebuilts.run_prebuilts --strict
-
-      # always() → posts even when a scrape step failed. Per-source detail comes
-      # from the scrape_runs log; the step outcomes are passed for hard crashes.
+      # needs.<job>.result is one of success | failure | cancelled | skipped —
+      # always defined, unlike a step outcome passed across jobs.
       - name: Notify Discord
-        if: always()
         run: >
           python scripts/notify_discord.py
-          --parts-status ${{ steps.parts.outcome }}
-          --prebuilts-status ${{ steps.prebuilts.outcome }}
-
-      # Make the run show red in the Actions UI if either scrape actually failed.
-      - name: Mark job failed if a scrape failed
-        if: steps.parts.outcome == 'failure' || steps.prebuilts.outcome == 'failure'
-        run: |
-          echo "A scrape step exited non-zero — see the step logs above."
-          exit 1
+          --parts-status ${{ needs.parts.result }}
+          --prebuilts-status ${{ needs.prebuilts.result }}
