@@ -86,23 +86,6 @@ def test_no_retry_on_404(monkeypatch):
     assert len(calls) == 1
 
 
-def test_403_falls_back_to_impersonation_success(monkeypatch):
-    """A 403 tries the Chrome-fingerprint fallback; its body short-circuits."""
-    calls = script(monkeypatch, [http_error(403)])
-    monkeypatch.setattr(DummyScraper, "_impersonated_get", lambda self, url: "<html>ok</html>")
-    assert DummyScraper().fetch(URL) == "<html>ok</html>"
-    assert len(calls) == 1  # urllib tried once, then the fallback took over
-
-
-def test_403_raises_when_impersonation_also_fails(monkeypatch):
-    """If the fallback can't get through (or isn't installed), behave as before."""
-    calls = script(monkeypatch, [http_error(403)])
-    monkeypatch.setattr(DummyScraper, "_impersonated_get", lambda self, url: None)
-    with pytest.raises(RuntimeError, match="HTTP 403"):
-        DummyScraper().fetch(URL)
-    assert len(calls) == 1  # no retry loop on a 403
-
-
 def test_429_retries_up_to_limit_then_raises_runtime_error(monkeypatch):
     calls = script(monkeypatch, [http_error(429)])
     with pytest.raises(RuntimeError) as exc:

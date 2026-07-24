@@ -184,15 +184,6 @@ class BaseScraper(ABC):
             except urllib.error.HTTPError as e:
                 last_err = e
                 if e.code in NO_RETRY_CODES:
-                    # A 403 from a Cloudflare/bot-fight host is often aimed at our
-                    # TLS fingerprint (plain-Python ClientHello), not the URL or
-                    # the IP. Try once with a real Chrome fingerprint before
-                    # giving up; on success the body is just as good as urllib's.
-                    if e.code == 403:
-                        body = self._impersonated_get(url)
-                        if body is not None:
-                            st["fail_429"] = 0
-                            return body
                     raise RuntimeError(f"Failed to fetch {url}: HTTP {e.code}") from e
                 if e.code == 429:
                     if attempt < retries - 1:
@@ -219,34 +210,6 @@ class BaseScraper(ABC):
                     continue
 
         raise RuntimeError(f"Failed to fetch {url} after {retries} attempts: {last_err}")
-
-    def _impersonated_get(self, url: str) -> str | None:
-        """
-        Last-resort fetch via curl_cffi with a real Chrome TLS fingerprint, for
-        hosts whose Cloudflare/bot layer 403s our plain-urllib client at the
-        handshake. curl_cffi sends Chrome's full ClientHello + header set, so a
-        block keyed on "not a real browser" is bypassed while an IP-reputation
-        block is not — which is exactly how we tell the two apart.
-
-        Returns the body on HTTP 200, or None if curl_cffi isn't installed, the
-        request errors, or the host still refuses. The caller then raises just
-        as it did before, so this only ever adds a success path — it never
-        changes what a hard failure looks like.
-        """
-        try:
-            from curl_cffi import requests as cffi_requests
-        except ImportError:
-            print("    [403-fallback] curl_cffi not installed — skipping")
-            return None
-        try:
-            resp = cffi_requests.get(url, impersonate="chrome", timeout=self.TIMEOUT)
-        except Exception as e:
-            print(f"    [403-fallback] curl_cffi error: {type(e).__name__}: {e}")
-            return None
-        print(f"    [403-fallback] curl_cffi (chrome) -> HTTP {resp.status_code}")
-        if resp.status_code == 200:
-            return resp.text
-        return None
 
     @abstractmethod
     def scrape(self, url: str) -> list[dict]:
