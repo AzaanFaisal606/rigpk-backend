@@ -236,11 +236,14 @@ class BaseScraper(ABC):
         try:
             from curl_cffi import requests as cffi_requests
         except ImportError:
+            print("    [403-fallback] curl_cffi not installed — skipping")
             return None
         try:
             resp = cffi_requests.get(url, impersonate="chrome", timeout=self.TIMEOUT)
-        except Exception:
+        except Exception as e:
+            print(f"    [403-fallback] curl_cffi error: {type(e).__name__}: {e}")
             return None
+        print(f"    [403-fallback] curl_cffi (chrome) -> HTTP {resp.status_code}")
         if resp.status_code == 200:
             return resp.text
         return None
