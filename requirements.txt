@@ -10,3 +10,7 @@ libsql==0.1.11
 # Loads .env for local dev (secrets never committed). No-op if a var is already
 # set in the real environment (CI secrets / hosting env vars take precedence).
 python-dotenv==1.2.2
+# Chrome-fingerprint fallback used only when a host 403s our plain urllib client
+# (BaseScraper._impersonated_get). Optional at runtime — fetch() degrades to the
+# old raise-on-403 behaviour if it isn't importable.
+curl_cffi==0.7.4
