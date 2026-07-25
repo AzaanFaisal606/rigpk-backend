@@ -19,7 +19,20 @@ from scrapers.prebuilts.base_prebuilt_scraper import BasePrebuiltScraper
 
 SOURCE  = "techmatched.pk"
 BASE    = "https://techmatched.pk"
-CAT_URL = BASE + "/product-category/gaming-pc-prices-in-pakistan/"
+
+# TechMatched splits its builds across several WooCommerce category pages.
+# The old single "gaming-pc-prices-in-pakistan" slug now holds only 20 of them;
+# the rest live under gaming-value / professional / ai slugs. All four together
+# are the ~70 gaming + workstation builds the site lists. The "professionalbuilds"
+# umbrella slug is deliberately excluded — it's a separate 64-item set that would
+# double the count past what the storefront actually shows for these two lines.
+CAT_SLUGS = (
+    "gaming-pc-prices-in-pakistan",
+    "gaming-value-builds",
+    "professional-value-builds",
+    "ai-builds",
+)
+MAX_PAGES = 10  # safety cap; no build category is close to this many pages
 
 _PLACEHOLDER = "woocommerce-placeholder"
 
@@ -60,34 +73,34 @@ class TechMatchedScraper(BasePrebuiltScraper):
     def scrape_all(self) -> list[dict]:
         all_links: list[str] = []
         seen_links: set[str] = set()
-        page = 1
 
-        while True:
-            url = CAT_URL if page == 1 else f"{CAT_URL}page/{page}/"
-            print(f"  [techmatched] page {page}: {url}")
-            try:
-                html = self.fetch(url)
-            except RuntimeError as e:
-                print(f"  [techmatched] fetch error: {e}")
-                break
+        for slug in CAT_SLUGS:
+            cat_url = f"{BASE}/product-category/{slug}/"
+            for page in range(1, MAX_PAGES + 1):
+                url = cat_url if page == 1 else f"{cat_url}page/{page}/"
+                print(f"  [techmatched] {slug} page {page}: {url}")
+                try:
+                    html = self.fetch(url)
+                except RuntimeError as e:
+                    print(f"  [techmatched] fetch error: {e}")
+                    break
 
-            links = self._extract_product_links(html)
-            if not links:
-                print(f"  [techmatched] no products on page {page} — done.")
-                break
+                links = self._extract_product_links(html)
+                if not links:
+                    print(f"  [techmatched] no products on {slug} page {page} — done.")
+                    break
 
-            new = [l for l in links if l not in seen_links]
-            for l in new:
-                seen_links.add(l)
-            all_links.extend(new)
+                new = [l for l in links if l not in seen_links]
+                for l in new:
+                    seen_links.add(l)
+                all_links.extend(new)
+                print(f"    {len(new)} new links (running total: {len(all_links)})")
 
-            print(f"    {len(new)} new links (total: {len(all_links)})")
-
-            # Stop if no next-page link
-            if not re.search(rf'/{page + 1}/', html):
-                break
-            page += 1
-            time.sleep(self.PAGE_DELAY)
+                # A page whose links were all already seen means WooCommerce
+                # served the last page again (no real page N) — stop this slug.
+                if not new:
+                    break
+                time.sleep(self.PAGE_DELAY)
 
         print(f"  [techmatched] {len(all_links)} unique product URLs")
 
