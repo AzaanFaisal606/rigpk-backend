@@ -11,6 +11,20 @@ on:
     # merge — never an unattended loop).
     workflows: ["Weekly Scrape", "Heal Rerun"]
     types: [completed]
+  # Manual trigger, for testing this workflow against a known failed run without
+  # waiting for the weekly cron. `gh run rerun` replays the OLD definition at the
+  # triggering commit, so it can't test edits made here — dispatch is the only way.
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "ID of the failed Weekly Scrape run to diagnose"
+        required: true
+        type: string
+      dry_run:
+        description: "Diagnose only — do not create a branch or open a PR"
+        required: false
+        type: boolean
+        default: true
 
 # One heal at a time; a newer failure supersedes an in-flight heal.
 concurrency:
@@ -32,9 +46,13 @@ jobs:
     # DEBUG_MODE (repo variable) short-circuits this entirely: while debugging
     # scrapers, a dry-run failure must NOT open PRs. Set it 'false'/delete to
     # re-enable self-heal.
+    # On workflow_dispatch there is no github.event.workflow_run, so every field
+    # below is empty and the conclusion check can never pass — the dispatch arm
+    # is what lets a manual run through.
     if: >
       vars.DEBUG_MODE != 'true' &&
-      (github.event.workflow_run.conclusion == 'failure' ||
+      (github.event_name == 'workflow_dispatch' ||
+       github.event.workflow_run.conclusion == 'failure' ||
        github.event.workflow_run.conclusion == 'cancelled')
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -48,11 +66,11 @@ jobs:
       - name: Fetch failed scrape logs
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_ID: ${{ github.event.workflow_run.id || inputs.run_id }}
         run: |
           {
-            echo "Failed run: ${{ github.event.workflow_run.html_url }}"
-            echo "Head SHA:   ${{ github.event.workflow_run.head_sha }}"
+            echo "Failed run: ${{ github.repository }} run $RUN_ID"
+            echo "Head SHA:   ${{ github.event.workflow_run.head_sha || github.sha }}"
             echo "==================== LOGS ===================="
             gh run view "$RUN_ID" --repo "${{ github.repository }}" --log-failed 2>/dev/null \
               || gh run view "$RUN_ID" --repo "${{ github.repository }}" --log 2>/dev/null \
@@ -66,7 +84,13 @@ jobs:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           claude_args: "--max-turns 40 --model claude-opus-4-8"
+          # Without this the SDK output is redacted to "full output hidden for
+          # security" and an auth/API failure shows only is_error:true with no
+          # message — which made the 2026-07-31 failure undiagnosable from logs.
+          show_full_output: true
           prompt: |
+            ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && 'DRY RUN: diagnose only. Do NOT create a branch, commit, or open a pull request. Write your diagnosis to the job output and stop. This overrides step 4 and the branch-naming rules below.' || '' }}
+
             The weekly price scrape did not finish green. It either FAILED (a
             scraper exited non-zero on an anomaly) or was CANCELLED (a job hit its
             timeout / hung). Its logs are in ./scrape_failure.log at the repo root.
