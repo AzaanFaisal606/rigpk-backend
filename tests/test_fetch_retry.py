@@ -86,6 +86,93 @@ def test_no_retry_on_404(monkeypatch):
     assert len(calls) == 1
 
 
+def test_single_403_does_not_block_and_is_not_retried(monkeypatch):
+    """One 403 really can be one dead URL — don't retry it, don't trip the breaker."""
+    calls = script(monkeypatch, [http_error(403)])
+    with pytest.raises(RuntimeError, match="HTTP 403") as exc:
+        DummyScraper().fetch(URL)
+    assert not isinstance(exc.value, HostBlocked)
+    assert len(calls) == 1
+    assert not blocked_hosts()
+
+
+def test_consecutive_403s_trip_the_breaker(monkeypatch):
+    """
+    A run of 403s is a WAF refusing the client (Cloudflare vs Actions IPs), not a
+    run of dead URLs. It must become HostBlocked so the orchestrator reports
+    "could not scrape" and skips the freshness sweep — the 2026-07-31 techmatched
+    case, where one lucky page turned a total block into a 15-product partial
+    that swept 480 live rows.
+    """
+    scraper = DummyScraper()
+    script(monkeypatch, [http_error(403)])
+
+    for _ in range(base_scraper.BLOCK_AFTER_FORBIDDEN - 1):
+        with pytest.raises(RuntimeError) as exc:
+            scraper.fetch(URL)
+        assert not isinstance(exc.value, HostBlocked)
+
+    with pytest.raises(HostBlocked):
+        scraper.fetch(URL)
+    assert blocked_hosts() == {"example.test"}
+
+    # Blocked host fails instantly, without touching the network.
+    calls = script(monkeypatch, [b"would be fine"])
+    with pytest.raises(HostBlocked):
+        scraper.fetch(URL)
+    assert not calls
+
+
+def test_success_resets_the_403_counter(monkeypatch):
+    """
+    Isolated 403s across a long run must not accumulate into a block. This is
+    exactly the techmatched shape: 403, then a page that succeeds, then more
+    403s — the successful page proves the host is still serving us.
+    """
+    scraper = DummyScraper()
+    for _ in range(base_scraper.BLOCK_AFTER_FORBIDDEN - 1):
+        script(monkeypatch, [http_error(403)])
+        with pytest.raises(RuntimeError):
+            scraper.fetch(URL)
+
+    script(monkeypatch, [b"ok"])
+    assert scraper.fetch(URL) == "ok"
+
+    script(monkeypatch, [http_error(403)])
+    with pytest.raises(RuntimeError) as exc:
+        scraper.fetch(URL)
+    assert not isinstance(exc.value, HostBlocked)
+    assert not blocked_hosts()
+
+
+def test_403_breaker_is_per_host(monkeypatch):
+    """One WAF-blocked retailer must not take down every other source in the run."""
+    scraper = DummyScraper()
+    script(monkeypatch, [http_error(403)])
+    for _ in range(base_scraper.BLOCK_AFTER_FORBIDDEN - 1):
+        with pytest.raises(RuntimeError):
+            scraper.fetch(URL)
+    with pytest.raises(HostBlocked):
+        scraper.fetch(URL)
+
+    assert blocked_hosts() == {"example.test"}
+    script(monkeypatch, [b"fine"])
+    assert scraper.fetch(OTHER) == "fine"
+
+
+def test_404s_do_not_trip_the_403_breaker(monkeypatch):
+    """
+    End-of-pagination 404s are normal and unbounded (czone/amdhouse/rbt all do
+    this) — only 403 counts toward the block.
+    """
+    scraper = DummyScraper()
+    script(monkeypatch, [http_error(404)])
+    for _ in range(base_scraper.BLOCK_AFTER_FORBIDDEN + 2):
+        with pytest.raises(RuntimeError, match="HTTP 404"):
+            scraper.fetch(URL)
+    assert not blocked_hosts()
+
+
 def test_429_retries_up_to_limit_then_raises_runtime_error(monkeypatch):
     calls = script(monkeypatch, [http_error(429)])
     with pytest.raises(RuntimeError) as exc:

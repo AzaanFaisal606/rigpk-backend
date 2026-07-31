@@ -29,6 +29,7 @@ class HostBlocked(RuntimeError):
 # ----------------------------------------------------------------------
 
 BLOCK_AFTER_FAILED_FETCHES = 2   # consecutive fully-failed 429 fetches -> blocked
+BLOCK_AFTER_FORBIDDEN = 3        # consecutive 403s on one host -> blocked
 BACKOFF_BASE = 8.0               # seconds; first 429 retry waits ~this long
 BACKOFF_CAP = 120.0
 RETRY_AFTER_CAP = 300.0          # ignore absurd Retry-After values
@@ -38,6 +39,11 @@ _host_state: dict[str, dict] = {}
 # Status codes that mean "this URL is wrong", not "slow down". Retrying them
 # wastes the request budget and, on Hostinger/LiteSpeed hosts, a retired
 # category can answer 429 to browser-like clients — see docs/scraper-solutions.md #4b.
+#
+# 403 is the ambiguous one: a single 403 really can mean one dead URL, but a
+# *run* of them means a WAF is refusing this client (Cloudflare does this to
+# GitHub Actions egress IPs). So 403 stays un-retried, but consecutive 403s
+# feed the circuit breaker — see BLOCK_AFTER_FORBIDDEN in fetch().
 NO_RETRY_CODES = frozenset({400, 401, 403, 404, 410, 451})
 
 
@@ -46,7 +52,9 @@ def _host_of(url: str) -> str:
 
 
 def _state(host: str) -> dict:
-    return _host_state.setdefault(host, {"last_request": 0.0, "fail_429": 0, "blocked": False})
+    return _host_state.setdefault(
+        host, {"last_request": 0.0, "fail_429": 0, "fail_403": 0, "blocked": False}
+    )
 
 
 def host_blocked(host: str) -> bool:
@@ -179,11 +187,24 @@ class BaseScraper(ABC):
                 with urllib.request.urlopen(req, timeout=self.TIMEOUT) as resp:
                     body = resp.read().decode("utf-8", errors="ignore")
                 st["fail_429"] = 0
+                st["fail_403"] = 0
                 return body
 
             except urllib.error.HTTPError as e:
                 last_err = e
                 if e.code in NO_RETRY_CODES:
+                    # A run of 403s is a WAF refusing this client, not a run of
+                    # dead URLs. Trip the breaker so the caller reports "could
+                    # not scrape" instead of a misleading partial harvest that
+                    # would sweep every unseen row. Any 2xx resets the count.
+                    if e.code == 403:
+                        st["fail_403"] += 1
+                        if st["fail_403"] >= BLOCK_AFTER_FORBIDDEN:
+                            st["blocked"] = True
+                            raise HostBlocked(
+                                f"{host} returned 403 on {st['fail_403']} consecutive fetches "
+                                f"— treating as a block, not as dead URLs"
+                            ) from e
                     raise RuntimeError(f"Failed to fetch {url}: HTTP {e.code}") from e
                 if e.code == 429:
                     if attempt < retries - 1:

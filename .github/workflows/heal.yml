@@ -24,7 +24,7 @@ on:
         description: "Diagnose only — do not create a branch or open a PR"
         required: false
         type: boolean
-        default: true
+        default: false
 
 # One heal at a time; a newer failure supersedes an in-flight heal.
 concurrency:
