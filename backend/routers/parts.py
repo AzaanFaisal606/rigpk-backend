@@ -1,7 +1,7 @@
 from __future__ import annotations
 import json
 from typing import Any, Optional
-from fastapi import APIRouter, Query, HTTPException
+from fastapi import APIRouter, Query, HTTPException, Response
 from pydantic import BaseModel
 
 from db.database import get_db
@@ -41,6 +41,19 @@ def get_filter_options(category: str = Query(...)):
         return db.get_filter_options(category)
 
 
+@router.get("/search-index")
+def get_search_index(response: Response, category: str = Query(...)):
+    if category not in VALID_CATEGORIES:
+        raise HTTPException(status_code=400, detail=f"Invalid category '{category}'")
+    with get_db(DB_PATH) as db:
+        payload = db.search_index(category)
+    # Cloudflare fronts Render, so repeat hits are served from edge cache and
+    # the client revalidates cheaply with If-None-Match.
+    response.headers["ETag"] = f'"{payload["version"]}"'
+    response.headers["Cache-Control"] = "public, max-age=3600, stale-while-revalidate=86400"
+    return payload
+
+
 @router.get("/parts", response_model=PartsResponse)
 def get_parts(
     category:    Optional[str] = Query(None),
@@ -66,11 +79,21 @@ def get_parts(
     interface:   Optional[str] = Query(None),
     capacity:    Optional[str] = Query(None),
     q:           Optional[str] = Query(None),
+    ids:         Optional[str] = Query(None, description="Comma-separated part IDs, max 50"),
 ):
     if category and category not in VALID_CATEGORIES:
         raise HTTPException(status_code=400, detail=f"Invalid category '{category}'. Valid: {sorted(VALID_CATEGORIES)}")
     if source and source not in VALID_SOURCES:
         source = None
+
+    id_list: Optional[list[int]] = None
+    if ids is not None:
+        try:
+            id_list = [int(x) for x in ids.split(",") if x.strip()]
+        except ValueError:
+            raise HTTPException(status_code=400, detail="ids must be comma-separated integers")
+        if len(id_list) > 50:
+            raise HTTPException(status_code=400, detail="ids accepts at most 50 values")
 
     raw_spec_filters = {
         "brand": brand, "socket": socket, "model": model, "vram": vram,
@@ -92,6 +115,7 @@ def get_parts(
             sort=sort,
             limit=limit,
             offset=offset,
+            ids=id_list,
         )
 
     parsed_items = []

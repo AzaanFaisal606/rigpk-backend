@@ -1,0 +1,17 @@
+[
+  {"input": "5060 Ti White",        "expected": ["5060", "ti", "white"]},
+  {"input": "5060ti",               "expected": ["5060", "ti"]},
+  {"input": "5070ti",               "expected": ["5070", "ti"]},
+  {"input": "RTX5090",              "expected": ["rtx", "5090"]},
+  {"input": "  rtx   4090  ",       "expected": ["rtx", "4090"]},
+  {"input": "rtx rtx RTX 4090",     "expected": ["rtx", "4090"]},
+  {"input": "i5",                   "expected": ["i5"]},
+  {"input": "i5-13400F",            "expected": ["i5", "13400f"]},
+  {"input": "b760m-a/wifi",         "expected": ["b760m", "a", "wifi"]},
+  {"input": "x670e",                "expected": ["x670e"]},
+  {"input": "DDR5-6000",            "expected": ["ddr", "5", "6000"]},
+  {"input": "   ",                  "expected": []},
+  {"input": "%%%",                  "expected": []},
+  {"input": "32GB",                 "expected": ["32", "gb"]},
+  {"input": "Ryzen 7 9800X3D",      "expected": ["ryzen", "7", "9800x3d"]}
+]

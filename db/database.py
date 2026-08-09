@@ -26,6 +26,7 @@ AUTOINCREMENT -> SERIAL, remove PRAGMAs, adjust placeholder %s vs ?.
 
 from __future__ import annotations
 
+import hashlib
 import math
 import os
 import re
@@ -37,6 +38,7 @@ from pathlib import Path
 from typing import Optional
 import json
 from scrapers.spec_extractor import extract_specs
+from db.tokenize import MAX_SEARCH_TOKENS, normalize_name, search_tokens  # noqa: F401
 
 # Load repo-root .env (local dev) so TURSO_*/DB_PATH are available. override=False
 # so real environment vars (CI GitHub secrets, Render env) always win over .env.
@@ -198,6 +200,18 @@ _VALID_SPEC_KEYS = frozenset({
     "fan_size", "interface", "capacity", "model",
 })
 
+
+def _like_escape(term: str) -> str:
+    """
+    Neutralise LIKE wildcards in user input.
+
+    Without this a search for "%" matches the entire catalogue and "_" matches
+    any single character, so typing punctuation silently changes the query's
+    meaning. Paired with ESCAPE '\\' on the LIKE clause.
+    """
+    return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 _CATEGORY_SPEC_KEYS: dict[str, list[str]] = {
     "cpu":         ["brand", "socket", "model"],
     "gpu":         ["brand", "vram", "model"],
@@ -273,6 +287,10 @@ class Database:
                 self._conn.execute(
                     f"ALTER TABLE {table} ADD COLUMN last_seen_at TEXT DEFAULT NULL"
                 )
+            if "name_norm" not in cols:
+                self._conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN name_norm TEXT DEFAULT NULL"
+                )
         run_cols = {
             r["name"]
             for r in self._conn.execute("PRAGMA table_info(scrape_runs)").fetchall()
@@ -325,20 +343,21 @@ class Database:
             row = cur.execute(
                 """
                 INSERT INTO parts (source, source_id, name, category, url, thumbnail_url, specs,
-                                   is_active, last_seen_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)
+                                   name_norm, is_active, last_seen_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
                 ON CONFLICT(source, source_id) DO UPDATE SET
                     name          = excluded.name,
                     category      = excluded.category,
                     thumbnail_url = COALESCE(excluded.thumbnail_url, parts.thumbnail_url),
                     specs         = excluded.specs,
+                    name_norm     = excluded.name_norm,
                     is_active     = 1,
                     last_seen_at  = excluded.last_seen_at,
                     updated_at    = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
                 RETURNING id
                 """,
                 (p["source"], source_id, p["name"], p["category"], p["url"], thumbnail, specs_json,
-                 p["scraped_at"]),
+                 normalize_name(p["name"]), p["scraped_at"]),
             ).fetchone()
             part_id = row["id"]
             seen_ids.setdefault(p["source"], set()).add(part_id)
@@ -510,6 +529,45 @@ class Database:
     # Read
     # ------------------------------------------------------------------
 
+    def search_index(self, category: str) -> dict:
+        """
+        Compact per-category index for the in-browser search.
+
+        Scoped to one category because the market page always is, which keeps
+        the payload at 4-35 KB gzipped instead of 176 KB for the whole
+        catalogue. Source names are interned; price is included so the client
+        can sort and paginate without a round trip.
+        """
+        rows = self._conn.execute(
+            """
+            SELECT p.id, p.name, p.source, pl.price_pkr
+            FROM parts p
+            JOIN price_log pl ON pl.id = (
+                SELECT id FROM price_log
+                WHERE part_id = p.id
+                ORDER BY scraped_at DESC
+                LIMIT 1
+            )
+            WHERE p.category = ?
+              AND p.is_active = 1
+              AND pl.price_pkr IS NOT NULL
+            ORDER BY p.id
+            """,
+            (category,),
+        ).fetchall()
+
+        srcs = sorted({r[2] for r in rows})
+        src_idx = {s: i for i, s in enumerate(srcs)}
+        payload_rows = [[r[0], r[1], src_idx[r[2]], r[3]] for r in rows]
+
+        # Version = content hash. Drives the ETag, so an unchanged catalogue
+        # revalidates to a 304 and a scrape invalidates within the hour.
+        digest = hashlib.sha256(
+            repr(payload_rows).encode("utf-8")
+        ).hexdigest()[:16]
+
+        return {"srcs": srcs, "rows": payload_rows, "version": digest}
+
     def list_parts(
         self,
         *,
@@ -522,6 +580,7 @@ class Database:
         sort: str = "price_asc",
         limit: int = 50,
         offset: int = 0,
+        ids: Optional[list[int]] = None,
     ) -> tuple[list[dict], int]:
         """
         Return (items, total) for the market listing page.
@@ -544,21 +603,45 @@ class Database:
             conditions.append("pl.price_pkr <= ?")
             params.append(max_price)
         if q:
-            conditions.append("p.name LIKE ?")
-            params.append(f"%{q}%")
+            # Match the precomputed normalised name. The leading space in both
+            # the stored value and the parameter anchors each token at a word
+            # start, which is what stops "ti" matching the "ti" in "Edition".
+            for token in search_tokens(q):
+                conditions.append("p.name_norm LIKE ? ESCAPE '\\'")
+                params.append(f"% {_like_escape(token)}%")
         if specs_filter:
             for key, value in specs_filter.items():
                 if key in _VALID_SPEC_KEYS:
                     conditions.append("json_extract(p.specs, ?) = ?")
                     params.extend([f"$.{key}", value])
 
+        # `ids` is the client-index path: the browser already matched, filtered,
+        # sorted and paged, so we fetch exactly those rows in exactly that order.
+        # An empty list means "matched nothing" and must return nothing — it is
+        # NOT the same as ids=None, which means "no id filter".
+        if ids is not None:
+            if not ids:
+                return [], 0
+            placeholders = ",".join("?" for _ in ids)
+            conditions.append(f"p.id IN ({placeholders})")
+            params.extend(ids)
+
         where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
 
-        order = (
-            "ORDER BY pl.price_pkr ASC"
-            if sort == "price_asc"
-            else "ORDER BY pl.price_pkr DESC"
-        )
+        if ids is not None:
+            # Preserve the client's order; it already applied the user's sort.
+            order = "ORDER BY CASE p.id " + " ".join(
+                f"WHEN {int(pid)} THEN {i}" for i, pid in enumerate(ids)
+            ) + " END"
+            page = ""
+            page_params: list = []
+        else:
+            order = (
+                "ORDER BY pl.price_pkr ASC" if sort == "price_asc"
+                else "ORDER BY pl.price_pkr DESC"
+            )
+            page = "LIMIT ? OFFSET ?"
+            page_params = [limit, offset]
 
         base_query = f"""
             FROM parts p
@@ -581,9 +664,9 @@ class Database:
                    p.specs, pl.price_pkr
             {base_query}
             {order}
-            LIMIT ? OFFSET ?
+            {page}
             """,
-            params + [limit, offset],
+            params + page_params,
         ).fetchall()
 
         return [dict(r) for r in rows], total
@@ -937,14 +1020,15 @@ class Database:
             components_json = json.dumps(p["components"], ensure_ascii=False) if p.get("components") else None
             row = cur.execute(
                 """
-                INSERT INTO prebuilts (source, source_id, name, url, thumbnail_url, price_pkr, components, scraped_at,
-                                       is_active, last_seen_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+                INSERT INTO prebuilts (source, source_id, name, url, thumbnail_url, price_pkr, components,
+                                       name_norm, scraped_at, is_active, last_seen_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
                 ON CONFLICT(source, source_id) DO UPDATE SET
                     name          = excluded.name,
                     thumbnail_url = COALESCE(excluded.thumbnail_url, prebuilts.thumbnail_url),
                     price_pkr     = excluded.price_pkr,
                     components    = excluded.components,
+                    name_norm     = excluded.name_norm,
                     scraped_at    = excluded.scraped_at,
                     is_active     = 1,
                     last_seen_at  = excluded.last_seen_at,
@@ -954,7 +1038,7 @@ class Database:
                 (
                     p["source"], source_id, p["name"], p["url"],
                     p.get("thumbnail_url"), p.get("price_pkr"),
-                    components_json, p["scraped_at"], p["scraped_at"],
+                    components_json, normalize_name(p["name"]), p["scraped_at"], p["scraped_at"],
                 ),
             ).fetchone()
             seen_ids.setdefault(p["source"], set()).add(row["id"])
@@ -1010,8 +1094,9 @@ class Database:
             conditions.append("price_pkr <= ?")
             params.append(max_price)
         if q:
-            conditions.append("name LIKE ?")
-            params.append(f"%{q}%")
+            for token in search_tokens(q):
+                conditions.append("name_norm LIKE ? ESCAPE '\\'")
+                params.append(f"% {_like_escape(token)}%")
         if cpu_brand:
             brand = cpu_brand.lower()
             if brand == "amd":

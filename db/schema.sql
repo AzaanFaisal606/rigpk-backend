@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS parts (
     url           TEXT    NOT NULL,
     thumbnail_url TEXT,                      -- product image URL (may be NULL)
     specs         TEXT    DEFAULT NULL,      -- JSON dict e.g. {"brand":"AMD","socket":"AM5"}
+    name_norm     TEXT    DEFAULT NULL,      -- lowercased, tokenised, space-padded name for search
     is_active     INTEGER NOT NULL DEFAULT 1, -- 0 = not seen in last successful scrape of its source
     last_seen_at  TEXT    DEFAULT NULL,       -- ISO 8601 UTC of the last scrape that saw this part
     created_at    TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
@@ -41,8 +42,15 @@ CREATE TABLE IF NOT EXISTS price_log (
 -- Fast lookups used by the future web backend
 CREATE INDEX IF NOT EXISTS idx_parts_category ON parts(category);
 CREATE INDEX IF NOT EXISTS idx_parts_source   ON parts(source);
+-- Search matches `name_norm LIKE '% token%'`, which cannot use an index for the
+-- leading wildcard, but category-scoped searches still narrow the scan first.
+CREATE INDEX IF NOT EXISTS idx_parts_category_active ON parts(category, is_active);
 CREATE INDEX IF NOT EXISTS idx_price_log_part ON price_log(part_id);
 CREATE INDEX IF NOT EXISTS idx_price_log_time ON price_log(scraped_at);
+-- Serves the "latest price per part" correlated subquery in list_parts():
+-- SELECT id FROM price_log WHERE part_id = ? ORDER BY scraped_at DESC LIMIT 1.
+-- Covering, so the subquery resolves from the index alone.
+CREATE INDEX IF NOT EXISTS idx_price_log_latest ON price_log(part_id, scraped_at DESC, id);
 
 CREATE TABLE IF NOT EXISTS shared_builds (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -63,6 +71,7 @@ CREATE TABLE IF NOT EXISTS prebuilts (
     thumbnail_url TEXT,
     price_pkr     INTEGER,                   -- NULL = price hidden / out of stock
     components    TEXT    DEFAULT NULL,      -- JSON: {"cpu":..., "gpu":..., "ram":..., ...}
+    name_norm     TEXT    DEFAULT NULL,      -- lowercased, tokenised, space-padded name for search
     scraped_at    TEXT    NOT NULL,
     is_active     INTEGER NOT NULL DEFAULT 1, -- 0 = not seen in last successful scrape of its source
     last_seen_at  TEXT    DEFAULT NULL,       -- ISO 8601 UTC of the last scrape that saw this prebuilt
