@@ -54,21 +54,65 @@ class SearchIndexResponse(BaseModel):
 
 
 _TRACEBACK_PREFIX = re.compile(r"^Traceback\s*\(most recent call last\):\s*", re.IGNORECASE)
-_PATH_RE = re.compile(r"(/[\w.\-]+)+")
+_UNIX_PATH_RE = re.compile(r"(/[\w.\-]+)+")
+_WINDOWS_PATH_RE = re.compile(r"[A-Za-z]:\\[^\s]*")
+_URL_RE = re.compile(r"(?:libsql|https?)://\S+", re.IGNORECASE)
+_JWT_RE = re.compile(r"eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]+\.?[A-Za-z0-9_\-]*")
+# SQL keywords only in "statement position" (i.e. as a standalone word) —
+# once one shows up, redact the rest of the line with it rather than just
+# the keyword, since the leaked part is the query shape, not the verb.
+_SQL_STATEMENT_RE = re.compile(
+    r"\b(?:SELECT|INSERT|UPDATE|DELETE|FROM|WHERE|JOIN|DROP|ALTER)\b.*",
+    re.IGNORECASE | re.DOTALL,
+)
+# Catch-all for anything token/secret-shaped that the named patterns above
+# missed — a bare API key, a hex digest, etc.
+_LONG_TOKEN_RE = re.compile(r"[A-Za-z0-9+/_\-]{20,}")
+
+_SAFE_ERROR_MAX_LEN = 120
+_SAFE_ERROR_FALLBACK = "An internal error occurred"
 
 
 def _safe_error(error: str | None) -> str | None:
     """
-    A one-line, path-free summary. /api/stats is public; raw exception text
-    leaks filesystem paths and internal structure, and helps nobody reading
-    a status page.
+    Deny-by-default redaction for a public endpoint: everything that is not
+    recognisably safe gets scrubbed, rather than enumerating patterns to
+    strip and staying one pattern behind. /api/stats is public; raw
+    exception text can leak filesystem paths, connection strings, bearer
+    tokens/JWTs and SQL structure, none of which helps anyone reading a
+    status page. The full, unredacted error is still written to the
+    scrape_runs row by Database.record_scrape_run — this function only
+    guards what actually leaves the API boundary.
+
+    `None` means "no error" (the DB column was NULL / the run succeeded)
+    and is passed through as `None`. Any other falsy-after-cleanup value —
+    an empty string, an exception whose str() was empty, a whitespace-only
+    message — still means an error happened, so it gets a non-empty
+    generic message rather than silently vanishing.
     """
-    if not error:
+    if error is None:
         return None
-    first = error.strip().splitlines()[0]
+
+    stripped = error.strip()
+    if not stripped:
+        return _SAFE_ERROR_FALLBACK
+
+    first = stripped.splitlines()[0]
     first = _TRACEBACK_PREFIX.sub("", first).strip()
-    first = _PATH_RE.sub("<path>", first)
-    return first[:120] or None
+    if not first:
+        return _SAFE_ERROR_FALLBACK
+
+    first = _SQL_STATEMENT_RE.sub("<sql>", first)
+    first = _URL_RE.sub("<url>", first)
+    first = _JWT_RE.sub("<redacted>", first)
+    first = _WINDOWS_PATH_RE.sub("<path>", first)
+    first = _UNIX_PATH_RE.sub("<path>", first)
+    first = _LONG_TOKEN_RE.sub("<redacted>", first)
+
+    first = first.strip()
+    if not first:
+        return _SAFE_ERROR_FALLBACK
+    return first[:_SAFE_ERROR_MAX_LEN] or _SAFE_ERROR_FALLBACK
 
 
 @router.get("/stats", response_model=StatsResponse)

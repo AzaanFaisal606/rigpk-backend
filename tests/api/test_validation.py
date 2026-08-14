@@ -5,29 +5,24 @@ question than the one asked.
 """
 from db.database import Database
 
-
-def test_unknown_category_is_400(client):
-    r = client.get("/api/parts?category=banana")
-    assert r.status_code == 400
-    assert "detail" in r.json()
+# NOTE (F4, redaction fix round): test_unknown_category_is_400, test_unknown_sort_is_422
+# and test_limit_is_capped used to live here but exercised /api/parts behaviour that
+# predates this task (category/sort/limit validation were unchanged by the commit that
+# added this file — see git show 83e3ef7). They passed against pre-fix code too, so they
+# didn't cover anything this task introduced. Moved to
+# tests/api/test_parts_preexisting_validation.py and labelled as regression guards.
+# The tests below all exercise behaviour this task actually changed: unknown `source`
+# now 400 (was silently dropped), `/api/parts/filters` unknown category now 400 (was
+# `{}`), `ids` over 50 now 422 (was 400), and /api/stats error redaction.
 
 
 def test_unknown_source_is_400(client):
     assert client.get("/api/parts?source=not-a-retailer").status_code == 400
 
 
-def test_unknown_sort_is_422(client):
-    """sort is pattern-validated by Query(), so FastAPI answers 422 — fine, it is not 200."""
-    assert client.get("/api/parts?sort=cheapest").status_code == 422
-
-
 def test_filters_unknown_category_is_400_not_empty_dict(client):
     r = client.get("/api/parts/filters?category=banana")
     assert r.status_code == 400, "an empty dict reads as 'this category has no filters'"
-
-
-def test_limit_is_capped(client):
-    assert client.get("/api/parts?limit=100000").status_code == 422
 
 
 def test_ids_are_capped(client):
