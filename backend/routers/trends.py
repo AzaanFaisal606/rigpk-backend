@@ -16,11 +16,9 @@ _TREND_CATEGORIES = {"gpu", "cpu", "ram"}
 class TrendPoint(BaseModel):
     scrape_date: str
     center_price: int
-    method: str
     min_price: int
     max_price: int
     sample_count: int
-    used_count: int
 
 
 class TrendGroup(BaseModel):
@@ -65,11 +63,9 @@ def list_trend_groups(category: str = Query(...), db: Database = Depends(get_dat
             TrendPoint(
                 scrape_date=r["scrape_date"],
                 center_price=r["center_price"],
-                method=r["method"],
                 min_price=r["min_price"],
                 max_price=r["max_price"],
                 sample_count=r["sample_count"],
-                used_count=r["used_count"],
             )
         )
     # Series are capped to the most recent scrapes (db._TREND_MAX_DATES), so a
@@ -106,11 +102,9 @@ def get_trend_series(
         TrendPoint(
             scrape_date=r["scrape_date"],
             center_price=r["center_price"],
-            method=r["method"],
             min_price=r["min_price"],
             max_price=r["max_price"],
             sample_count=r["sample_count"],
-            used_count=r["used_count"],
         )
         for r in rows
     ]

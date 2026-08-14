@@ -264,6 +264,53 @@ _VALID_SPEC_KEYS = frozenset({
     "fan_size", "interface", "capacity", "model",
 })
 
+# M29: `get_filter_options` used to hand the frontend raw exact spec values
+# ("16GB", "32GB", ...) which its own UI then grouped into range-looking
+# dropdown labels — but a click still filtered on one exact value, so picking
+# a "16-32GB" grouping silently dropped everything except whichever single
+# value the UI happened to send. These two are the fix, and must stay in
+# sync: `_parse_bucket` is the only thing that reads the label shape
+# `get_filter_options` produces below (`_emit_bucket_label`), so a change to
+# one format requires a change to the other.
+_BUCKETED_SPEC_KEYS = frozenset({"capacity"})
+_BUCKET_VALUE_RE = re.compile(r'^(\d+(?:\.\d+)?)(GB|TB)$', re.IGNORECASE)
+_BUCKET_LABEL_RE = re.compile(r'^(\d+(?:\.\d+)?)-(\d+(?:\.\d+)?)(GB|TB)$', re.IGNORECASE)
+
+
+def _parse_bucket(value: str) -> Optional[tuple[float, float]]:
+    """"16-32GB" -> (16, 32). None if `value` isn't a range label (a plain
+    "16GB" falls through to exact-match filtering, unchanged)."""
+    m = _BUCKET_LABEL_RE.match(value)
+    if not m:
+        return None
+    lo, hi = float(m.group(1)), float(m.group(2))
+    return (lo, hi) if lo <= hi else None
+
+
+def _emit_bucket_label(values: list[str]) -> Optional[str]:
+    """
+    Collapse a category's distinct spec values into one "{lo}-{hi}{unit}"
+    range label, e.g. ["16GB", "32GB"] -> "16-32GB". Returns None (caller
+    falls back to the raw list) when the values aren't all the same
+    "<number><GB|TB>" shape and unit — mixed units (some SSD capacities are
+    GB, others TB) can't be compared as one range without a unit-aware
+    predicate, which `list_parts`'s CAST/REPLACE doesn't do.
+    """
+    matches = [_BUCKET_VALUE_RE.match(v) for v in values]
+    if not values or any(m is None for m in matches):
+        return None
+    parsed = [m for m in matches if m is not None]
+    units = {m.group(2).upper() for m in parsed}
+    if len(units) != 1:
+        return None
+    nums = [float(m.group(1)) for m in parsed]
+    unit = units.pop()
+    lo, hi = min(nums), max(nums)
+    if lo == hi:
+        return None  # only one distinct value — exact match already works
+    fmt = lambda n: str(int(n)) if n == int(n) else str(n)
+    return f"{fmt(lo)}-{fmt(hi)}{unit}"
+
 
 def _like_escape(term: str) -> str:
     """
@@ -897,11 +944,14 @@ class Database:
         limit: int = 50,
         offset: int = 0,
         ids: Optional[list[int]] = None,
+        include_specs: bool = False,
     ) -> tuple[list[dict], int]:
         """
         Return (items, total) for the market listing page.
         Items have the latest price per part. NULL-price rows excluded.
         specs_filter: e.g. {"brand": "AMD", "socket": "AM5"}
+        include_specs: the market grid never reads `specs` (only /build's
+        picker does), so it's left out of the SELECT by default.
         """
         conditions: list[str] = ["p.latest_price IS NOT NULL", "p.is_active = 1"]
         params: list = []
@@ -927,7 +977,17 @@ class Database:
                 params.append(f"% {_like_escape(token)}%")
         if specs_filter:
             for key, value in specs_filter.items():
-                if key in _VALID_SPEC_KEYS:
+                if key not in _VALID_SPEC_KEYS:
+                    continue
+                bounds = _parse_bucket(value) if key in _BUCKETED_SPEC_KEYS else None
+                if bounds:
+                    lo, hi = bounds
+                    conditions.append(
+                        "CAST(REPLACE(REPLACE(json_extract(p.specs, ?), 'GB', ''), 'TB', '') AS REAL) "
+                        "BETWEEN ? AND ?"
+                    )
+                    params.extend([f"$.{key}", lo, hi])
+                else:
                     conditions.append("json_extract(p.specs, ?) = ?")
                     params.extend([f"$.{key}", value])
 
@@ -968,10 +1028,11 @@ class Database:
             f"SELECT COUNT(*) {base_query}", params
         ).fetchone()[0]
 
+        specs_col = "p.specs," if include_specs else ""
         rows = self._conn.execute(
             f"""
             SELECT p.id, p.source, p.name, p.category, p.url, p.thumbnail_url,
-                   p.specs, p.latest_price AS price_pkr
+                   {specs_col} p.last_seen_at, p.latest_price AS price_pkr
             {base_query}
             {order}
             {page}
@@ -1003,7 +1064,16 @@ class Database:
                 (json_path, category, json_path),
             ).fetchall()
             values = [r[0] for r in rows if r[0]]
-            if values:
+            if not values:
+                continue
+            if key in _BUCKETED_SPEC_KEYS:
+                # See the comment above _BUCKETED_SPEC_KEYS: this label must
+                # stay parseable by _parse_bucket. Falls back to the raw
+                # value list (unchanged, exact-match behaviour) when the
+                # values aren't one consistent "<number><unit>" shape.
+                label = _emit_bucket_label(values)
+                result[key] = [label] if label else values
+            else:
                 result[key] = values
         return result
 

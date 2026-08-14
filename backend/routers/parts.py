@@ -22,6 +22,7 @@ class PartItem(BaseModel):
     url: str
     thumbnail_url: Optional[str]
     price_pkr: Optional[int]
+    last_seen_at: Optional[str] = None
     specs: Optional[dict[str, Any]] = None
 
 
@@ -226,6 +227,7 @@ def get_parts(
     capacity:    Optional[str] = Query(None),
     q:           Optional[str] = Query(None),
     ids:         Optional[str] = Query(None, description="Comma-separated part IDs, max 50"),
+    include_specs: bool        = Query(False, description="Include the specs blob (needed by the /build picker; the market grid doesn't read it)"),
     db:          Database      = Depends(get_database),
 ):
     if category and category not in VALID_CATEGORIES:
@@ -262,6 +264,7 @@ def get_parts(
         limit=limit,
         offset=offset,
         ids=id_list,
+        include_specs=include_specs,
     )
 
     parsed_items = []
