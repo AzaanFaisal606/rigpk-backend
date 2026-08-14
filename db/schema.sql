@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS parts (
     thumbnail_url TEXT,                      -- product image URL (may be NULL)
     specs         TEXT    DEFAULT NULL,      -- JSON dict e.g. {"brand":"AMD","socket":"AM5"}
     name_norm     TEXT    DEFAULT NULL,      -- lowercased, tokenised, space-padded name for search
+    latest_price  INTEGER DEFAULT NULL,      -- newest price_log price; cache, price_log is truth
     is_active     INTEGER NOT NULL DEFAULT 1, -- 0 = not seen in last successful scrape of its source
     last_seen_at  TEXT    DEFAULT NULL,       -- ISO 8601 UTC of the last scrape that saw this part
     created_at    TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),

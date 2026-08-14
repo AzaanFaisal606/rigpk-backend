@@ -109,6 +109,20 @@ def run():
     cats = conn.execute("SELECT COUNT(DISTINCT category) FROM parts").fetchone()[0]
     check("≥5 distinct categories", cats >= 5, f"{cats} categories")
 
+    # 9. parts.latest_price matches the newest price_log row (cache drift)
+    drift = conn.execute(
+        """
+        SELECT COUNT(*) FROM parts p
+        WHERE p.latest_price IS NOT (
+            SELECT price_pkr FROM price_log
+            WHERE part_id = p.id AND price_pkr IS NOT NULL
+            ORDER BY scraped_at DESC, id DESC
+            LIMIT 1
+        )
+        """
+    ).fetchone()[0]
+    check("latest_price matches newest price_log row", drift == 0, f"{drift} divergent")
+
     conn.close()
 
     total_checks = passed + failed

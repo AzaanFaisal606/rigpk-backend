@@ -329,6 +329,14 @@ class Database:
                 self._conn.execute(
                     f"ALTER TABLE {table} ADD COLUMN name_norm TEXT DEFAULT NULL"
                 )
+        parts_cols = {
+            r["name"]
+            for r in self._conn.execute("PRAGMA table_info(parts)").fetchall()
+        }
+        if "latest_price" not in parts_cols:
+            self._conn.execute(
+                "ALTER TABLE parts ADD COLUMN latest_price INTEGER DEFAULT NULL"
+            )
         run_cols = {
             r["name"]
             for r in self._conn.execute("PRAGMA table_info(scrape_runs)").fetchall()
@@ -353,6 +361,14 @@ class Database:
         """
         Upsert a list of scraped products and log their prices.
         Returns the number of price_log rows inserted.
+
+        Sets parts.latest_price to this call's price_pkr on both the INSERT
+        and ON CONFLICT DO UPDATE paths — it is a cache of the newest
+        price_log row, kept in sync here rather than derived at read time.
+        A back-dated re-scrape (an older scraped_at run applied after a
+        newer one) will overwrite latest_price with the older price; this
+        matches how the rest of the pipeline treats back-dated runs (see
+        CLAUDE.md "Trends") and is not a bug.
         """
         inserted = 0
         skipped = 0
@@ -381,8 +397,8 @@ class Database:
             row = cur.execute(
                 """
                 INSERT INTO parts (source, source_id, name, category, url, thumbnail_url, specs,
-                                   name_norm, is_active, last_seen_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+                                   name_norm, is_active, last_seen_at, latest_price)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
                 ON CONFLICT(source, source_id) DO UPDATE SET
                     name          = excluded.name,
                     category      = excluded.category,
@@ -391,11 +407,12 @@ class Database:
                     name_norm     = excluded.name_norm,
                     is_active     = 1,
                     last_seen_at  = excluded.last_seen_at,
+                    latest_price  = excluded.latest_price,
                     updated_at    = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
                 RETURNING id
                 """,
                 (p["source"], source_id, p["name"], p["category"], p["url"], thumbnail, specs_json,
-                 normalize_name(p["name"]), p["scraped_at"]),
+                 normalize_name(p["name"]), p["scraped_at"], price),
             ).fetchone()
             part_id = row["id"]
             seen_ids.setdefault(p["source"], set()).add(part_id)
