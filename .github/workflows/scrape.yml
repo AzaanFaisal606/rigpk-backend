@@ -55,6 +55,7 @@ jobs:
     env:
       TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
       TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+      SOURCES: ${{ github.event.inputs.sources }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -74,7 +75,7 @@ jobs:
       - name: Scrape parts
         id: scrape
         continue-on-error: true
-        run: python run_all.py ${{ github.event.inputs.sources }} --strict
+        run: python run_all.py $SOURCES --strict
 
       - name: Mark job failed if parts scrape failed
         if: steps.scrape.outcome == 'failure'

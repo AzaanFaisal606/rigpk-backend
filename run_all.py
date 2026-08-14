@@ -204,6 +204,26 @@ SCRAPERS = {
 }
 
 
+def parse_sources(requested: list[str]) -> list[str]:
+    """
+    Resolve CLI/workflow source arguments against the registry.
+
+    Empty input means "every source". An unrecognised name exits non-zero
+    rather than silently scraping nothing — a run that scrapes nothing and
+    exits 0 is indistinguishable from a successful run, and that result feeds
+    the freshness sweep.
+    """
+    known = list(SCRAPERS)
+    if not requested:
+        return known
+    unknown = [s for s in requested if s not in SCRAPERS]
+    if unknown:
+        raise SystemExit(
+            f"Unknown source(s): {', '.join(unknown)}. Known: {', '.join(known)}"
+        )
+    return requested
+
+
 def main():
     args = sys.argv[1:]
     do_notify = "--notify" in args
@@ -211,11 +231,8 @@ def main():
     do_strict = "--strict" in args   # CI: exit non-zero on any anomaly → self-heal
     args = [a for a in args if a not in ("--notify", "--test", "--strict")]
 
-    to_run = {k: v for k, v in SCRAPERS.items() if not args or k in args}
-
-    if not to_run:
-        print(f"Unknown scraper(s): {args}. Available: {list(SCRAPERS)}")
-        sys.exit(1)
+    sources = parse_sources(args)
+    to_run = {k: v for k, v in SCRAPERS.items() if k in sources}
 
     all_results: list[dict] = []
     # One entry per source attempted, recorded to scrape_runs afterwards.
