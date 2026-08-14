@@ -783,10 +783,15 @@ class Database:
         A source with no recorded runs at all is reported as not stale: we have
         no evidence either way, and flagging it would be a guess.
         """
+        # Was two round trips (latest-run lookup, then a separate
+        # last-success-per-source lookup); last_success_at is now a
+        # correlated subquery on the same statement, so this is one.
         latest = self._conn.execute(
             """
             SELECT source, ok, products, finished_at, error,
-                   before_active, after_active, swept
+                   before_active, after_active, swept,
+                   (SELECT MAX(finished_at) FROM scrape_runs s2
+                    WHERE s2.source = r.source AND s2.kind = r.kind AND s2.ok = 1) AS last_success_at
             FROM scrape_runs r
             WHERE kind = ?
               AND id = (SELECT MAX(id) FROM scrape_runs s
@@ -794,20 +799,12 @@ class Database:
             """,
             (kind,),
         ).fetchall()
-        successes = self._conn.execute(
-            """
-            SELECT source, MAX(finished_at) AS at
-            FROM scrape_runs WHERE kind = ? AND ok = 1 GROUP BY source
-            """,
-            (kind,),
-        ).fetchall()
-        last_ok = {r["source"]: r["at"] for r in successes}
 
         return {
             r["source"]: {
                 "stale": not r["ok"],
                 "last_run_at": r["finished_at"],
-                "last_success_at": last_ok.get(r["source"]),
+                "last_success_at": r["last_success_at"],
                 "last_products": r["products"],
                 "before_active": r["before_active"],
                 "after_active": r["after_active"],
@@ -1575,22 +1572,44 @@ class Database:
         return {(r["source"], r["category"]): r["n"] for r in rows}
 
     def stats(self) -> dict:
-        """Quick summary — useful for CLI output."""
-        parts_total = self._conn.execute(
-            "SELECT COUNT(*) FROM parts WHERE is_active = 1"
-        ).fetchone()[0]
-        by_source = self._conn.execute(
-            "SELECT source, COUNT(*) as n FROM parts WHERE is_active = 1 GROUP BY source"
+        """
+        Quick summary — useful for CLI output, and the landing page's per-source
+        cards + STALE ribbon via GET /api/stats.
+
+        Used to be six round trips (parts total, by-source, by-category,
+        price_log total, then source_health's own two). The active-parts
+        counts and the price_log total are pulled together with UNION ALL —
+        a single grouped result the by_source/by_category dicts are pivoted
+        from in Python — and source_health is down to one query itself, so
+        this is two round trips total.
+        """
+        rows = self._conn.execute(
+            """
+            SELECT 'part' AS kind, source, category, COUNT(*) AS n
+            FROM parts WHERE is_active = 1
+            GROUP BY source, category
+            UNION ALL
+            SELECT 'price_log', NULL, NULL, COUNT(*) FROM price_log
+            """
         ).fetchall()
-        by_cat = self._conn.execute(
-            "SELECT category, COUNT(*) as n FROM parts WHERE is_active = 1 GROUP BY category ORDER BY category"
-        ).fetchall()
-        price_rows = self._conn.execute("SELECT COUNT(*) FROM price_log").fetchone()[0]
+
+        parts_total = 0
+        price_rows = 0
+        by_source: dict[str, int] = {}
+        by_category: dict[str, int] = {}
+        for r in rows:
+            if r["kind"] == "part":
+                by_source[r["source"]] = by_source.get(r["source"], 0) + r["n"]
+                by_category[r["category"]] = by_category.get(r["category"], 0) + r["n"]
+                parts_total += r["n"]
+            else:
+                price_rows = r["n"]
+
         return {
             "total_parts": parts_total,
             "total_price_rows": price_rows,
-            "by_source": {r["source"]: r["n"] for r in by_source},
-            "by_category": {r["category"]: r["n"] for r in by_cat},
+            "by_source": by_source,
+            "by_category": dict(sorted(by_category.items())),
             "sources": self.source_health("parts"),
         }
 
