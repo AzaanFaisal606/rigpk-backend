@@ -1,5 +1,6 @@
 from __future__ import annotations
 import json
+import re
 from typing import Any, Optional
 from fastapi import APIRouter, Query, HTTPException, Response, Depends
 from pydantic import BaseModel
@@ -27,19 +28,65 @@ class PartsResponse(BaseModel):
     total: int
 
 
-@router.get("/stats")
+class SourceHealth(BaseModel):
+    stale: bool
+    last_run_at: Optional[str] = None
+    last_success_at: Optional[str] = None
+    last_products: Optional[int] = None
+    before_active: Optional[int] = None
+    after_active: Optional[int] = None
+    last_swept: Optional[int] = None
+    last_error: Optional[str] = None
+
+
+class StatsResponse(BaseModel):
+    total_parts: int
+    total_price_rows: int
+    by_source: dict[str, int]
+    by_category: dict[str, int]
+    sources: dict[str, SourceHealth]
+
+
+class SearchIndexResponse(BaseModel):
+    srcs: list[str]
+    rows: list[list]
+    version: str
+
+
+_TRACEBACK_PREFIX = re.compile(r"^Traceback\s*\(most recent call last\):\s*", re.IGNORECASE)
+_PATH_RE = re.compile(r"(/[\w.\-]+)+")
+
+
+def _safe_error(error: str | None) -> str | None:
+    """
+    A one-line, path-free summary. /api/stats is public; raw exception text
+    leaks filesystem paths and internal structure, and helps nobody reading
+    a status page.
+    """
+    if not error:
+        return None
+    first = error.strip().splitlines()[0]
+    first = _TRACEBACK_PREFIX.sub("", first).strip()
+    first = _PATH_RE.sub("<path>", first)
+    return first[:120] or None
+
+
+@router.get("/stats", response_model=StatsResponse)
 def get_stats(db: Database = Depends(get_database)):
-    return db.stats()
+    data = db.stats()
+    for health in data["sources"].values():
+        health["last_error"] = _safe_error(health.get("last_error"))
+    return data
 
 
-@router.get("/parts/filters")
+@router.get("/parts/filters", response_model=dict[str, list[str]])
 def get_filter_options(category: str = Query(...), db: Database = Depends(get_database)):
     if category not in VALID_CATEGORIES:
-        return {}
+        raise HTTPException(status_code=400, detail=f"Unknown category '{category}'")
     return db.get_filter_options(category)
 
 
-@router.get("/search-index")
+@router.get("/search-index", response_model=SearchIndexResponse)
 def get_search_index(response: Response, category: str = Query(...), db: Database = Depends(get_database)):
     if category not in VALID_CATEGORIES:
         raise HTTPException(status_code=400, detail=f"Invalid category '{category}'")
@@ -82,7 +129,7 @@ def get_parts(
     if category and category not in VALID_CATEGORIES:
         raise HTTPException(status_code=400, detail=f"Invalid category '{category}'. Valid: {sorted(VALID_CATEGORIES)}")
     if source and source not in VALID_SOURCES:
-        source = None
+        raise HTTPException(status_code=400, detail=f"Unknown source '{source}'")
 
     id_list: Optional[list[int]] = None
     if ids is not None:
@@ -91,7 +138,7 @@ def get_parts(
         except ValueError:
             raise HTTPException(status_code=400, detail="ids must be comma-separated integers")
         if len(id_list) > 50:
-            raise HTTPException(status_code=400, detail="ids accepts at most 50 values")
+            raise HTTPException(status_code=422, detail="ids accepts at most 50 values")
 
     raw_spec_filters = {
         "brand": brand, "socket": socket, "model": model, "vram": vram,

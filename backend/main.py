@@ -1,14 +1,33 @@
+import logging
 import os
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from backend.deps import lifespan
+from fastapi.responses import JSONResponse
+from backend.deps import DatabaseTimeoutError, lifespan
 from backend.routers.parts import router
 from backend.routers.builds import router as builds_router
 from backend.routers.prebuilts import router as prebuilts_router
 from backend.routers.trends import router as trends_router
 
+logger = logging.getLogger(__name__)
+
 app = FastAPI(title="RigPK API", lifespan=lifespan)
+
+
+@app.exception_handler(DatabaseTimeoutError)
+async def _database_timeout_handler(request: Request, exc: DatabaseTimeoutError):
+    # A DB call marshaled onto the owner thread ran past _CALL_TIMEOUT — the
+    # connection may still be alive, just slow, so this is a 503 (retryable)
+    # rather than a 500 (the caller's request was fine, the backend wasn't
+    # ready). The exception text itself is safe (no paths/tokens — see
+    # backend/deps.py), but the response stays generic on principle and the
+    # detail is logged server-side for whoever's debugging it.
+    logger.error("database call timed out: %s", exc)
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "Database temporarily unavailable, please retry"},
+    )
 
 _origins = [
     "http://localhost:3000",
