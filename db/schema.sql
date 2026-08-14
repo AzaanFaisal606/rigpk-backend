@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS parts (
     latest_price  INTEGER DEFAULT NULL,      -- newest price_log price; cache, price_log is truth
     is_active     INTEGER NOT NULL DEFAULT 1, -- 0 = not seen in last successful scrape of its source
     last_seen_at  TEXT    DEFAULT NULL,       -- ISO 8601 UTC of the last scrape that saw this part
+    delisted_at   TEXT    DEFAULT NULL,      -- ISO 8601 UTC when the sweep marked it inactive
     created_at    TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at    TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     UNIQUE (source, source_id)
@@ -76,6 +77,7 @@ CREATE TABLE IF NOT EXISTS prebuilts (
     scraped_at    TEXT    NOT NULL,
     is_active     INTEGER NOT NULL DEFAULT 1, -- 0 = not seen in last successful scrape of its source
     last_seen_at  TEXT    DEFAULT NULL,       -- ISO 8601 UTC of the last scrape that saw this prebuilt
+    delisted_at   TEXT    DEFAULT NULL,      -- ISO 8601 UTC when the sweep marked it inactive
     created_at    TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at    TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     UNIQUE (source, source_id)

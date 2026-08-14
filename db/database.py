@@ -329,6 +329,10 @@ class Database:
                 self._conn.execute(
                     f"ALTER TABLE {table} ADD COLUMN name_norm TEXT DEFAULT NULL"
                 )
+            if "delisted_at" not in cols:
+                self._conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN delisted_at TEXT DEFAULT NULL"
+                )
         parts_cols = {
             r["name"]
             for r in self._conn.execute("PRAGMA table_info(parts)").fetchall()
@@ -406,6 +410,7 @@ class Database:
                     specs         = excluded.specs,
                     name_norm     = excluded.name_norm,
                     is_active     = 1,
+                    delisted_at   = NULL,
                     last_seen_at  = excluded.last_seen_at,
                     latest_price  = excluded.latest_price,
                     updated_at    = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
@@ -454,6 +459,7 @@ class Database:
             cur = self._conn.execute(
                 f"""
                 UPDATE parts SET is_active = 0,
+                                 delisted_at = COALESCE(delisted_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
                                  updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
                 WHERE source = ? AND is_active = 1 AND id NOT IN ({placeholders})
                 """,
@@ -1050,6 +1056,36 @@ class Database:
             result[slot] = d
         return result
 
+    def resolve_part_status(self, part_ids: list[int]) -> dict[int, dict]:
+        """
+        Answer "is this part still listed?" for a set of parts in one query.
+
+        Shared builds use this to flag a part that has gone away since the link
+        was created. A favourites/watch-list feature needs the same answer, so
+        this is deliberately generic — it takes ids and returns facts, with no
+        knowledge of what is asking.
+
+        Unknown ids are simply absent from the result.
+        """
+        if not part_ids:
+            return {}
+        placeholders = ",".join("?" * len(part_ids))
+        rows = self._conn.execute(
+            f"""
+            SELECT id, is_active, last_seen_at, delisted_at
+            FROM parts WHERE id IN ({placeholders})
+            """,
+            list(part_ids),
+        ).fetchall()
+        return {
+            r["id"]: {
+                "is_active": bool(r["is_active"]),
+                "last_seen_at": r["last_seen_at"],
+                "delisted_at": r["delisted_at"],
+            }
+            for r in rows
+        }
+
     # ------------------------------------------------------------------
     # Prebuilts
     # ------------------------------------------------------------------
@@ -1080,6 +1116,7 @@ class Database:
                     name_norm     = excluded.name_norm,
                     scraped_at    = excluded.scraped_at,
                     is_active     = 1,
+                    delisted_at   = NULL,
                     last_seen_at  = excluded.last_seen_at,
                     updated_at    = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
                 RETURNING id
@@ -1109,6 +1146,7 @@ class Database:
             cur = self._conn.execute(
                 f"""
                 UPDATE prebuilts SET is_active = 0,
+                                     delisted_at = COALESCE(delisted_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
                                      updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
                 WHERE source = ? AND is_active = 1 AND id NOT IN ({placeholders})
                 """,
