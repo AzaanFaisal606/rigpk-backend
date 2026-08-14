@@ -20,7 +20,15 @@ import time
 import pytest
 
 import backend.deps as deps
-from backend.deps import DatabaseTimeoutError, ThreadSafeDatabase, _CALL_TIMEOUT
+from backend.deps import DatabaseTimeoutError, ThreadSafeDatabase
+
+# Deliberately tiny, passed as `ThreadSafeDatabase(..., call_timeout=...)`
+# rather than sleeping past the real `_CALL_TIMEOUT` (30s in production,
+# overridable via API_DB_CALL_TIMEOUT). Sleeping past 30s would make this one
+# test take longer than the entire rest of the suite combined; the timeout
+# codepath being exercised doesn't care what the actual number is, only that
+# a call outlasts whatever timeout the wrapper was given.
+_TEST_TIMEOUT = 0.2
 
 
 class _FakeDB:
@@ -34,12 +42,12 @@ class _FakeDB:
     def close(self):
         pass
 
-    def hang(self):
-        # Simulate a stalled network read: sleeps past _CALL_TIMEOUT, then
-        # returns normally (a real wedge would never return -- this just
-        # needs to outlast the timeout window, not run forever, so the test
-        # process itself never hangs).
-        time.sleep(_CALL_TIMEOUT + 1)
+    def hang(self, sleep_seconds):
+        # Simulate a stalled network read: sleeps past the caller-supplied
+        # timeout, then returns normally (a real wedge would never return --
+        # this just needs to outlast the timeout window, not run forever, so
+        # the test process itself never hangs).
+        time.sleep(sleep_seconds)
         return "should never be observed"
 
     def flaky_once(self):
@@ -60,26 +68,29 @@ class _FakeDB:
 
 def test_hung_call_times_out_and_does_not_wedge_later_calls(seeded_db):
     """
-    The regression test for the wedge: a call that hangs past _CALL_TIMEOUT
-    must raise DatabaseTimeoutError instead of blocking forever, and a
-    subsequent normal call -- from a different thread, same wrapper -- must
-    still succeed afterwards instead of queuing behind the stuck one.
+    The regression test for the wedge: a call that hangs past the wrapper's
+    call_timeout must raise DatabaseTimeoutError instead of blocking forever,
+    and a subsequent normal call -- from a different thread, same wrapper --
+    must still succeed afterwards instead of queuing behind the stuck one.
+
+    Uses a wrapper-local `call_timeout=_TEST_TIMEOUT` override, not the real
+    (30s) `_CALL_TIMEOUT` -- see module docstring for why.
     """
-    wrapper = ThreadSafeDatabase(seeded_db)
+    wrapper = ThreadSafeDatabase(seeded_db, call_timeout=_TEST_TIMEOUT)
     wrapper._db = _FakeDB()
 
     result_holder = {}
 
     def call_hang():
         try:
-            wrapper.hang()
+            wrapper.hang(_TEST_TIMEOUT + 1)
             result_holder["hang"] = "no exception raised"
         except DatabaseTimeoutError as exc:
             result_holder["hang"] = exc
 
     t = threading.Thread(target=call_hang)
     t.start()
-    t.join(timeout=_CALL_TIMEOUT + 2)
+    t.join(timeout=_TEST_TIMEOUT + 3)
 
     assert isinstance(result_holder.get("hang"), DatabaseTimeoutError)
 
@@ -93,7 +104,7 @@ def test_hung_call_times_out_and_does_not_wedge_later_calls(seeded_db):
 
     assert total == 30
     assert len(items) == 5
-    assert elapsed < _CALL_TIMEOUT, (
+    assert elapsed < _TEST_TIMEOUT + 1, (
         f"call took {elapsed:.2f}s -- looks like it queued behind the hung call "
         "instead of running on a fresh owner thread"
     )

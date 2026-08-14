@@ -50,6 +50,7 @@ detail.
 """
 from __future__ import annotations
 
+import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as _FutureTimeoutError
@@ -61,14 +62,36 @@ from fastapi import FastAPI
 from backend.config import DB_PATH
 from db.database import Database
 
-# Worst measured Turso round trip (Tokyo primary / Oregon API) is ~1.7s (see
-# task-2-report.md). 5s gives ~3x headroom over that worst case for a single
-# call — enough that a legitimately slow-but-alive query isn't mistaken for a
-# wedge — while still failing well inside any sane caller/proxy timeout
-# instead of hanging indefinitely, which is the whole point of this fix.
+# This is a wedge-breaker, not a latency SLO. Its only job is to guarantee a
+# marshaled call eventually gives up instead of hanging the owner thread
+# forever (see the F1 fix in task-2-report.md) — it is not a target response
+# time and callers must not treat a timeout here as "this request was slow."
+# Any value low enough that a real, legitimately-slow-but-alive query could
+# plausibly hit it converts a slow response into a hard error, which is worse
+# than slow: it tears down a working connection and 500s a request that would
+# have succeeded if just given a few more seconds.
+#
+# Round-1 fix used 5.0s, sized off a single measured worst case of ~1.7s
+# (Tokyo primary / Oregon API). That measurement was for one settled call in
+# isolation. It undercounts real traffic: `GET /api/stats` alone makes six
+# sequential round trips (collapsed to one in Phase 3 Task 3, but live today),
+# and a cold Turso connection's first query is measurably slower than a warm
+# one. 5s left almost no headroom on any single call once those factors are
+# accounted for.
+#
+# 30.0s instead: generous enough that no legitimate query should ever trip
+# it, while still failing well short of "indefinite" (the actual bug this
+# exists to fix) and well inside any sane caller/proxy timeout upstream.
 # (Compare `BaseScraper`'s 90s read deadline: that number is sized for a
-# batch scrape that can afford to wait, not an interactive request path.)
-_CALL_TIMEOUT = 5.0
+# batch scrape that can afford to wait, not an interactive request path —
+# 30s sits between the two deliberately.)
+#
+# Overridable via `API_DB_CALL_TIMEOUT` (seconds) so it can be tuned on
+# Render without a code change, read once here at import time. A malformed
+# value (non-numeric) raises `ValueError` at import — fail loudly, never
+# silently fall back to the default.
+_env_call_timeout = os.environ.get("API_DB_CALL_TIMEOUT")
+_CALL_TIMEOUT = 30.0 if _env_call_timeout is None else float(_env_call_timeout)
 
 
 class DatabaseTimeoutError(RuntimeError):
@@ -106,11 +129,17 @@ class ThreadSafeDatabase:
     the very first request.
     """
 
-    def __init__(self, path):
+    def __init__(self, path, *, call_timeout: float | None = None):
+        # `call_timeout` overrides the module-level `_CALL_TIMEOUT` for this
+        # instance only — exists so tests can exercise the timeout path
+        # without sleeping past the real (now 30s) production value. Read at
+        # construction time, not baked in as a default-arg, so it also picks
+        # up a monkeypatched `deps._CALL_TIMEOUT` when not explicitly passed.
         self._path = path
         self._db: Database | None = None
         self._swap_lock = threading.Lock()
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="db-owner")
+        self._call_timeout = _CALL_TIMEOUT if call_timeout is None else call_timeout
 
     def _connect_if_needed(self) -> Database:
         # Only ever called from inside a task running ON the owner thread.
@@ -144,7 +173,7 @@ class ThreadSafeDatabase:
             executor = self._executor
         future = executor.submit(task)
         try:
-            return future.result(timeout=_CALL_TIMEOUT)
+            return future.result(timeout=self._call_timeout)
         except _FutureTimeoutError as exc:
             # Owner thread is stuck (e.g. a hung network read with no
             # client-side timeout — see db/libsql_adapter.py). Abandon it
@@ -154,7 +183,7 @@ class ThreadSafeDatabase:
             # hang is exactly the bug this fix exists to close.
             self._replace_owner(wait_for_old=False)
             raise DatabaseTimeoutError(
-                f"database call did not complete within {_CALL_TIMEOUT}s"
+                f"database call did not complete within {self._call_timeout}s"
             ) from exc
         except Exception as exc:
             if not _is_transient_error(exc):
@@ -165,7 +194,7 @@ class ThreadSafeDatabase:
             self._replace_owner(wait_for_old=True)
             with self._swap_lock:
                 executor = self._executor
-            return executor.submit(task).result(timeout=_CALL_TIMEOUT)
+            return executor.submit(task).result(timeout=self._call_timeout)
 
     def __getattr__(self, name: str):
         # Reading the attribute off self._db (to get a bound method) has to
@@ -186,7 +215,7 @@ class ThreadSafeDatabase:
             executor, db = self._executor, self._db
         if db is not None:
             try:
-                executor.submit(db.close).result(timeout=_CALL_TIMEOUT)
+                executor.submit(db.close).result(timeout=self._call_timeout)
             except Exception:
                 pass
         # wait=False: if the owner thread is (still) stuck on a hung call,
