@@ -1,5 +1,6 @@
 from __future__ import annotations
 import json
+import logging
 import re
 from typing import Any, Optional
 from fastapi import APIRouter, Query, HTTPException, Response, Depends
@@ -10,6 +11,7 @@ from backend.deps import get_database
 from backend.constants import VALID_CATEGORIES, VALID_SOURCES
 
 router = APIRouter(prefix="/api")
+logger = logging.getLogger(__name__)
 
 
 class PartItem(BaseModel):
@@ -53,66 +55,122 @@ class SearchIndexResponse(BaseModel):
     version: str
 
 
-_TRACEBACK_PREFIX = re.compile(r"^Traceback\s*\(most recent call last\):\s*", re.IGNORECASE)
-_UNIX_PATH_RE = re.compile(r"(/[\w.\-]+)+")
-_WINDOWS_PATH_RE = re.compile(r"[A-Za-z]:\\[^\s]*")
-_URL_RE = re.compile(r"(?:libsql|https?)://\S+", re.IGNORECASE)
-_JWT_RE = re.compile(r"eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]+\.?[A-Za-z0-9_\-]*")
-# SQL keywords only in "statement position" (i.e. as a standalone word) —
-# once one shows up, redact the rest of the line with it rather than just
-# the keyword, since the leaked part is the query shape, not the verb.
-_SQL_STATEMENT_RE = re.compile(
-    r"\b(?:SELECT|INSERT|UPDATE|DELETE|FROM|WHERE|JOIN|DROP|ALTER)\b.*",
-    re.IGNORECASE | re.DOTALL,
+# ---------------------------------------------------------------------------
+# _safe_error: deny-by-default classifier (fix round 2).
+#
+# Round 1 was still architecturally a strip-list ("redact everything that
+# looks like a secret/path, keep the rest") — and a strip-list is always one
+# pattern behind. Both of the round-2 review's breaks exploited the same
+# structural gap: `_LONG_TOKEN_RE`'s char class excluded `.` and `%`, so a
+# secret or path chopped into short runs by dots (a hostname) or
+# percent-escapes (an encoded path) sailed through every pattern untouched;
+# a unicode homoglyph would evade the ASCII-only path/SQL patterns the same
+# way. No amount of pattern-adding closes that class of gap, because the
+# function was still built to pass input through by default and only
+# subtract known-bad shapes from it.
+#
+# This version never passes input through. It classifies the leading
+# exception-type name (or a known literal phrase) against
+# `_KNOWN_ERROR_PREFIXES` below and returns ONLY the matched constant
+# string — never a slice, never a substitution, never any byte of the
+# original. The `error` text stored in scrape_runs and surfaced through
+# `source_health()` into `/api/stats` is produced entirely by this repo's
+# own scrapers (scrapers/exceptions.py, scrapers/base_scraper.py,
+# run_all.py, scrapers/prebuilts/run_prebuilts.py), so its useful shapes are
+# a small, known set: `ScrapeIncomplete: ...`, `HostBlocked: ...`,
+# `RuntimeError: Failed to fetch ...: HTTP 403`, `TimeoutError: ...`,
+# `returned 0 products`/`returned 0 prebuilts`, `host blocked mid-run: ...`.
+# Anything that doesn't match one of those shapes — however it's
+# structured, ASCII or not — falls straight through to
+# `_SAFE_ERROR_FALLBACK`.
+_KNOWN_ERROR_PREFIXES: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"^HostBlocked\b"),
+     "Site blocked automated requests during this run"),
+    (re.compile(r"^host blocked mid-run\b"),
+     "Site blocked automated requests during this run"),
+    (re.compile(r"^ScrapeIncomplete\b"),
+     "Scrape did not finish — some pages could not be read"),
+    (re.compile(r"^TimeoutError\b"),
+     "Site did not respond in time"),
+    (re.compile(r"^returned 0 (?:products|prebuilts)$"),
+     "Scraper completed but found no listings"),
 )
-# Catch-all for anything token/secret-shaped that the named patterns above
-# missed — a bare API key, a hex digest, etc.
-_LONG_TOKEN_RE = re.compile(r"[A-Za-z0-9+/_\-]{20,}")
+# RuntimeError is scrapers/base_scraper.py's fetch()-failure type. Some of
+# those carry an HTTP status worth surfacing on the STALE ribbon (403 vs. a
+# generic failure is a genuinely different diagnosis) — allowed only as a
+# narrow field extracted with a strict pattern and re-emitted into OUR OWN
+# template below, never copied from the input.
+_RUNTIME_ERROR_RE = re.compile(r"^RuntimeError\b")
+_HTTP_STATUS_RE = re.compile(r"\b([45]\d{2})\b")
+_RUNTIME_ERROR_FALLBACK = "Repeated fetch failures against this site"
 
-_SAFE_ERROR_MAX_LEN = 120
 _SAFE_ERROR_FALLBACK = "An internal error occurred"
+# Backstop only — every branch above already returns a short hand-written
+# constant, so this can never actually bite. Kept in case a phrase is ever
+# lengthened without re-checking this file.
+_SAFE_ERROR_MAX_LEN = 120
+
+# Every string _safe_error can return that is NOT the templated HTTP-status
+# phrase — exported for tests to assert output is drawn only from this
+# allowlist (plus `_HTTP_STATUS_PHRASE_RE` for the one templated case).
+_FIXED_SAFE_ERROR_MESSAGES: frozenset[str] = frozenset(
+    {phrase for _, phrase in _KNOWN_ERROR_PREFIXES}
+    | {_RUNTIME_ERROR_FALLBACK, _SAFE_ERROR_FALLBACK}
+)
+_HTTP_STATUS_PHRASE_RE = re.compile(r"^Fetch failed — site returned HTTP [45]\d{2}$")
 
 
 def _safe_error(error: str | None) -> str | None:
     """
-    Deny-by-default redaction for a public endpoint: everything that is not
-    recognisably safe gets scrubbed, rather than enumerating patterns to
-    strip and staying one pattern behind. /api/stats is public; raw
-    exception text can leak filesystem paths, connection strings, bearer
-    tokens/JWTs and SQL structure, none of which helps anyone reading a
-    status page. The full, unredacted error is still written to the
-    scrape_runs row by Database.record_scrape_run — this function only
-    guards what actually leaves the API boundary.
+    Deny-by-default classifier for the `error` text stored in scrape_runs
+    and surfaced through source_health() into /api/stats, which drives the
+    landing page's STALE ribbon reason. /api/stats is public.
+
+    A reader needs to know *which class of failure* happened, not the free
+    text, so this matches the leading exception-type name (or a known
+    literal phrase, see `_KNOWN_ERROR_PREFIXES`) and returns the mapped
+    constant string — or, for RuntimeError, a template filled with an HTTP
+    status code that was itself validated against `_HTTP_STATUS_RE` before
+    being re-emitted. No byte of the original input is ever part of the
+    response. Anything unrecognised — including inputs specifically crafted
+    to evade a pattern list — falls through to `_SAFE_ERROR_FALLBACK`.
+
+    The full, untruncated text is (a) logged server-side via `logger.error`
+    right here, and (b) written verbatim to the scrape_runs row by
+    `Database.record_scrape_run`. This function only guards what leaves the
+    `/api/stats` response boundary — storage and logs are unaffected.
 
     `None` means "no error" (the DB column was NULL / the run succeeded)
-    and is passed through as `None`. Any other falsy-after-cleanup value —
-    an empty string, an exception whose str() was empty, a whitespace-only
-    message — still means an error happened, so it gets a non-empty
-    generic message rather than silently vanishing.
+    and is passed through as `None`. Any other falsy-after-strip value — an
+    empty string, an exception whose str() was empty, a whitespace-only
+    message — still means an error happened, so it maps to the generic
+    fallback rather than silently vanishing.
     """
     if error is None:
         return None
 
     stripped = error.strip()
     if not stripped:
+        logger.error("scrape run failed with an empty error message")
         return _SAFE_ERROR_FALLBACK
 
-    first = stripped.splitlines()[0]
-    first = _TRACEBACK_PREFIX.sub("", first).strip()
+    logger.error("scrape run error (full detail, pre-redaction): %s", stripped)
+
+    first = stripped.splitlines()[0].strip()
     if not first:
-        return _SAFE_ERROR_FALLBACK
+        return _SAFE_ERROR_FALLBACK[:_SAFE_ERROR_MAX_LEN]
 
-    first = _SQL_STATEMENT_RE.sub("<sql>", first)
-    first = _URL_RE.sub("<url>", first)
-    first = _JWT_RE.sub("<redacted>", first)
-    first = _WINDOWS_PATH_RE.sub("<path>", first)
-    first = _UNIX_PATH_RE.sub("<path>", first)
-    first = _LONG_TOKEN_RE.sub("<redacted>", first)
+    for pattern, phrase in _KNOWN_ERROR_PREFIXES:
+        if pattern.search(first):
+            return phrase[:_SAFE_ERROR_MAX_LEN]
 
-    first = first.strip()
-    if not first:
-        return _SAFE_ERROR_FALLBACK
-    return first[:_SAFE_ERROR_MAX_LEN] or _SAFE_ERROR_FALLBACK
+    if _RUNTIME_ERROR_RE.search(first):
+        status_match = _HTTP_STATUS_RE.search(first)
+        if status_match:
+            return f"Fetch failed — site returned HTTP {status_match.group(1)}"[:_SAFE_ERROR_MAX_LEN]
+        return _RUNTIME_ERROR_FALLBACK[:_SAFE_ERROR_MAX_LEN]
+
+    return _SAFE_ERROR_FALLBACK[:_SAFE_ERROR_MAX_LEN]
 
 
 @router.get("/stats", response_model=StatsResponse)
