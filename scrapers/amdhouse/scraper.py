@@ -12,17 +12,15 @@ Usage:
 """
 
 import html as _html
-import os
 import re
-import sys
 import time
 
-from scrapers.base_scraper import BaseScraper, is_http_404
+from scrapers.base_scraper import is_http_404
 from scrapers.exceptions import ScrapeIncomplete
+from scrapers.listing_scraper import ListingScraper, run_and_persist
 
 SOURCE = "amdhouse.pk"
 BASE = "https://amdhouse.pk"
-PAGE_DELAY = 1.2
 
 # amdhouse splits its catalogue into flat sibling categories rather than a
 # parent/child tree — "intel-motherboards" is not under "motherboards", and the
@@ -49,7 +47,9 @@ CATEGORIES: list[tuple[str, str]] = [
 ]
 
 
-class AmdHouseScraper(BaseScraper):
+class AmdHouseScraper(ListingScraper):
+
+    SOURCE = SOURCE
 
     # On a discounted card WooCommerce renders the original inside
     # <del>...<bdi>...</bdi></del> and the price you actually pay inside a
@@ -67,6 +67,9 @@ class AmdHouseScraper(BaseScraper):
     def _to_int(raw: str) -> int:
         return int(raw.replace(",", ""))
 
+    def next_page_url(self, url: str, page: int) -> str:
+        return f"{url}?paged={page}" if page > 1 else url
+
     def _extract_price(self, block: str) -> int | None:
         """Sale price wins over the crossed-out regular price."""
         for pattern in (self._SALE_PRICE_RE, self._PRICE_RE):
@@ -75,43 +78,7 @@ class AmdHouseScraper(BaseScraper):
                 return self._to_int(m.group(1))
         return None
 
-    def scrape(self, url: str) -> list[dict]:
-        all_products: list[dict] = []
-        seen_urls: set[str] = set()
-        page = 1
-
-        while True:
-            page_url = f"{url}?paged={page}" if page > 1 else url
-            print(f"    page {page}: {page_url}")
-            try:
-                html = self.fetch(page_url)
-            except Exception as e:
-                print(f"    page {page} fetch failed ({e}) — stopping.")
-                break
-            products = self._parse_page(html)
-
-            if not products:
-                print(f"    no products on page {page} — done.")
-                break
-
-            new = [p for p in products if p["url"] not in seen_urls]
-            for p in new:
-                seen_urls.add(p["url"])
-
-            print(f"    {len(new)} new (page total: {len(products)}, collected: {len(all_products) + len(new)})")
-            all_products.extend(new)
-
-            if not new:
-                break
-
-            page += 1
-            time.sleep(PAGE_DELAY)
-
-        return all_products
-
-    def _parse_page(self, html: str) -> list[dict]:
-        scraped_at = self.now()
-
+    def card_blocks(self, html: str) -> list[str]:
         # Product blocks — split on product div class. Bound the final block
         # at the theme's own "<footer id=\"footer\"" marker instead of
         # end-of-document: unbounded, the last card's block swallows the
@@ -128,55 +95,49 @@ class AmdHouseScraper(BaseScraper):
                 end = footer_idx if footer_idx != -1 else len(html)
             blocks.append(html[start:end])
         # First chunk(s) without a title are the outer wrapper div, not a card
-        blocks = [b for b in blocks if 'woocommerce-loop-product__title' in b]
+        return [b for b in blocks if 'woocommerce-loop-product__title' in b]
 
-        if not blocks:
-            return []
+    def parse_card(self, block: str) -> dict | None:
+        # Skip out-of-stock — Flatsome marks the card class "out-of-stock"
+        # (hyphenated) and emits a <div class="out-of-stock-label">.
+        if "out-of-stock" in block:
+            return None
 
-        results = []
-        for block in blocks:
-            # Skip out-of-stock — Flatsome marks the card class "out-of-stock"
-            # (hyphenated) and emits a <div class="out-of-stock-label">.
-            if "out-of-stock" in block:
-                continue
+        # Name
+        name_m = re.search(
+            r'woocommerce-loop-product__title[^>]*><a[^>]+>([^<]+)', block
+        )
+        if not name_m:
+            return None
+        name = _html.unescape(name_m.group(1)).strip()
 
-            # Name
-            name_m = re.search(
-                r'woocommerce-loop-product__title[^>]*><a[^>]+>([^<]+)', block
-            )
-            if not name_m:
-                continue
-            name = _html.unescape(name_m.group(1)).strip()
+        # URL
+        url_m = re.search(
+            r'woocommerce-LoopProduct-link[^"]*"\s+href="([^"]+)"', block
+        )
+        # also try title anchor href
+        if not url_m:
+            url_m = re.search(r'href="(https://amdhouse\.pk/product/[^"]+)"', block)
+        product_url = url_m.group(1) if url_m else ""
 
-            # URL
-            url_m = re.search(
-                r'woocommerce-LoopProduct-link[^"]*"\s+href="([^"]+)"', block
-            )
-            # also try title anchor href
-            if not url_m:
-                url_m = re.search(r'href="(https://amdhouse\.pk/product/[^"]+)"', block)
-            product_url = url_m.group(1) if url_m else ""
+        # Price: sale price wins over the crossed-out regular price
+        price_pkr = self._extract_price(block)
 
-            # Price: sale price wins over the crossed-out regular price
-            price_pkr = self._extract_price(block)
+        # Thumbnail
+        thumb_m = re.search(
+            r'<img[^>]+src="(https://amdhouse\.pk/wp-content/uploads/[^"]+)"', block
+        )
+        thumbnail = thumb_m.group(1) if thumb_m else None
 
-            # Thumbnail
-            thumb_m = re.search(
-                r'<img[^>]+src="(https://amdhouse\.pk/wp-content/uploads/[^"]+)"', block
-            )
-            thumbnail = thumb_m.group(1) if thumb_m else None
-
-            results.append({
-                "name": name,
-                "price_pkr": price_pkr,
-                "url": product_url,
-                "category": "",
-                "source": SOURCE,
-                "scraped_at": scraped_at,
-                "thumbnail_url": thumbnail,
-            })
-
-        return results
+        return {
+            "name": name,
+            "price_pkr": price_pkr,
+            "url": product_url,
+            "category": "",
+            "source": SOURCE,
+            "scraped_at": self.now(),
+            "thumbnail_url": thumbnail,
+        }
 
 
 def _find_valid_categories() -> list[tuple[str, str]]:
@@ -224,38 +185,9 @@ def _find_valid_categories() -> list[tuple[str, str]]:
 
 
 def main():
-    scraper = AmdHouseScraper()
-    all_results: list[dict] = []
-
     print("Checking available categories...")
     valid = _find_valid_categories()
-
-    for url, category in valid:
-        print(f"\n[{category.upper()}] {url}")
-        products = scraper.scrape(url)
-        for p in products:
-            p["category"] = category
-        print(f"  => {len(products)} products")
-        all_results.extend(products)
-
-    if not all_results:
-        print("No products scraped.")
-        sys.exit(1)
-
-    from collections import Counter
-    counts = Counter(p["category"] for p in all_results)
-    print(f"\nTotal: {len(all_results)} products")
-    for cat, n in sorted(counts.items()):
-        print(f"  {cat:15s} {n}")
-
-    sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..")))
-    from db.database import get_db
-    db_path = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "data", "ppc.db"))
-    with get_db(db_path) as db:
-        inserted = db.upsert_products(all_results)
-        print(f"\nDB: {inserted} price rows written")
-        s = db.stats()
-        print(f"DB stats: {s['total_parts']} parts, {s['total_price_rows']} price rows")
+    run_and_persist(AmdHouseScraper(), valid, write_db=True)
 
 
 if __name__ == "__main__":
