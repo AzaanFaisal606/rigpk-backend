@@ -58,6 +58,37 @@ _DEFAULT_DB = Path(os.getenv("DB_PATH", str(Path(__file__).parent.parent / "data
 _REMOTE_SCHEMA_APPLIED: set[str] = set()
 
 
+def _strip_sql_line_comments(script: str) -> str:
+    """
+    Remove `--` line comments from a SQL script.
+
+    Not a general SQL tokenizer: it treats `--` as a comment marker
+    unconditionally, with no awareness of quoted string literals. That is
+    safe for schema.sql specifically — every string literal in that file
+    (strftime format/arg strings, short enum tags like 'parts') was checked
+    by hand and none contains `--`. If schema.sql ever grows a string literal
+    containing `--`, this needs real quote-tracking; until then the simple
+    per-line strip is correct and keeps the splitter easy to audit.
+    """
+    return "\n".join(line[: line.find("--")] if "--" in line else line
+                      for line in script.splitlines())
+
+
+def _split_sql_statements(script: str) -> list[str]:
+    """
+    Split a SQL script into individual statements suitable for one
+    self._conn.execute() call each.
+
+    Strips `--` line comments first (schema.sql's comments themselves
+    contain semicolons and apostrophes — e.g. "it's not safe in this
+    executescript()," and "'model' | 'spec'" — so a naive split(";") on the
+    raw text mangles statement boundaries) and drops empty statements left
+    behind by comment-only lines.
+    """
+    stripped = _strip_sql_line_comments(script)
+    return [s.strip() for s in stripped.split(";") if s.strip()]
+
+
 def _slug(url: str) -> str:
     """Derive a stable, short identifier from a product URL."""
     url = re.sub(r"https?://[^/]+/", "", url).rstrip("/")
@@ -328,7 +359,22 @@ class Database:
         if self._remote and self._target in _REMOTE_SCHEMA_APPLIED:
             return
         with open(_SCHEMA, encoding="utf-8") as f:
-            self._conn.executescript(f.read())
+            script = f.read()
+        for stmt in _split_sql_statements(script):
+            if self._remote and stmt.upper().startswith("PRAGMA"):
+                # libSQL rejects PRAGMA outright (SQL_PARSE_ERROR). Under the old
+                # executescript() call that error was swallowed and silently
+                # abandoned every statement after it — the entire schema (every
+                # CREATE TABLE/INDEX) went missing on Turso with no error raised.
+                # Skipping PRAGMAs explicitly, statement by statement, is what
+                # lets the rest of the schema actually apply remotely.
+                continue
+            try:
+                self._conn.execute(stmt)
+            except Exception as e:
+                raise RuntimeError(
+                    f"schema.sql statement failed: {stmt[:80]!r}: {e}"
+                ) from e
         self._migrate()
         self._conn.commit()
         if self._remote:

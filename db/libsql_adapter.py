@@ -16,9 +16,19 @@ Bridged incompatibilities (verified empirically against a live Turso DB):
      re-raised as `sqlite3.IntegrityError` so existing except-blocks still fire.
 
 Everything else the code relies on is native on libsql and passes straight
-through: executescript, executemany, RETURNING, cursor.rowcount, PRAGMA
-(no-op remotely), `with conn:` transactions, commit/rollback, cross-connection
-durability. See docs/DB_migration.md for the full compatibility matrix.
+through: executemany, RETURNING, cursor.rowcount, `with conn:` transactions,
+commit/rollback, cross-connection durability. See docs/DB_migration.md for
+the full compatibility matrix.
+
+`executescript` and PRAGMA are NOT safely usable remotely, despite earlier
+claims in this docstring. libsql's PRAGMA is a hard SQL_PARSE_ERROR, not a
+no-op, and the underlying `executescript` silently abandons every statement
+after the one that fails — `db/database.py` used to run schema.sql through
+`executescript()`, whose first statement is `PRAGMA journal_mode = WAL`, and
+as a result *no* table or index in schema.sql was ever created on Turso.
+`_apply_schema()` now applies schema.sql statement-by-statement via
+`execute()`, skipping PRAGMAs remotely, specifically to avoid this. Do not
+reintroduce a call to `conn.executescript()` against a remote connection.
 """
 from __future__ import annotations
 
@@ -208,8 +218,19 @@ class LibsqlConnection:
         return self.cursor().executemany(sql, seq_of_params)
 
     def executescript(self, script: str):
-        self._conn.executescript(script)
-        return self
+        # Deliberately unsupported, not merely unimplemented: libsql's
+        # executescript() silently swallows a mid-script failure (e.g. a
+        # PRAGMA, which libsql rejects outright) and abandons every statement
+        # after it, with no exception raised — see the module docstring. That
+        # bug is exactly what made every table/index in schema.sql silently
+        # fail to appear on Turso. Raise loudly instead of repeating it;
+        # callers must split the script and use execute() per statement,
+        # skipping PRAGMAs remotely (see db/database.py's _apply_schema()).
+        raise NotImplementedError(
+            "LibsqlConnection.executescript() is unsafe on libSQL (silently "
+            "drops statements after a mid-script failure, e.g. any PRAGMA). "
+            "Split the script and call execute() per statement instead."
+        )
 
     def commit(self):
         self._conn.commit()
