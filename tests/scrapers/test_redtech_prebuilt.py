@@ -10,6 +10,7 @@ import urllib.error
 
 import pytest
 
+from scrapers.exceptions import ScrapeIncomplete
 from scrapers.prebuilts.redtech.scraper import RedTechScraper
 
 
@@ -64,8 +65,9 @@ def test_404_on_page_ends_pagination_keeps_earlier_products(monkeypatch):
 def test_repeated_genuine_failures_return_collected_products(monkeypatch, capsys):
     """
     Real, repeated fetch errors (not 404s) still bound the loop, but must not
-    discard the partial harvest — the caller needs a non-empty result set for
-    the sweep to behave, plus a visible warning that the run was incomplete.
+    discard the partial harvest — the run is signalled incomplete (so a caller
+    like run_prebuilts.py must not sweep), but the products collected before
+    the fault ride along on the exception so they can still be upserted.
     """
     import scrapers.prebuilts.redtech.scraper as mod
 
@@ -85,9 +87,10 @@ def test_repeated_genuine_failures_return_collected_products(monkeypatch, capsys
         raise OSError("connection reset")
 
     s.fetch = _fake_fetch
-    results = s.scrape_all()
+    with pytest.raises(ScrapeIncomplete) as exc:
+        s.scrape_all()
 
-    assert [r["name"] for r in results] == ["RedTech rig-1 Gaming PC"]
+    assert [r["name"] for r in exc.value.partial_results] == ["RedTech rig-1 Gaming PC"]
     assert calls["listing"] == 4  # page 1 ok, pages 2/3/4 fail (budget = 3)
     out = capsys.readouterr().out
     assert "WARNING" in out
@@ -161,7 +164,7 @@ def test_identical_new_content_every_page_hits_the_page_cap(monkeypatch):
         return _links_page(f"rig-{calls['n']}")
 
     s.fetch = _fake_fetch
-    with pytest.raises(Exception) as exc:
+    with pytest.raises(ScrapeIncomplete) as exc:
         s.scrape_all()
     assert "MAX_PAGES" in str(exc.value)
     assert calls["n"] == 3

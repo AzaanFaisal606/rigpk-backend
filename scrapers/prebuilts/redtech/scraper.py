@@ -15,8 +15,9 @@ import json
 import re
 import sys
 import time
-import urllib.error
 
+from scrapers.base_scraper import is_http_404 as _is_404
+from scrapers.exceptions import ScrapeIncomplete
 from scrapers.prebuilts.base_prebuilt_scraper import BasePrebuiltScraper
 
 SOURCE  = "redtech.pk"
@@ -62,21 +63,6 @@ _LABEL_MAP = {
 }
 
 
-def _is_404(exc: BaseException) -> bool:
-    """
-    True if `exc` is (or was caused by) an HTTP 404.
-
-    BaseScraper.fetch() puts 404 in NO_RETRY_CODES and re-raises it as
-    `RuntimeError(...) from e`, so the HTTPError normally shows up as
-    `exc.__cause__`, not as `exc` itself. Check both so this also works
-    against a bare HTTPError (e.g. from a test double).
-    """
-    if isinstance(exc, urllib.error.HTTPError) and exc.code == 404:
-        return True
-    cause = exc.__cause__
-    return isinstance(cause, urllib.error.HTTPError) and cause.code == 404
-
-
 class RedTechScraper(BasePrebuiltScraper):
 
     MAX_PAGES = 50                   # redtech's whole prebuilt catalogue is ~13 products, one page; 50 is insurance
@@ -85,6 +71,7 @@ class RedTechScraper(BasePrebuiltScraper):
     def scrape_all(self) -> list[dict]:
         all_links: list[str] = []
         seen_links: set[str] = set()
+        incomplete_errors: list[str] = []
 
         for cat_url in CAT_URLS:
             page = 1
@@ -112,13 +99,15 @@ class RedTechScraper(BasePrebuiltScraper):
                         # 404s, handled above). Give up on this category URL but
                         # don't discard the partial harvest from pages 1..page-1:
                         # a caller that gets [] can't tell "nothing to scrape"
-                        # from "we choked partway through", so return what we
-                        # have and say so loudly.
-                        # TODO(Task 6): raise ScrapeIncomplete here instead of
-                        # just warning, once that exception exists.
-                        print(f"  [redtech] WARNING: {failures} consecutive fetch failures at "
-                              f"page {page} of {cat_url} — giving up on this category URL, "
-                              f"keeping {len(all_links)} link(s) collected from pages 1..{page - 1}.")
+                        # from "we choked partway through". Keep going (there may
+                        # be other CAT_URLS) and raise ScrapeIncomplete once all
+                        # of them are done, with whatever got collected attached
+                        # — see the raise at the end of this method.
+                        msg = (f"{failures} consecutive fetch failures at page {page} of "
+                               f"{cat_url} — giving up on this category URL, keeping "
+                               f"{len(all_links)} link(s) collected from pages 1..{page - 1}")
+                        print(f"  [redtech] WARNING: {msg}")
+                        incomplete_errors.append(msg)
                         break
                     page += 1
                     time.sleep(self.PAGE_DELAY)
@@ -143,7 +132,10 @@ class RedTechScraper(BasePrebuiltScraper):
                 page += 1
                 time.sleep(self.PAGE_DELAY)
             else:
-                raise RuntimeError(f"redtech: hit MAX_PAGES={self.MAX_PAGES} without finishing")
+                # A page cap this generous getting hit at all means the site is
+                # serving "new" content forever (or is broken) — trust nothing
+                # collected so far rather than deliver a harvest of unknown shape.
+                raise ScrapeIncomplete(f"redtech: hit MAX_PAGES={self.MAX_PAGES} without finishing")
 
         print(f"  [redtech] {len(all_links)} unique product URLs found")
 
@@ -158,6 +150,11 @@ class RedTechScraper(BasePrebuiltScraper):
             except Exception as e:
                 print(f"    ERROR: {e}")
             time.sleep(self.PAGE_DELAY)
+
+        if incomplete_errors:
+            exc = ScrapeIncomplete("redtech: " + "; ".join(incomplete_errors))
+            exc.partial_results = results
+            raise exc
 
         return results
 

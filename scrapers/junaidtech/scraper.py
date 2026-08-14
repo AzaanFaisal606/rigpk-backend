@@ -19,6 +19,7 @@ import sys
 import time
 
 from scrapers.base_scraper import BaseScraper
+from scrapers.exceptions import ScrapeIncomplete
 
 SOURCE = "junaidtech.pk"
 BASE   = "https://www.junaidtech.pk"
@@ -26,15 +27,6 @@ API    = "https://frontapi.mywebx.pk/api/ProductListing/GetProductListingV2"
 
 PAGE_SIZE  = 100
 PAGE_DELAY = 1.5
-
-
-class ScrapeIncomplete(Exception):
-    """
-    Raised when this scrape could not finish and the caller must not read the
-    (possibly empty) result as "this source genuinely has 0 products right
-    now" — that reading is what feeds the freshness sweep and would deactivate
-    every active product from this source. See docs/audit/scrapers.md H7.
-    """
 
 # (url_path, our_category, categoryID)
 # categoryIDs extracted from __NUXT_DATA__ on each sub-category page

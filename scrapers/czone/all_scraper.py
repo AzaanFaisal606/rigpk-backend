@@ -32,6 +32,7 @@ import sys
 import time
 
 from scrapers.base_scraper import BaseScraper
+from scrapers.exceptions import ScrapeIncomplete
 
 SOURCE = "czone.com.pk"
 BASE = "https://www.czone.com.pk"
@@ -95,7 +96,7 @@ class CzoneAllScraper(BaseScraper):
                 failures += 1
                 print(f"    SKIP page {page} ({e}) — failure {failures}/{self.MAX_CONSECUTIVE_FAILURES}")
                 if failures >= self.MAX_CONSECUTIVE_FAILURES:
-                    raise RuntimeError(
+                    raise ScrapeIncomplete(
                         f"czone: {failures} consecutive page failures at page {page}"
                     ) from e
                 page += 1
@@ -132,7 +133,7 @@ class CzoneAllScraper(BaseScraper):
             page += 1
             time.sleep(PAGE_DELAY)
         else:
-            raise RuntimeError(f"czone: hit MAX_PAGES={self.MAX_PAGES} without finishing")
+            raise ScrapeIncomplete(f"czone: hit MAX_PAGES={self.MAX_PAGES} without finishing")
 
         return all_products
 

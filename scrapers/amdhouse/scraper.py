@@ -17,7 +17,8 @@ import re
 import sys
 import time
 
-from scrapers.base_scraper import BaseScraper
+from scrapers.base_scraper import BaseScraper, is_http_404
+from scrapers.exceptions import ScrapeIncomplete
 
 SOURCE = "amdhouse.pk"
 BASE = "https://amdhouse.pk"
@@ -179,22 +180,46 @@ class AmdHouseScraper(BaseScraper):
 
 
 def _find_valid_categories() -> list[tuple[str, str]]:
-    """Filter CATEGORIES to only slugs that return products (404-safe)."""
-    import urllib.request
+    """
+    Filter CATEGORIES to only slugs that return products.
+
+    A slug 404ing means the category was retired — safe to skip (H9's original,
+    correct case). Any other probe failure (timeout, 5xx, HostBlocked, DNS) is
+    NOT the same thing and must not be read as "category doesn't exist": that
+    misreading is what silently shrank the scraped category list on a transient
+    blip. Non-404 failures are collected and raised as ScrapeIncomplete once
+    every slug has been probed, carrying whatever categories DID resolve on
+    `.valid_categories` so the caller can still scrape those.
+    """
     scraper = AmdHouseScraper()
-    valid = []
+    valid: list[tuple[str, str]] = []
+    probe_errors: list[str] = []
     for slug, cat in CATEGORIES:
         url = f"{BASE}/product-category/{slug}/"
         try:
             html = scraper.fetch(url)
-            if 'woocommerce-loop-product__title' in html:
-                valid.append((url, cat))
-                print(f"  [ok] {slug} -> {cat}")
-            else:
-                print(f"  [empty] {slug}")
         except Exception as e:
-            print(f"  [skip] {slug}: {e}")
+            if is_http_404(e):
+                print(f"  [skip] {slug}: 404 — category retired")
+            else:
+                print(f"  [probe failed] {slug}: {e}")
+                probe_errors.append(f"{slug}: {e}")
+            time.sleep(0.5)
+            continue
+        if 'woocommerce-loop-product__title' in html:
+            valid.append((url, cat))
+            print(f"  [ok] {slug} -> {cat}")
+        else:
+            print(f"  [empty] {slug}")
         time.sleep(0.5)
+
+    if probe_errors:
+        exc = ScrapeIncomplete(
+            "amdhouse: category probe failed for " + "; ".join(probe_errors)
+        )
+        exc.valid_categories = valid
+        raise exc
+
     return valid
 
 

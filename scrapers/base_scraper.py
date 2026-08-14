@@ -9,8 +9,10 @@ import urllib.request
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 
+from scrapers.exceptions import ScrapeIncomplete
 
-class HostBlocked(RuntimeError):
+
+class HostBlocked(ScrapeIncomplete, RuntimeError):
     """
     Raised when a host has refused enough requests in a row that continuing to
     hit it is pointless (and counterproductive). Once a host is in this state
@@ -18,7 +20,29 @@ class HostBlocked(RuntimeError):
 
     Orchestrators treat this as "the source could not be scraped at all" — the
     freshness sweep is skipped and the retailer keeps its existing rows.
+
+    Subclasses ScrapeIncomplete (not just RuntimeError) so it propagates as one
+    everywhere a caller catches ScrapeIncomplete specifically — a host block
+    mid-run must never be read as "an ordinary bad page" by a consecutive-
+    failure counter and quietly folded into a generic error.
     """
+
+
+def is_http_404(exc: BaseException) -> bool:
+    """
+    True if `exc` is (or was caused by) an HTTP 404.
+
+    BaseScraper.fetch() puts 404 in NO_RETRY_CODES and re-raises it as
+    `RuntimeError(...) from e`, so the HTTPError normally shows up as
+    `exc.__cause__`, not as `exc` itself. Check both so this also works
+    against a bare HTTPError (e.g. from a test double). Shared so every
+    scraper that needs to tell "page retired" from "something is actually
+    wrong" uses the same check instead of a lookalike of its own.
+    """
+    if isinstance(exc, urllib.error.HTTPError) and exc.code == 404:
+        return True
+    cause = exc.__cause__
+    return isinstance(cause, urllib.error.HTTPError) and cause.code == 404
 
 
 # ----------------------------------------------------------------------
@@ -134,7 +158,16 @@ class BaseScraper(ABC):
     }
 
     REQUEST_DELAY = 1.0  # min seconds between requests to one host; jittered
-    TIMEOUT = 45
+    TIMEOUT = 45  # kept for back-compat; fetch() itself now uses CONNECT_TIMEOUT
+
+    # timeout= on urlopen() bounds connect and each individual socket read, but
+    # a keep-alive connection that trickles bytes forever (zestro's failure
+    # mode, H8) can outlive it in practice — no single read ever times out.
+    # READ_DEADLINE is a wall-clock cap across the *whole* body read, checked
+    # between chunks in fetch() below. Both live here, not per-scraper, so
+    # every subclass inherits the same bound.
+    CONNECT_TIMEOUT = 45
+    READ_DEADLINE = 90
 
     def _pace(self, host: str) -> None:
         """
@@ -198,8 +231,19 @@ class BaseScraper(ABC):
             self._pace(host)
             try:
                 req = urllib.request.Request(url, data=data, headers=req_headers)
-                with urllib.request.urlopen(req, timeout=self.TIMEOUT) as resp:
-                    body = resp.read().decode("utf-8", errors="ignore")
+                # timeout= covers connect and each individual socket read, not
+                # a body that trickles forever — a hard wall-clock deadline
+                # across the whole read is the only thing that bounds that.
+                with urllib.request.urlopen(req, timeout=self.CONNECT_TIMEOUT) as resp:
+                    deadline = time.monotonic() + self.READ_DEADLINE
+                    chunks = []
+                    while (chunk := resp.read(65536)):
+                        chunks.append(chunk)
+                        if time.monotonic() > deadline:
+                            raise TimeoutError(
+                                f"read of {url} exceeded READ_DEADLINE={self.READ_DEADLINE}s"
+                            )
+                    body = b"".join(chunks).decode("utf-8", errors="ignore")
                 st["fail_429"] = 0
                 st["fail_403"] = 0
                 return body

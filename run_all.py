@@ -22,6 +22,7 @@ from pathlib import Path
 from db.database import backup_db, get_db
 from scrapers import health
 from scrapers.base_scraper import blocked_hosts, reset_host_state
+from scrapers.exceptions import ScrapeIncomplete
 from scrapers.czone.all_scraper import CzoneAllScraper, CATEGORIES as CZONE_CATS, BASE as CZONE_BASE
 from scrapers.zahcomputers.scraper import ZahComputersScraper, CATEGORIES as ZAH_CATS, BASE as ZAH_BASE
 from scrapers.amdhouse.scraper import AmdHouseScraper, CATEGORIES as AMD_CATS, BASE as AMD_BASE
@@ -41,34 +42,58 @@ DB_PATH = str(Path(__file__).resolve().parent / "data" / "ppc.db")
 def run_czone() -> list[dict]:
     scraper = CzoneAllScraper()
     results = []
+    incomplete: list[str] = []
     for path, category in CZONE_CATS:
         url = f"{CZONE_BASE}{path}"
         print(f"\n  [czone/{category.upper()}]")
         try:
             products = scraper.scrape(url)
+        except ScrapeIncomplete as e:
+            # This category could not be fully seen — the OTHER categories in
+            # this loop may still succeed below, and their products must not
+            # be thrown away just because one category choked (that is the
+            # bug this whole exception exists to prevent). Keep collecting,
+            # then raise once every category has had its turn, carrying
+            # everything gathered so far on .partial_results.
+            print(f"    INCOMPLETE: {e}")
+            incomplete.append(f"{category}: {e}")
+            continue
         except Exception as e:
             print(f"    ERROR: {e}")
             continue
         for p in products:
             p["category"] = category
         results.extend(products)
+    if incomplete:
+        exc = ScrapeIncomplete(f"czone: {'; '.join(incomplete)}")
+        exc.partial_results = results
+        raise exc
     return results
 
 
 def run_zah() -> list[dict]:
     scraper = ZahComputersScraper()
     results = []
+    incomplete: list[str] = []
     for slug, category in ZAH_CATS:
         url = f"{ZAH_BASE}/shop/?product_cat={slug}"
         print(f"\n  [zah/{category.upper()}]")
         try:
             products = scraper.scrape(url)
+        except ScrapeIncomplete as e:
+            print(f"    INCOMPLETE: {e}")
+            incomplete.append(f"{category}: {e}")
+            continue
         except Exception as e:
             print(f"    ERROR: {e}")
             continue
         for p in products:
             p["category"] = category
         results.extend(products)
+    if incomplete:
+        exc = ScrapeIncomplete(f"zah: {'; '.join(incomplete)}")
+        exc.partial_results = results
+        raise exc
     return results
 
 
@@ -76,118 +101,189 @@ def run_amd() -> list[dict]:
     from scrapers.amdhouse.scraper import _find_valid_categories
     scraper = AmdHouseScraper()
     results = []
+    incomplete: list[str] = []
     print("  Checking amdhouse categories...")
-    valid = _find_valid_categories()
+    try:
+        valid = _find_valid_categories()
+    except ScrapeIncomplete as e:
+        # Some category probes hit a real error (not a 404) — the categories
+        # that DID resolve are still worth scraping, we just can't call this
+        # source's coverage complete.
+        print(f"  INCOMPLETE probing categories: {e}")
+        valid = getattr(e, "valid_categories", [])
+        incomplete.append(str(e))
     for url, category in valid:
         print(f"\n  [amd/{category.upper()}]")
         try:
             products = scraper.scrape(url)
+        except ScrapeIncomplete as e:
+            print(f"    INCOMPLETE: {e}")
+            incomplete.append(f"{category}: {e}")
+            continue
         except Exception as e:
             print(f"    ERROR: {e}")
             continue
         for p in products:
             p["category"] = category
         results.extend(products)
+    if incomplete:
+        exc = ScrapeIncomplete(f"amd: {'; '.join(incomplete)}")
+        exc.partial_results = results
+        raise exc
     return results
 
 
 def run_rbt() -> list[dict]:
     scraper = RbTechNGamesScraper()
     results = []
+    incomplete: list[str] = []
     for path, category in RBT_CATS:
         url = f"{RBT_BASE}/product-category/{path}/"
         print(f"\n  [rbt/{category.upper()}]")
         try:
             products = scraper.scrape(url)
+        except ScrapeIncomplete as e:
+            print(f"    INCOMPLETE: {e}")
+            incomplete.append(f"{category}: {e}")
+            continue
         except Exception as e:
             print(f"    ERROR: {e}")
             continue
         for p in products:
             p["category"] = category
         results.extend(products)
+    if incomplete:
+        exc = ScrapeIncomplete(f"rbt: {'; '.join(incomplete)}")
+        exc.partial_results = results
+        raise exc
     return results
 
 
 def run_junaid() -> list[dict]:
     scraper = JunaidTechScraper()
     results = []
+    incomplete: list[str] = []
     for path, category, cat_id in JT_CATS:
         url = f"{JT_BASE}{path}"
         print(f"\n  [junaid/{category.upper()}]")
         try:
             products = scraper.scrape(url, known_category_id=cat_id, category=category)
+        except ScrapeIncomplete as e:
+            print(f"    INCOMPLETE: {e}")
+            incomplete.append(f"{category}: {e}")
+            continue
         except Exception as e:
             print(f"    ERROR: {e}")
             continue
         results.extend(products)
+    if incomplete:
+        exc = ScrapeIncomplete(f"junaid: {'; '.join(incomplete)}")
+        exc.partial_results = results
+        raise exc
     return results
 
 
 def run_tech() -> list[dict]:
     scraper = TechArcScraper()
     results = []
+    incomplete: list[str] = []
     for slug, category in TECH_CATS:
         url = f"{TECH_BASE}/{slug}/"
         print(f"\n  [tech/{category.upper()}]")
         try:
             products = scraper.scrape(url)
+        except ScrapeIncomplete as e:
+            print(f"    INCOMPLETE: {e}")
+            incomplete.append(f"{category}: {e}")
+            continue
         except Exception as e:
             print(f"    ERROR: {e}")
             continue
         for p in products:
             p["category"] = category
         results.extend(products)
+    if incomplete:
+        exc = ScrapeIncomplete(f"tech: {'; '.join(incomplete)}")
+        exc.partial_results = results
+        raise exc
     return results
 
 
 def run_pakbyte() -> list[dict]:
     scraper = PakByteScraper()
     results = []
+    incomplete: list[str] = []
     for slug, category in PB_CATS:
         url = f"{PB_BASE}/collections/{slug}"
         print(f"\n  [pakbyte/{category.upper()}]")
         try:
             products = scraper.scrape(url)
+        except ScrapeIncomplete as e:
+            print(f"    INCOMPLETE: {e}")
+            incomplete.append(f"{category}: {e}")
+            continue
         except Exception as e:
             print(f"    ERROR: {e}")
             continue
         for p in products:
             p["category"] = category
         results.extend(products)
+    if incomplete:
+        exc = ScrapeIncomplete(f"pakbyte: {'; '.join(incomplete)}")
+        exc.partial_results = results
+        raise exc
     return results
 
 
 def run_redtech() -> list[dict]:
     scraper = RedTechScraper()
     results = []
+    incomplete: list[str] = []
     for slug, category in RT_CATS:
         url = f"{RT_BASE}/product-category/{slug}/"
         print(f"\n  [redtech/{category.upper()}]")
         try:
             products = scraper.scrape(url)
+        except ScrapeIncomplete as e:
+            print(f"    INCOMPLETE: {e}")
+            incomplete.append(f"{category}: {e}")
+            continue
         except Exception as e:
             print(f"    ERROR: {e}")
             continue
         for p in products:
             p["category"] = category
         results.extend(products)
+    if incomplete:
+        exc = ScrapeIncomplete(f"redtech: {'; '.join(incomplete)}")
+        exc.partial_results = results
+        raise exc
     return results
 
 
 def run_techmatched() -> list[dict]:
     scraper = TechMatchedScraper()
     results = []
+    incomplete: list[str] = []
     for slug, category in TM_CATS:
         url = f"{TM_BASE}/product-category/{slug}/"
         print(f"\n  [techmatched/{category.upper()}]")
         try:
             products = scraper.scrape(url)
+        except ScrapeIncomplete as e:
+            print(f"    INCOMPLETE: {e}")
+            incomplete.append(f"{category}: {e}")
+            continue
         except Exception as e:
             print(f"    ERROR: {e}")
             continue
         for p in products:
             p["category"] = category
         results.extend(products)
+    if incomplete:
+        exc = ScrapeIncomplete(f"techmatched: {'; '.join(incomplete)}")
+        exc.partial_results = results
+        raise exc
     return results
 
 
@@ -253,6 +349,15 @@ def main():
         try:
             results = fn()
             print(f"\n  => {len(results)} products from {label}")
+        except ScrapeIncomplete as e:
+            # Some category(ies) inside this source could not be fully seen —
+            # the run_X() functions still collect everything the OTHER
+            # categories returned and carry it on .partial_results rather than
+            # losing it. That partial list is what still gets upserted below;
+            # only the sweep (gated on `ok`) is skipped.
+            results = getattr(e, "partial_results", None) or []
+            error = f"{type(e).__name__}: {e}"
+            print(f"  INCOMPLETE: {error} — keeping {len(results)} product(s) collected before the fault")
         except Exception as e:
             error = f"{type(e).__name__}: {e}"
             print(f"  SCRAPER FAILED: {error}")

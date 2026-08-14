@@ -15,6 +15,7 @@ import re
 import sys
 import time
 
+from scrapers.exceptions import ScrapeIncomplete
 from scrapers.prebuilts.base_prebuilt_scraper import BasePrebuiltScraper
 
 SOURCE = "zestrogaming.com"
@@ -62,6 +63,7 @@ class ZestroScraper(BasePrebuiltScraper):
         seen_urls: set[str] = set()
         page = 1
         consecutive_failures = 0
+        incomplete_errors: list[str] = []
 
         while True:
             url = CAT_URL if page == 1 else f"{CAT_URL}page/{page}/"
@@ -72,7 +74,10 @@ class ZestroScraper(BasePrebuiltScraper):
                 print(f"  [zestro] SKIP page {page} ({e})")
                 consecutive_failures += 1
                 if consecutive_failures >= 3:
-                    print(f"  [zestro] 3 consecutive page failures — stopping")
+                    msg = (f"3 consecutive page failures at page {page} — stopping, "
+                           f"keeping {len(all_products)} product(s) collected so far")
+                    print(f"  [zestro] WARNING: {msg}")
+                    incomplete_errors.append(msg)
                     break
                 page += 1
                 time.sleep(self.PAGE_DELAY)
@@ -105,6 +110,11 @@ class ZestroScraper(BasePrebuiltScraper):
 
             page += 1
             time.sleep(self.PAGE_DELAY)
+
+        if incomplete_errors:
+            exc = ScrapeIncomplete("zestro: " + "; ".join(incomplete_errors))
+            exc.partial_results = all_products
+            raise exc
 
         return all_products
 

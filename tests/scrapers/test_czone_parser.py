@@ -10,6 +10,7 @@ import re
 import pytest
 
 from scrapers.czone.all_scraper import CzoneAllScraper
+from scrapers.exceptions import ScrapeIncomplete
 
 
 def test_parses_products_from_fixture(load_fixture):
@@ -75,7 +76,7 @@ def test_persistent_fetch_failure_terminates(monkeypatch):
         raise OSError("down")
 
     s.fetch = _boom
-    with pytest.raises(Exception) as exc:
+    with pytest.raises(ScrapeIncomplete) as exc:
         s.scrape("https://www.czone.com.pk/graphic-cards-pakistan-ppt.154.aspx")
     assert "consecutive page failures" in str(exc.value)
 
@@ -111,7 +112,7 @@ def test_identical_page_every_offset_hits_the_page_cap(monkeypatch, load_fixture
                          "thumbnail_url": None}],
     )
 
-    with pytest.raises(Exception) as exc:
+    with pytest.raises(ScrapeIncomplete) as exc:
         s.scrape("https://www.czone.com.pk/graphic-cards-pakistan-ppt.154.aspx")
     assert "MAX_PAGES" in str(exc.value)
     assert calls["n"] == 3
