@@ -63,20 +63,32 @@ _LABEL_MAP = {
 
 class RedTechScraper(BasePrebuiltScraper):
 
+    MAX_PAGES = 50                   # redtech's whole prebuilt catalogue is ~13 products, one page; 50 is insurance
+    MAX_CONSECUTIVE_FAILURES = 3
+
     def scrape_all(self) -> list[dict]:
         all_links: list[str] = []
         seen_links: set[str] = set()
 
         for cat_url in CAT_URLS:
             page = 1
-            while True:
+            failures = 0
+            while page <= self.MAX_PAGES:
                 url = cat_url if page == 1 else f"{cat_url}page/{page}/"
                 print(f"  [redtech] page {page}: {url}")
                 try:
                     html = self.fetch(url)
-                except RuntimeError as e:
-                    print(f"  [redtech] fetch error: {e}")
-                    break
+                    failures = 0
+                except Exception as e:
+                    failures += 1
+                    print(f"  [redtech] fetch error: {e} — failure {failures}/{self.MAX_CONSECUTIVE_FAILURES}")
+                    if failures >= self.MAX_CONSECUTIVE_FAILURES:
+                        raise RuntimeError(
+                            f"redtech: {failures} consecutive page failures at page {page}"
+                        ) from e
+                    page += 1
+                    time.sleep(self.PAGE_DELAY)
+                    continue
 
                 links = self._extract_product_links(html)
                 if not links:
@@ -84,6 +96,9 @@ class RedTechScraper(BasePrebuiltScraper):
                     break
 
                 new = [l for l in links if l not in seen_links]
+                if not new:
+                    print(f"  [redtech] page {page} returned only already-seen products — done.")
+                    break
                 for l in new:
                     seen_links.add(l)
                 all_links.extend(new)
@@ -93,6 +108,8 @@ class RedTechScraper(BasePrebuiltScraper):
                     break
                 page += 1
                 time.sleep(self.PAGE_DELAY)
+            else:
+                raise RuntimeError(f"redtech: hit MAX_PAGES={self.MAX_PAGES} without finishing")
 
         print(f"  [redtech] {len(all_links)} unique product URLs found")
 

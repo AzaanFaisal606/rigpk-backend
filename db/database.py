@@ -90,11 +90,24 @@ def _split_sql_statements(script: str) -> list[str]:
 
 
 def _slug(url: str) -> str:
-    """Derive a stable, short identifier from a product URL."""
-    url = re.sub(r"https?://[^/]+/", "", url).rstrip("/")
-    url = re.sub(r"[^\w-]", "-", url)
-    url = re.sub(r"-{2,}", "-", url)
-    return url[:200]
+    """
+    Stable per-product id derived from its URL.
+
+    Raises rather than returning a constant when the URL carries no product
+    path: parts is keyed on (source, source_id), so a constant id makes every
+    product in a run overwrite the same row — a silent catalogue wipe that
+    reports as a successful scrape.
+    """
+    m = re.match(r"https?://[^/]+/(.+)", url or "")
+    if not m:
+        raise ValueError(f"cannot derive a product id from URL: {url!r}")
+    slug = m.group(1).rstrip("/")
+    slug = re.sub(r"[^\w-]", "-", slug)
+    slug = re.sub(r"-{2,}", "-", slug)
+    slug = slug[:200]
+    if not slug or slug in {"", "/", "product", "index"}:
+        raise ValueError(f"cannot derive a product id from URL: {url!r}")
+    return slug
 
 
 def _median(values: Sequence[float]) -> float:
@@ -580,7 +593,13 @@ class Database:
                 quarantined.append((p["source"], p["name"], p["category"], price,
                                     p.get("url"), rule))
                 continue
-            source_id = _slug(p["url"])
+            try:
+                source_id = _slug(p["url"])
+            except ValueError as exc:
+                skipped += 1
+                quarantined.append((p["source"], p["name"], p["category"], price,
+                                    p.get("url"), f"bad_url:{exc}"))
+                continue
             thumbnail = p.get("thumbnail_url")
 
             raw_specs = extract_specs(p["name"], p["category"])
@@ -1378,7 +1397,15 @@ class Database:
         seen_ids: dict[str, set[int]] = {}
         cur = self._conn.cursor()
         for p in prebuilts:
-            source_id = _slug(p["url"])
+            try:
+                source_id = _slug(p["url"])
+            except ValueError as exc:
+                # Same rule as upsert_products: one malformed URL in a batch
+                # of ~100 prebuilts must not abort the whole source's write
+                # (and, since run_prebuilts.py calls this uncaught, every
+                # source scraped after it in the same run).
+                print(f"  SKIP prebuilt {p.get('name', '<unknown>')!r}: {exc}")
+                continue
             components_json = json.dumps(p["components"], ensure_ascii=False) if p.get("components") else None
             row = cur.execute(
                 """
