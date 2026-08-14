@@ -7,3 +7,10 @@ services:
     envVars:
       - key: FRONTEND_URL
         sync: false
+      # Values live in the Render dashboard, never in git. Without these
+      # declared, a render.yaml-driven deploy serves an empty SQLite DB with
+      # HTTP 200 instead of failing loudly.
+      - key: TURSO_DATABASE_URL
+        sync: false
+      - key: TURSO_AUTH_TOKEN
+        sync: false
