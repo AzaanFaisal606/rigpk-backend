@@ -76,7 +76,11 @@ def test_rebuild_groups_gpu_models(db):
     series = db.get_price_trends("gpu", "RTX 4070")
     assert len(series) == 1
     row = series[0]
-    assert row["method"] == "trimmed_mean"
+    # Matched-basket chaining: the first date of a series has no predecessor
+    # to match against, so its own listings ARE the basket. n=6 >= the trim
+    # threshold, so the trim path runs (label carries "matched_basket_"
+    # prefix now that the method reflects basket, not raw-sample, trimming).
+    assert row["method"] == "matched_basket_trimmed"
     assert row["sample_count"] == 6
     # band is 5%-trimmed (ceil(6*.05)=1 dropped each end): 200000 and 205000 shed
     assert row["min_price"] == 201000
@@ -106,7 +110,11 @@ def test_rebuild_small_bucket_uses_median(db):
         _seed(db, f"MSI RTX 5070 v{i}", "gpu", {"2026-01-01": p})
     db.rebuild_price_trends()
     row = db.get_price_trends("gpu", "RTX 5070")[0]
-    assert row["method"] == "median"
+    # First date of the series -> basket == the raw listings, n=3 < trim
+    # threshold -> "matched_basket" (below-trim variant of the new method
+    # names). center_price is still a plain median at the anchor date, so
+    # the value is unchanged from the old median fallback.
+    assert row["method"] == "matched_basket"
     assert row["center_price"] == 110000  # median of 3, robust to the 300k outlier
     assert row["min_price"] == 100000 and row["max_price"] == 300000
 
@@ -151,13 +159,19 @@ def test_rebuild_idempotent(db):
     assert cnt == first
 
 def test_rebuild_multiple_dates_make_series(db):
+    # Matched-basket rewrite: on 2026-03-01 only part "a" is still listed (the
+    # 5 "b" parts dropped out after 02-01), so the shared basket between
+    # 02-01 and 03-01 has size 1 — below _TREND_MIN_BASKET (3). That is not a
+    # measurement (one product's price change isn't a market move), so the
+    # point is dropped rather than published on a 1-part basket. Only the two
+    # dates with a real matched basket (all 6 parts, both times) survive.
     _seed(db, "MSI RTX 4070 a", "gpu", {"2026-01-01": 210000, "2026-02-01": 205000, "2026-03-01": 200000})
     for i in range(5):
         _seed(db, f"MSI RTX 4070 b{i}", "gpu", {"2026-01-01": 210000, "2026-02-01": 205000})
     db.rebuild_price_trends()
     series = db.get_price_trends("gpu", "RTX 4070")
     dates = [r["scrape_date"] for r in series]
-    assert dates == ["2026-01-01", "2026-02-01", "2026-03-01"]
+    assert dates == ["2026-01-01", "2026-02-01"]
 
 def test_list_trend_groups_latest(db):
     _seed(db, "MSI RTX 4070 a", "gpu", {"2026-01-01": 220000, "2026-02-01": 200000})
@@ -227,14 +241,19 @@ def test_get_price_trends_ram_default_group_type(db):
 
 
 def test_median_even_used_count(db):
-    """Even-length median bucket reports used_count=2, not the full n."""
-    for i, p in enumerate([100000, 110000, 120000, 130000]):  # n=4 (even, <5 -> median)
+    """Below-trim bucket reports used_count == n, the whole basket."""
+    for i, p in enumerate([100000, 110000, 120000, 130000]):  # n=4 (even, <5 -> below trim)
         _seed(db, f"MSI RTX 5080 v{i}", "gpu", {"2026-01-01": p})
     db.rebuild_price_trends()
     row = db.get_price_trends("gpu", "RTX 5080")[0]
-    assert row["method"] == "median"
+    # Matched-basket method: below the trim threshold, used_count is simply
+    # the size of the matched basket (no more "1 odd / 2 even" median-arity
+    # convention — that was specific to the raw-sample median fallback the
+    # old method used; the new center value is a basket median at the anchor
+    # date, but the reported used_count is just how many parts contributed).
+    assert row["method"] == "matched_basket"
     assert row["sample_count"] == 4
-    assert row["used_count"] == 2
+    assert row["used_count"] == 4
 
 
 # --- recent-scrapes window -------------------------------------------------

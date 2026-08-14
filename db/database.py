@@ -398,6 +398,14 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_parts_cat_active_price "
             "ON parts(category, is_active, latest_price)"
         )
+        trend_cols = {
+            r["name"]
+            for r in self._conn.execute("PRAGMA table_info(price_trends)").fetchall()
+        }
+        if "basket_size" not in trend_cols:
+            self._conn.execute(
+                "ALTER TABLE price_trends ADD COLUMN basket_size INTEGER NOT NULL DEFAULT 0"
+            )
         # One-time cleanup: an earlier revision of deactivate_unseen_* created
         # this as a shared scratch table, which is unsafe under overlapping
         # sweeps (cron + manual dispatch + heal rerun hitting the same DB).
@@ -959,6 +967,7 @@ class Database:
     # back to a plain median (too few points to trim meaningfully).
     _TREND_MIN_TRIM = 5
     _TREND_TRIM_FRAC = 0.10
+    _TREND_MIN_BASKET = 3   # fewer matched parts than this is noise, not a measurement
     # Band (min/max) trim: drop the most extreme 5% each end so mispriced
     # outlier listings don't blow out the displayed range. Center uses the
     # 10% trim above; the band is wider (5%) to still show a real spread.
@@ -1018,7 +1027,8 @@ class Database:
             SELECT p.category AS category,
                    p.specs    AS specs,
                    d.scrape_date AS scrape_date,
-                   d.price_pkr AS price
+                   d.price_pkr AS price,
+                   d.part_id AS part_id
             FROM (
                 SELECT part_id,
                        substr(scraped_at, 1, 10) AS scrape_date,
@@ -1035,35 +1045,74 @@ class Database:
             """
         ).fetchall()
 
-        # Bucket: (category, group_type, group_key, date) -> [prices]
-        buckets: dict[tuple[str, str, str, str], list[int]] = {}
+        # Bucket: (category, group_type, group_key, date) -> {part_id: price}
+        buckets: dict[tuple[str, str, str, str], dict[int, int]] = {}
+        specs_cache: dict[int, Optional[dict]] = {}
         for r in rows:
-            try:
-                specs = json.loads(r["specs"]) if r["specs"] else None
-            except (json.JSONDecodeError, TypeError):
-                specs = None
-            grp = self._trend_group(r["category"], specs)
+            pid = r["part_id"]
+            if pid not in specs_cache:
+                # One json.loads per part, not per price-log row. A part with N
+                # snapshots previously re-parsed identical specs JSON N times.
+                try:
+                    specs_cache[pid] = json.loads(r["specs"]) if r["specs"] else None
+                except (json.JSONDecodeError, TypeError):
+                    specs_cache[pid] = None
+            grp = self._trend_group(r["category"], specs_cache[pid])
             if grp is None:
                 continue
             group_type, group_key = grp
             key = (r["category"], group_type, group_key, r["scrape_date"])
-            buckets.setdefault(key, []).append(int(r["price"]))
+            buckets.setdefault(key, {})[pid] = int(r["price"])
+
+        # Regroup by series so consecutive dates can be compared.
+        series: dict[tuple[str, str, str], dict[str, dict[int, int]]] = {}
+        for (category, group_type, group_key, date), prices in buckets.items():
+            series.setdefault((category, group_type, group_key), {})[date] = prices
 
         records = []
-        for (category, group_type, group_key, date), prices in buckets.items():
-            n = len(prices)
-            if n >= self._TREND_MIN_TRIM:
-                center, used = _trimmed_mean(prices, self._TREND_TRIM_FRAC)
-                method = "trimmed_mean"
-            else:
-                # median uses 1 value (odd n) or the middle 2 (even n)
-                center, used = _median(prices), (1 if n % 2 else 2)
-                method = "median"
-            band_lo, band_hi = _trimmed_band(prices, self._TREND_BAND_FRAC)
-            records.append((
-                category, group_type, group_key, date,
-                n, used, round(center), method, band_lo, band_hi,
-            ))
+        for (category, group_type, group_key), by_date in series.items():
+            dates = sorted(by_date)
+            level: Optional[float] = None
+            for i, date in enumerate(dates):
+                prices_now = by_date[date]
+                if i == 0:
+                    # Anchor the chain at the real price level of the first date.
+                    basket = prices_now
+                    matched = list(basket.values())
+                    level = _median(matched)
+                    basket_size = len(matched)
+                else:
+                    prev = by_date[dates[i - 1]]
+                    shared = set(prev) & set(prices_now)
+                    basket_size = len(shared)
+                    if basket_size < self._TREND_MIN_BASKET:
+                        # Not a measurement. Break the chain rather than publish
+                        # a number driven by which products happened to appear.
+                        level = None
+                        continue
+                    ratios = sorted(prices_now[p] / prev[p] for p in shared)
+                    ratio = _median(ratios)
+                    if level is None:
+                        # Chain was broken earlier — re-anchor on real prices.
+                        level = _median([prices_now[p] for p in shared])
+                    else:
+                        level = level * ratio
+                    basket = {p: prices_now[p] for p in shared}
+
+                matched_prices = list(basket.values())
+                n = len(matched_prices)
+                if n >= self._TREND_MIN_TRIM:
+                    _, used = _trimmed_mean(matched_prices, self._TREND_TRIM_FRAC)
+                    method = "matched_basket_trimmed"
+                else:
+                    used = n
+                    method = "matched_basket"
+                band_lo, band_hi = _trimmed_band(matched_prices, self._TREND_BAND_FRAC)
+                records.append((
+                    category, group_type, group_key, date,
+                    len(prices_now), used, round(level), method,
+                    band_lo, band_hi, basket_size,
+                ))
 
         with self._conn:  # transaction
             self._conn.execute("DELETE FROM price_trends")
@@ -1071,8 +1120,9 @@ class Database:
                 """
                 INSERT INTO price_trends
                     (category, group_type, group_key, scrape_date,
-                     sample_count, used_count, center_price, method, min_price, max_price)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     sample_count, used_count, center_price, method,
+                     min_price, max_price, basket_size)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 records,
             )
