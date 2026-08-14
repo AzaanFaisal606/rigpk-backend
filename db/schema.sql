@@ -134,3 +134,19 @@ CREATE TABLE IF NOT EXISTS scrape_runs (
 
 CREATE INDEX IF NOT EXISTS idx_scrape_runs_source
     ON scrape_runs(source, kind, finished_at);
+
+-- Rows rejected by upsert_products' guards. Not user-facing — this exists so an
+-- over-broad blocklist term is discoverable instead of silently eating real
+-- products. `rule` names exactly which guard fired.
+CREATE TABLE IF NOT EXISTS quarantined_rows (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    source         TEXT NOT NULL,
+    name           TEXT NOT NULL,
+    category       TEXT NOT NULL,
+    price_pkr      INTEGER,
+    url            TEXT,
+    rule           TEXT NOT NULL,          -- "min_price:gpu:4000" | "blocklist:global:combo" | "blocklist:monitor:keyboard"
+    quarantined_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_quarantine_time ON quarantined_rows(quarantined_at);

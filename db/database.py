@@ -160,6 +160,23 @@ _CATEGORY_BLOCKLIST: dict[str, tuple[str, ...]] = {
         "case with",       # "Case with 300W Power Supply" combos
         "chassis with",    # "Chassis with 300W Power Supply" combos
     ),
+    "monitor": (
+        "keyboard",        # mechanical keyboards listed under monitors
+        "light bar",       # RGB light bars
+        "lightbar",
+        "mouse pad",
+        # NOTE: "webcam" deliberately excluded — live data has real monitors
+        # with a built-in Windows Hello webcam in the product name (e.g.
+        # "Philips 27E1N5600HE ... with Windows Hello Webcam"); the term
+        # would quarantine genuine inventory, not junk.
+    ),
+    "hdd": (
+        "docking station",
+        "portable ssd",    # portable/external SSDs are not HDDs
+        "external ssd",
+        "enclosure",
+        "caddy",
+    ),
 }
 
 
@@ -174,6 +191,8 @@ _MIN_PRICE: dict[str, int] = {
     "psu":         5000,
     "case":        3000,
     "cooling":      500,
+    "hdd":         1500,
+    "monitor":     5000,
 }
 
 # How many of the most recent scrape dates a trend series shows. Scrape dates
@@ -183,15 +202,16 @@ _MIN_PRICE: dict[str, int] = {
 _TREND_MAX_DATES = 5
 
 
-def _is_blocked(name: str, category: str) -> bool:
+def _blocked_by(name: str, category: str) -> Optional[str]:
+    """Return the rule id that rejects `name`, or None if it passes."""
     lower = name.lower()
     for term in _GLOBAL_BLOCKLIST:
         if term in lower:
-            return True
+            return f"blocklist:global:{term}"
     for term in _CATEGORY_BLOCKLIST.get(category, ()):
         if term in lower:
-            return True
-    return False
+            return f"blocklist:{category}:{term}"
+    return None
 
 
 _VALID_SPEC_KEYS = frozenset({
@@ -377,6 +397,7 @@ class Database:
         inserted = 0
         skipped = 0
         seen_ids: dict[str, set[int]] = {}
+        quarantined: list[tuple] = []
         cur = self._conn.cursor()
         for p in products:
             if not p.get("category"):
@@ -388,9 +409,14 @@ class Database:
             min_price = _MIN_PRICE.get(p["category"])
             if min_price is not None and price < min_price:
                 skipped += 1
+                quarantined.append((p["source"], p["name"], p["category"], price,
+                                    p.get("url"), f"min_price:{p['category']}:{min_price}"))
                 continue
-            if _is_blocked(p["name"], p["category"]):
+            rule = _blocked_by(p["name"], p["category"])
+            if rule:
                 skipped += 1
+                quarantined.append((p["source"], p["name"], p["category"], price,
+                                    p.get("url"), rule))
                 continue
             source_id = _slug(p["url"])
             thumbnail = p.get("thumbnail_url")
@@ -434,9 +460,25 @@ class Database:
             except sqlite3.IntegrityError:
                 pass
 
+        if quarantined:
+            cur.executemany(
+                """
+                INSERT INTO quarantined_rows (source, name, category, price_pkr, url, rule)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                quarantined,
+            )
+
         self._conn.commit()
         self._last_seen_ids = seen_ids
         return inserted
+
+    def list_quarantined(self, limit: int = 100) -> list[dict]:
+        """Most recent quarantined rows, newest first. Diagnostic use only."""
+        rows = self._conn.execute(
+            "SELECT * FROM quarantined_rows ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     def deactivate_unseen_parts(self, source: str) -> int:
         """
