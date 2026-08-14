@@ -1066,15 +1066,20 @@ class Database:
             values = [r[0] for r in rows if r[0]]
             if not values:
                 continue
+            # The raw value list is the shape the deployed frontend's
+            # FilterBar.bucketValues() already groups client-side — never
+            # replace it. Range labels (see _BUCKETED_SPEC_KEYS) are
+            # additive, under a separate "<key>_range" key, so an
+            # un-updated frontend keeps working and Phase 4 can adopt the
+            # range key on its own schedule.
+            result[key] = values
             if key in _BUCKETED_SPEC_KEYS:
                 # See the comment above _BUCKETED_SPEC_KEYS: this label must
-                # stay parseable by _parse_bucket. Falls back to the raw
-                # value list (unchanged, exact-match behaviour) when the
+                # stay parseable by _parse_bucket. Omitted entirely when the
                 # values aren't one consistent "<number><unit>" shape.
                 label = _emit_bucket_label(values)
-                result[key] = [label] if label else values
-            else:
-                result[key] = values
+                if label:
+                    result[f"{key}_range"] = [label]
         return result
 
     def get_price_history(self, source_id: str, source: str) -> list[dict]:

@@ -227,7 +227,7 @@ def get_parts(
     capacity:    Optional[str] = Query(None),
     q:           Optional[str] = Query(None),
     ids:         Optional[str] = Query(None, description="Comma-separated part IDs, max 50"),
-    include_specs: bool        = Query(False, description="Include the specs blob (needed by the /build picker; the market grid doesn't read it)"),
+    include_specs: bool        = Query(True, description="Include the specs blob. Defaults True to match the currently-deployed frontend (PartPickerModal, checkCompatibility()); the market grid should opt out with include_specs=false once it's updated to not need it"),
     db:          Database      = Depends(get_database),
 ):
     if category and category not in VALID_CATEGORIES:

@@ -15,10 +15,20 @@ def test_bucket_filter_matches_the_whole_range(client, seeded_db):
     ])
     db.close()
 
+    options = client.get("/api/parts/filters?category=ram").json()
+
+    # The deployed frontend's FilterBar.bucketValues() groups the raw value
+    # list client-side — that shape must be unchanged and must NOT be
+    # replaced by the range label (M29's original fix broke this exact
+    # contract by swapping the key's meaning in place). Only 16/32GB show up:
+    # the RAM extractor only ever stores those two sizes (8/64GB rows above
+    # get capacity=None and are excluded), per _extract_ram_capacity.
+    assert set(options["capacity"]) == {"16GB", "32GB"}
+
+    # Range labels are additive, under a separate key, for Phase 4 to adopt.
     # Use a real bucket label straight from the filters endpoint, not an
     # invented one — get_filter_options and _parse_bucket must agree on shape.
-    options = client.get("/api/parts/filters?category=ram").json()
-    bucket_label = options["capacity"][0]
+    bucket_label = options["capacity_range"][0]
 
     r = client.get(f"/api/parts?category=ram&capacity={bucket_label}")
     names = [i["name"] for i in r.json()["items"]]
