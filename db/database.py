@@ -35,7 +35,7 @@ import secrets
 import string
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 import json
 from scrapers.spec_extractor import extract_specs
 from db.tokenize import MAX_SEARCH_TOKENS, normalize_name, search_tokens  # noqa: F401
@@ -66,7 +66,7 @@ def _slug(url: str) -> str:
     return url[:200]
 
 
-def _median(values: list[int]) -> float:
+def _median(values: Sequence[float]) -> float:
     """Median of a non-empty list."""
     s = sorted(values)
     n = len(s)
@@ -963,14 +963,11 @@ class Database:
     # Price trends (precomputed aggregate per model/spec per scrape date)
     # ------------------------------------------------------------------
 
-    # Minimum listings in a bucket to use a trimmed mean; below this we fall
-    # back to a plain median (too few points to trim meaningfully).
-    _TREND_MIN_TRIM = 5
-    _TREND_TRIM_FRAC = 0.10
     _TREND_MIN_BASKET = 3   # fewer matched parts than this is noise, not a measurement
     # Band (min/max) trim: drop the most extreme 5% each end so mispriced
-    # outlier listings don't blow out the displayed range. Center uses the
-    # 10% trim above; the band is wider (5%) to still show a real spread.
+    # outlier listings don't blow out the displayed range. center_price itself
+    # is the matched-basket median/chained level (see rebuild_price_trends);
+    # this trim is only for the displayed min/max spread.
     _TREND_BAND_FRAC = 0.05
 
     # Standard RAM speeds we track (one-off/overclock speeds with few listings
@@ -1081,6 +1078,7 @@ class Database:
                     matched = list(basket.values())
                     level = _median(matched)
                     basket_size = len(matched)
+                    method = "matched_basket_median"
                 else:
                     prev = by_date[dates[i - 1]]
                     shared = set(prev) & set(prices_now)
@@ -1090,23 +1088,19 @@ class Database:
                         # a number driven by which products happened to appear.
                         level = None
                         continue
-                    ratios = sorted(prices_now[p] / prev[p] for p in shared)
-                    ratio = _median(ratios)
+                    basket = {p: prices_now[p] for p in shared}
                     if level is None:
                         # Chain was broken earlier — re-anchor on real prices.
-                        level = _median([prices_now[p] for p in shared])
+                        level = _median(list(basket.values()))
+                        method = "matched_basket_median"
                     else:
+                        ratios = sorted(prices_now[p] / prev[p] for p in shared)
+                        ratio = _median(ratios)
                         level = level * ratio
-                    basket = {p: prices_now[p] for p in shared}
+                        method = "matched_basket_chained"
 
                 matched_prices = list(basket.values())
-                n = len(matched_prices)
-                if n >= self._TREND_MIN_TRIM:
-                    _, used = _trimmed_mean(matched_prices, self._TREND_TRIM_FRAC)
-                    method = "matched_basket_trimmed"
-                else:
-                    used = n
-                    method = "matched_basket"
+                used = len(matched_prices)
                 band_lo, band_hi = _trimmed_band(matched_prices, self._TREND_BAND_FRAC)
                 records.append((
                     category, group_type, group_key, date,

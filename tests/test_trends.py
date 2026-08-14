@@ -77,10 +77,10 @@ def test_rebuild_groups_gpu_models(db):
     assert len(series) == 1
     row = series[0]
     # Matched-basket chaining: the first date of a series has no predecessor
-    # to match against, so its own listings ARE the basket. n=6 >= the trim
-    # threshold, so the trim path runs (label carries "matched_basket_"
-    # prefix now that the method reflects basket, not raw-sample, trimming).
-    assert row["method"] == "matched_basket_trimmed"
+    # to match against, so its own listings ARE the basket, and center_price
+    # is a real median of them -> "matched_basket_median" regardless of n
+    # (there is no separate trimmed-mean center calculation any more).
+    assert row["method"] == "matched_basket_median"
     assert row["sample_count"] == 6
     # band is 5%-trimmed (ceil(6*.05)=1 dropped each end): 200000 and 205000 shed
     assert row["min_price"] == 201000
@@ -110,11 +110,10 @@ def test_rebuild_small_bucket_uses_median(db):
         _seed(db, f"MSI RTX 5070 v{i}", "gpu", {"2026-01-01": p})
     db.rebuild_price_trends()
     row = db.get_price_trends("gpu", "RTX 5070")[0]
-    # First date of the series -> basket == the raw listings, n=3 < trim
-    # threshold -> "matched_basket" (below-trim variant of the new method
-    # names). center_price is still a plain median at the anchor date, so
-    # the value is unchanged from the old median fallback.
-    assert row["method"] == "matched_basket"
+    # First date of the series -> basket == the raw listings, center_price is
+    # a real median of them -> "matched_basket_median". Value is unchanged
+    # from the old median fallback.
+    assert row["method"] == "matched_basket_median"
     assert row["center_price"] == 110000  # median of 3, robust to the 300k outlier
     assert row["min_price"] == 100000 and row["max_price"] == 300000
 
@@ -241,17 +240,16 @@ def test_get_price_trends_ram_default_group_type(db):
 
 
 def test_median_even_used_count(db):
-    """Below-trim bucket reports used_count == n, the whole basket."""
-    for i, p in enumerate([100000, 110000, 120000, 130000]):  # n=4 (even, <5 -> below trim)
+    """used_count == n, the whole matched basket (no odd/even median-arity)."""
+    for i, p in enumerate([100000, 110000, 120000, 130000]):  # n=4
         _seed(db, f"MSI RTX 5080 v{i}", "gpu", {"2026-01-01": p})
     db.rebuild_price_trends()
     row = db.get_price_trends("gpu", "RTX 5080")[0]
-    # Matched-basket method: below the trim threshold, used_count is simply
-    # the size of the matched basket (no more "1 odd / 2 even" median-arity
+    # Matched-basket method: used_count is simply the size of the matched
+    # basket that fed center_price (no more "1 odd / 2 even" median-arity
     # convention — that was specific to the raw-sample median fallback the
-    # old method used; the new center value is a basket median at the anchor
-    # date, but the reported used_count is just how many parts contributed).
-    assert row["method"] == "matched_basket"
+    # old method used).
+    assert row["method"] == "matched_basket_median"
     assert row["sample_count"] == 4
     assert row["used_count"] == 4
 
