@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 
 from scrapers import health
 from scrapers.base_scraper import blocked_hosts, reset_host_state
+from scrapers.exceptions import ScrapeIncomplete
 from scrapers.prebuilts.zestro.scraper import ZestroScraper, SOURCE as ZESTRO_SOURCE
 from scrapers.prebuilts.redtech.scraper import RedTechScraper, SOURCE as REDTECH_SOURCE
 from scrapers.prebuilts.techmatched.scraper import TechMatchedScraper, SOURCE as TM_SOURCE
@@ -60,6 +61,13 @@ def main():
             scraper = cls()
             results = scraper.scrape_all()
             print(f"  => {len(results)} prebuilts scraped")
+        except ScrapeIncomplete as e:
+            # Same rule as run_all.py: the scraper still collected some
+            # prebuilts before choking — keep them for upsert below, but
+            # `error` being set forces `ok = False` so the sweep is skipped.
+            results = getattr(e, "partial_results", None) or []
+            error = f"{type(e).__name__}: {e}"
+            print(f"  INCOMPLETE: {error} — keeping {len(results)} prebuilt(s) collected before the fault")
         except Exception as e:
             error = f"{type(e).__name__}: {e}"
             print(f"  ERROR scraping {name}: {error}")

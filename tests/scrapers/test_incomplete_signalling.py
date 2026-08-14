@@ -170,6 +170,68 @@ def test_incomplete_run_is_not_ok_and_does_not_sweep(tmp_path, monkeypatch):
     )
 
 
+def test_prebuilt_incomplete_run_upserts_partial_results_and_does_not_sweep(tmp_path, monkeypatch):
+    """
+    run_prebuilts.py regression: a prebuilt source whose scrape_all() raises
+    ScrapeIncomplete carrying .partial_results must still upsert those
+    products (previously the bare `except Exception` swallowed the
+    exception, results stayed [], and the partial data was dropped) while
+    still skipping the freshness sweep — the 5 pre-existing rows for this
+    source must survive untouched.
+    """
+    import sys
+
+    from scrapers.prebuilts import run_prebuilts
+    from db.database import Database, get_db
+
+    (tmp_path / "data").mkdir()
+    db_path = tmp_path / "data" / "ppc.db"
+    seed = Database(db_path)
+    seed.upsert_prebuilts([{
+        "name": f"Prebuilt {i}", "price_pkr": 200000,
+        "url": f"https://redtech.pk/product/pc-{i}", "source": "redtech.pk",
+        "scraped_at": "2026-08-01T00:00:00Z", "thumbnail_url": None,
+        "components": None,
+    } for i in range(5)])
+    seed.close()
+
+    class FakeIncompleteScraper:
+        def scrape_all(self):
+            exc = ScrapeIncomplete("redtech: 3 consecutive page failures")
+            exc.partial_results = [{
+                "name": "New Prebuilt X", "price_pkr": 250000,
+                "url": "https://redtech.pk/product/new-pc-x", "source": "redtech.pk",
+                "scraped_at": "2026-08-01T00:00:00Z", "thumbnail_url": None,
+                "components": None,
+            }, {
+                "name": "New Prebuilt Y", "price_pkr": 260000,
+                "url": "https://redtech.pk/product/new-pc-y", "source": "redtech.pk",
+                "scraped_at": "2026-08-01T00:00:00Z", "thumbnail_url": None,
+                "components": None,
+            }]
+            raise exc
+
+    monkeypatch.setattr(run_prebuilts, "SCRAPERS", {
+        "redtech": ("redtech.pk", FakeIncompleteScraper),
+    })
+    monkeypatch.setattr(run_prebuilts, "ROOT", str(tmp_path))
+    monkeypatch.setattr(run_prebuilts, "backup_db", lambda *_a, **_k: None)
+    monkeypatch.setattr(sys, "argv", ["run_prebuilts.py", "redtech"])
+
+    run_prebuilts.main()
+
+    with get_db(str(db_path)) as db:
+        health = db.source_health(kind="prebuilt")["redtech.pk"]
+        active = db.prebuilt_stats()["by_source"]["redtech.pk"]
+
+    assert active == 7, (
+        "5 pre-existing + 2 collected before the fault must all be upserted; "
+        "a real sweep would have deactivated the 5 pre-existing rows never re-seen"
+    )
+    assert health["stale"] is True, "an incomplete run must mark the source stale, not clean"
+    assert "ScrapeIncomplete" in health["last_error"]
+
+
 # ----------------------------------------------------------------------
 # H9 — amdhouse's probe: a transient failure is not "category doesn't exist"
 # ----------------------------------------------------------------------
