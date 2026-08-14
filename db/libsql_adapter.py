@@ -116,11 +116,13 @@ class _Cursor:
 
     # --- execution (error-mapped, transient-retried) ---
     def _run(self, fn):
+        last_exc: Optional[Exception] = None
         for attempt in range(_MAX_ATTEMPTS):
             try:
                 fn()
                 return self
             except ValueError as e:
+                last_exc = e
                 mapped = _map_error(e)
                 if mapped is not None:
                     raise mapped from e  # constraint error — never retry
@@ -128,6 +130,15 @@ class _Cursor:
                     time.sleep(_BASE_BACKOFF * (2 ** attempt))
                     continue
                 raise
+        # Unreachable given the branches above (every path returns or raises),
+        # but kept explicit so this function's static return type is
+        # unconditionally `_Cursor`, never `_Cursor | None`. A bare fall-through
+        # here used to return None silently, and every caller then did
+        # `self._conn.execute(...).fetchone()` -> AttributeError on NoneType,
+        # masking whatever transient error actually exhausted the retries.
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("libsql _Cursor._run exhausted retries without capturing an error")
 
     def execute(self, sql: str, params: Iterable[Any] = ()):
         p = tuple(params) if params else ()

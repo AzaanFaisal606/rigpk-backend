@@ -301,6 +301,14 @@ class Database:
             self._target = str(self._path)
             self._conn = sqlite3.connect(str(self._path))
             self._conn.row_factory = sqlite3.Row
+
+        if self._remote and os.getenv("PYTEST_CURRENT_TEST"):
+            raise RuntimeError(
+                "Refusing to open the remote Turso DB from a test process. "
+                "tests/conftest.py strips TURSO_* — if you see this, an import "
+                "re-set them."
+            )
+
         self._apply_schema()
 
         # ── TEMP DRY-RUN SWITCH — remove when scrapers are fixed & verified ──
@@ -528,8 +536,12 @@ class Database:
                     (part_id, p.get("price_pkr"), p["scraped_at"]),
                 )
                 inserted += 1
-            except sqlite3.IntegrityError:
-                pass
+            except sqlite3.IntegrityError as exc:
+                # UNIQUE (part_id, scraped_at): the same run re-scraped this
+                # part. Expected and harmless. Anything else is a real defect
+                # and must not be swallowed.
+                if "UNIQUE" not in str(exc).upper():
+                    raise
 
         if quarantined:
             # Diagnostic-only: a failure here (e.g. a pre-dedup DB the migration
@@ -1484,7 +1496,13 @@ def backup_db(path: str | Path = _DEFAULT_DB, keep: int = 10) -> Optional[Path]:
     finally:
         con.close()
 
-    snaps = sorted(src.parent.glob(f"{src.name}.bak.*"))
+    # Only prune snapshots this function created: <name>.bak.YYYYMMDD_HHMMSS.
+    # A looser glob previously matched hand-named snapshots (pre-migration
+    # backups) and rotated them away, while missing the undated <name>.bak.
+    snaps = sorted(
+        p for p in src.parent.glob(f"{src.name}.bak.*")
+        if re.fullmatch(r"\d{8}_\d{6}", p.name[len(src.name) + 5:])
+    )
     for old in snaps[:-keep] if keep > 0 else []:
         try:
             old.unlink()
