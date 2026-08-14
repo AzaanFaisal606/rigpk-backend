@@ -398,6 +398,35 @@ def test_pentium_gold_g6400_is_lga1200():
     assert extract_specs("Intel Pentium Gold G6400 Desktop Processor", "cpu")["socket"] == "LGA1200"
 
 
+# ── CPU socket: AMD "F" (no-iGPU) suffix (F fix round 2) ─────────────────────
+# AMD's F suffix (e.g. 7500F, 9500F) is a real desktop-only Zen4 SKU, the
+# same concept as Intel's F — it must resolve, not fall victim to the
+# mobile-suffix tightening from round 1.
+
+@pytest.mark.parametrize("name,socket", [
+    ("AMD Ryzen 5 7500F", "AM5"),
+    ("AMD Ryzen 5 9500F", "AM5"),
+])
+def test_amd_f_suffix_resolves_desktop_socket(name, socket):
+    assert extract_specs(name, "cpu")["socket"] == socket
+
+
+# ── CPU socket: Core Ultra tier↔model adjacency (F fix round 2) ──────────────
+# Some real listings put marketing copy ("Desktop Processor") between the
+# tier digit and the model number: "Core Ultra 5 Desktop Processor 245K".
+# The adjacency requirement is relaxed to allow up to 2 intervening words —
+# proven safe by scanning every row of the local DB across every category:
+# the "core ultra [579]" trigger only ever appears on cpu rows, never on a
+# motherboard/cooler listing that merely mentions Core Ultra compatibility.
+
+@pytest.mark.parametrize("name,socket", [
+    ("Intel Core Ultra 5 Desktop Processor 245K, 14 Cores 14 Threads", "LGA1851"),
+    ("Intel Core Ultra 9 Desktop Processor 285K in Pakistan", "LGA1851"),
+])
+def test_core_ultra_tier_model_adjacency_allows_intervening_words(name, socket):
+    assert extract_specs(name, "cpu")["socket"] == socket
+
+
 def test_pentium_gold_alder_lake_g6405_not_matched():
     # Intel reused the "G6" prefix for 12th-gen Alder Lake (LGA1700, not
     # LGA1200) via G6405/G6405T. The rule is scoped to the exact Comet Lake
