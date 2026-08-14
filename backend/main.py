@@ -2,12 +2,13 @@ import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
+from backend.deps import lifespan
 from backend.routers.parts import router
 from backend.routers.builds import router as builds_router
 from backend.routers.prebuilts import router as prebuilts_router
 from backend.routers.trends import router as trends_router
 
-app = FastAPI(title="RigPK API")
+app = FastAPI(title="RigPK API", lifespan=lifespan)
 
 _origins = [
     "http://localhost:3000",

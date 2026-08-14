@@ -43,8 +43,14 @@ def test_unknown_share_code_is_404(client):
 
 
 def test_prebuilts_endpoint(client):
-    assert client.get("/api/prebuilts").status_code == 200
+    r = client.get("/api/prebuilts")
+    assert r.status_code == 200
+    body = r.json()
+    assert body == {"items": [], "total": 0}
 
 
 def test_trends_groups_endpoint(client):
-    assert client.get("/api/trends/groups?category=gpu").status_code == 200
+    r = client.get("/api/trends/groups?category=gpu")
+    assert r.status_code == 200
+    body = r.json()
+    assert body == {"category": "gpu", "groups": []}

@@ -1,11 +1,11 @@
 from __future__ import annotations
 import json
 from typing import Any, Optional
-from fastapi import APIRouter, Query, HTTPException, Response
+from fastapi import APIRouter, Query, HTTPException, Response, Depends
 from pydantic import BaseModel
 
-from db.database import get_db
-from backend.config import DB_PATH
+from db.database import Database
+from backend.deps import get_database
 from backend.constants import VALID_CATEGORIES, VALID_SOURCES
 
 router = APIRouter(prefix="/api")
@@ -28,25 +28,22 @@ class PartsResponse(BaseModel):
 
 
 @router.get("/stats")
-def get_stats():
-    with get_db(DB_PATH) as db:
-        return db.stats()
+def get_stats(db: Database = Depends(get_database)):
+    return db.stats()
 
 
 @router.get("/parts/filters")
-def get_filter_options(category: str = Query(...)):
+def get_filter_options(category: str = Query(...), db: Database = Depends(get_database)):
     if category not in VALID_CATEGORIES:
         return {}
-    with get_db(DB_PATH) as db:
-        return db.get_filter_options(category)
+    return db.get_filter_options(category)
 
 
 @router.get("/search-index")
-def get_search_index(response: Response, category: str = Query(...)):
+def get_search_index(response: Response, category: str = Query(...), db: Database = Depends(get_database)):
     if category not in VALID_CATEGORIES:
         raise HTTPException(status_code=400, detail=f"Invalid category '{category}'")
-    with get_db(DB_PATH) as db:
-        payload = db.search_index(category)
+    payload = db.search_index(category)
     # Cloudflare fronts Render, so repeat hits are served from edge cache and
     # the client revalidates cheaply with If-None-Match.
     response.headers["ETag"] = f'"{payload["version"]}"'
@@ -80,6 +77,7 @@ def get_parts(
     capacity:    Optional[str] = Query(None),
     q:           Optional[str] = Query(None),
     ids:         Optional[str] = Query(None, description="Comma-separated part IDs, max 50"),
+    db:          Database      = Depends(get_database),
 ):
     if category and category not in VALID_CATEGORIES:
         raise HTTPException(status_code=400, detail=f"Invalid category '{category}'. Valid: {sorted(VALID_CATEGORIES)}")
@@ -104,19 +102,18 @@ def get_parts(
     }
     specs_filter = {k: v for k, v in raw_spec_filters.items() if v is not None} or None
 
-    with get_db(DB_PATH) as db:
-        items, total = db.list_parts(
-            category=category,
-            source=source,
-            min_price=min_price,
-            max_price=max_price,
-            specs_filter=specs_filter,
-            q=q,
-            sort=sort,
-            limit=limit,
-            offset=offset,
-            ids=id_list,
-        )
+    items, total = db.list_parts(
+        category=category,
+        source=source,
+        min_price=min_price,
+        max_price=max_price,
+        specs_filter=specs_filter,
+        q=q,
+        sort=sort,
+        limit=limit,
+        offset=offset,
+        ids=id_list,
+    )
 
     parsed_items = []
     for item in items:

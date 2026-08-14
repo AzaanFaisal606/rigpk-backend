@@ -1,10 +1,10 @@
 from __future__ import annotations
 from typing import Optional
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
 from pydantic import BaseModel
 
-from db.database import get_db
-from backend.config import DB_PATH
+from db.database import Database
+from backend.deps import get_database
 from backend.constants import VALID_CATEGORIES
 
 router = APIRouter(prefix="/api/trends")
@@ -49,17 +49,16 @@ def _validate(category: str) -> None:
 
 
 @router.get("/groups", response_model=TrendGroupsResponse)
-def list_trend_groups(category: str = Query(...)):
+def list_trend_groups(category: str = Query(...), db: Database = Depends(get_database)):
     """
     All trend groups for a category, each with its full price series, latest
     center/min/max and a representative thumbnail. One round-trip per category
     so the trends page can render a whole list (whitelist-filtered client-side).
     """
     _validate(category)
-    with get_db(DB_PATH) as db:
-        groups = db.list_trend_groups(category)
-        # full series for every group, bucketed by group_key
-        series_rows = db.get_price_trends(category)
+    groups = db.list_trend_groups(category)
+    # full series for every group, bucketed by group_key
+    series_rows = db.get_price_trends(category)
     by_group: dict[str, list[TrendPoint]] = {}
     for r in series_rows:
         by_group.setdefault(r["group_key"], []).append(
@@ -96,11 +95,11 @@ def list_trend_groups(category: str = Query(...)):
 def get_trend_series(
     category: str = Query(...),
     group_key: str = Query(...),
+    db: Database = Depends(get_database),
 ):
     """Single group's price series (one model/spec over time)."""
     _validate(category)
-    with get_db(DB_PATH) as db:
-        rows = db.get_price_trends(category, group_key=group_key)
+    rows = db.get_price_trends(category, group_key=group_key)
     if not rows:
         raise HTTPException(status_code=404, detail="No trend data for group")
     return [

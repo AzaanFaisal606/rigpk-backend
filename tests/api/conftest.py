@@ -5,32 +5,30 @@ The repo had no TestClient at all, so every endpoint shipped untested — which
 is how /api/parts could return HTTP 200 with an empty body on a misconfigured
 deploy without anyone noticing.
 
-There is no FastAPI dependency for the DB yet (routers call `db.database.get_db`
-directly inside each handler, opening and closing one `Database`/sqlite3
-connection per request) — that lands in a later task. Until then this fixture
-monkeypatches the `get_db` name bound into each router module, which is the
-actual construction point today, so it points at the same tmp SQLite file the
-`seeded_db` fixture wrote to. Each request still opens its own connection to
-that file, same as production — sqlite3 connections aren't thread-safe, and
-FastAPI dispatches sync route handlers to a threadpool, so reusing a single
-open connection across requests fails with "SQLite objects created in a
-thread can only be used in that same thread."
+Routes now take `db: Database = Depends(get_database)` (see `backend/deps.py`)
+instead of building their own `Database` per request, so the fixture overrides
+that dependency via `app.dependency_overrides` rather than monkeypatching a
+`get_db` name inside each router module — the latter would silently stop
+doing anything the moment the routers stopped calling `get_db` themselves.
 
-Task 2's `get_database()` dependency needs to preserve this: whatever it
-constructs must be swappable via `app.dependency_overrides`, and if it hands
-out a single long-lived connection (rather than one per request) that
-connection must tolerate being used from FastAPI's threadpool.
+The override hands out a `ThreadSafeDatabase` (the same wrapper production
+uses), not a raw `Database`. That's not optional: FastAPI resolves each sync
+`Depends()` callable via its own separate threadpool dispatch, independent of
+the one used for the route handler body, so the thread that returns the
+database is frequently not the thread that ends up calling methods on it —
+confirmed by seeing this exact fixture crash with sqlite3's "created in a
+thread can only be used in that same thread" on nothing more than a single
+`/api/stats` call when it returned a raw `Database` built on the pytest
+thread. `ThreadSafeDatabase` marshals every call onto its own dedicated owner
+thread, so it tolerates being invoked from whichever worker thread FastAPI
+picks — sequentially or, per test_connection_reuse.py's concurrency test,
+from several threads firing requests at once.
 """
 import pytest
 from fastapi.testclient import TestClient
 
 from db.database import Database
-import backend.routers.parts as parts_router
-import backend.routers.builds as builds_router
-import backend.routers.prebuilts as prebuilts_router
-import backend.routers.trends as trends_router
-
-_DB_MODULES = (parts_router, builds_router, prebuilts_router, trends_router)
+from backend.deps import ThreadSafeDatabase, get_database
 
 
 @pytest.fixture
@@ -47,19 +45,19 @@ def seeded_db(tmp_path):
          "source": "pakbyte", "scraped_at": "2026-08-14T00:00:00Z"}
         for i in range(10)
     ])
-    yield db
     db.close()
+    yield tmp_path / "api.db"
 
 
 @pytest.fixture
-def client(seeded_db, tmp_path, monkeypatch):
+def client(seeded_db):
     import backend.main as main
 
-    def _get_db(path=None):
-        return Database(tmp_path / "api.db")
-
-    for mod in _DB_MODULES:
-        monkeypatch.setattr(mod, "get_db", _get_db)
-
-    with TestClient(main.app) as c:
-        yield c
+    safe_db = ThreadSafeDatabase(seeded_db)
+    main.app.dependency_overrides[get_database] = lambda: safe_db
+    try:
+        with TestClient(main.app) as c:
+            yield c
+    finally:
+        main.app.dependency_overrides.pop(get_database, None)
+        safe_db.close()
