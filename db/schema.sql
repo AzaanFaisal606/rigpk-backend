@@ -47,6 +47,12 @@ CREATE INDEX IF NOT EXISTS idx_parts_source   ON parts(source);
 -- Search matches `name_norm LIKE '% token%'`, which cannot use an index for the
 -- leading wildcard, but category-scoped searches still narrow the scan first.
 CREATE INDEX IF NOT EXISTS idx_parts_category_active ON parts(category, is_active);
+-- idx_parts_cat_active_price (category, is_active, latest_price) — covers the
+-- market page's list_parts() query, filter + ORDER BY in one index — is
+-- created in _migrate() instead of here, on purpose: it's not safe in this
+-- executescript(), which runs before _migrate()'s ALTERs add latest_price
+-- and is_active to a database created before this file's CREATE TABLE
+-- carried those columns.
 CREATE INDEX IF NOT EXISTS idx_price_log_part ON price_log(part_id);
 CREATE INDEX IF NOT EXISTS idx_price_log_time ON price_log(scraped_at);
 -- Serves the "latest price per part" correlated subquery in list_parts():

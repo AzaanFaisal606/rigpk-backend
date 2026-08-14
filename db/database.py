@@ -384,12 +384,41 @@ class Database:
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_prebuilts_active ON prebuilts(is_active)"
         )
+        # Serves the market page's hot query: filter by category + active,
+        # order by price. Covers the ORDER BY so the sort resolves from the
+        # index (SQLite can walk an ASC index backwards for DESC, so this one
+        # index serves both sort directions — no separate DESC variant).
+        # Created here rather than in schema.sql: schema.sql's CREATE TABLE IF
+        # NOT EXISTS never re-adds columns to a pre-existing table, and this
+        # index references category/is_active/latest_price, all of which are
+        # ALTERed onto older DBs above. An index in schema.sql referencing
+        # them would run inside the same executescript() as the CREATE TABLE,
+        # before those ALTERs ever execute, and fail on such a DB.
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_parts_cat_active_price "
+            "ON parts(category, is_active, latest_price)"
+        )
         # One-time cleanup: an earlier revision of deactivate_unseen_* created
         # this as a shared scratch table, which is unsafe under overlapping
         # sweeps (cron + manual dispatch + heal rerun hitting the same DB).
         # Drop it if a prior run of that code left it behind.
         self._conn.execute("DROP TABLE IF EXISTS _sweep_seen_ids")
         self._migrate_quarantine_dedup()
+
+        # Populates sqlite_stat1 so the planner picks the composite index
+        # instead of guessing. Cheap on this data size; skip when the stats
+        # table already exists so it is not re-run on every connection.
+        # Local sqlite3 only: Hrana (libSQL's remote protocol) rejects ANALYZE
+        # outright ("SQL not allowed statement: ANALYZE") — running it
+        # unconditionally would break every remote Database() construction.
+        # Turso's query planner keeps its own statistics server-side, so
+        # skipping this there costs nothing.
+        if not self._remote:
+            has_stats = self._conn.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name='sqlite_stat1'"
+            ).fetchone()[0]
+            if not has_stats:
+                self._conn.execute("ANALYZE")
 
     def _migrate_quarantine_dedup(self):
         """
