@@ -105,7 +105,13 @@ def main():
                 before_active=before_n, after_active=after_n, error=error,
             )
 
-        anomalies += health.source_anomalies(source, before_n, after_n, ok, error)
+        # Prebuilt sources are far smaller than part sources (redtech has only 13
+        # rows total) — the part-scraper's floor of 20 would exempt them from
+        # ever being flagged, so use the lower prebuilt-specific floor instead.
+        anomalies += health.source_anomalies(
+            source, before_n, after_n, ok, error,
+            floor=health.MIN_PREBUILT_SOURCE_BASELINE,
+        )
 
         total_scraped += len(results)
         total_written += n
