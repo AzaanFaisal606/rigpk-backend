@@ -376,6 +376,11 @@ class Database:
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_prebuilts_active ON prebuilts(is_active)"
         )
+        # One-time cleanup: an earlier revision of deactivate_unseen_* created
+        # this as a shared scratch table, which is unsafe under overlapping
+        # sweeps (cron + manual dispatch + heal rerun hitting the same DB).
+        # Drop it if a prior run of that code left it behind.
+        self._conn.execute("DROP TABLE IF EXISTS _sweep_seen_ids")
         self._migrate_quarantine_dedup()
 
     def _migrate_quarantine_dedup(self):
@@ -571,40 +576,40 @@ class Database:
 
         Returns the number of parts newly marked inactive.
 
-        Uses a scratch table for the seen-id set rather than one bound
-        parameter per id: a single source can have thousands of active rows
-        (pakbyte alone is 2,589), well past sqlite's default 999-variable
-        cap. Shipped as a plain (non-TEMP) table, created and dropped within
-        this call — libSQL's remote driver isn't verified to preserve
-        `CREATE TEMP TABLE` state the way local sqlite3 does, whereas plain
-        CREATE/INSERT/DROP is already relied on elsewhere in this file on
-        both engines.
+        No scratch table: read this source's currently-active ids, subtract
+        the seen-id set in Python, and UPDATE the (usually much smaller)
+        to-deactivate set in chunks of <=900 ids. Avoids both the
+        999-variable ceiling on a single IN(...) and any shared/global
+        table name that could collide between overlapping sweeps (weekly
+        cron, manual dispatch, self-heal rerun all hit the same remote DB).
         """
         seen = getattr(self, "_last_seen_ids", {}).get(source, set())
         if not seen:
             return 0
         with self._conn:
-            self._conn.execute(
-                "CREATE TABLE IF NOT EXISTS _sweep_seen_ids (id INTEGER PRIMARY KEY)"
-            )
-            self._conn.execute("DELETE FROM _sweep_seen_ids")
-            self._conn.executemany(
-                "INSERT OR IGNORE INTO _sweep_seen_ids (id) VALUES (?)",
-                [(i,) for i in seen],
-            )
-            cur = self._conn.execute(
-                """
-                UPDATE parts SET is_active = 0,
-                                 delisted_at = COALESCE(delisted_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-                                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                WHERE source = ?
-                  AND is_active = 1
-                  AND id NOT IN (SELECT id FROM _sweep_seen_ids)
-                """,
+            active_rows = self._conn.execute(
+                "SELECT id FROM parts WHERE source = ? AND is_active = 1",
                 (source,),
-            )
-            self._conn.execute("DROP TABLE _sweep_seen_ids")
-        return cur.rowcount
+            ).fetchall()
+            to_deactivate = [r["id"] for r in active_rows if r["id"] not in seen]
+            if not to_deactivate:
+                return 0
+            total = 0
+            for i in range(0, len(to_deactivate), 900):
+                chunk = to_deactivate[i : i + 900]
+                placeholders = ",".join("?" * len(chunk))
+                cur = self._conn.execute(
+                    f"""
+                    UPDATE parts SET is_active = 0,
+                                     delisted_at = COALESCE(delisted_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                                     updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    WHERE is_active = 1
+                      AND id IN ({placeholders})
+                    """,
+                    chunk,
+                )
+                total += cur.rowcount
+        return total
 
     # ------------------------------------------------------------------
     # Scrape run log
@@ -1278,34 +1283,36 @@ class Database:
         """
         Prebuilt equivalent of deactivate_unseen_parts(). Same gating rule:
         only call after a scrape that actually returned products. Same
-        scratch-table treatment for the same reason — see the docstring on
-        deactivate_unseen_parts().
+        no-scratch-table treatment for the same reason — see the docstring
+        on deactivate_unseen_parts().
         """
         seen = getattr(self, "_last_seen_prebuilt_ids", {}).get(source, set())
         if not seen:
             return 0
         with self._conn:
-            self._conn.execute(
-                "CREATE TABLE IF NOT EXISTS _sweep_seen_ids (id INTEGER PRIMARY KEY)"
-            )
-            self._conn.execute("DELETE FROM _sweep_seen_ids")
-            self._conn.executemany(
-                "INSERT OR IGNORE INTO _sweep_seen_ids (id) VALUES (?)",
-                [(i,) for i in seen],
-            )
-            cur = self._conn.execute(
-                """
-                UPDATE prebuilts SET is_active = 0,
-                                     delisted_at = COALESCE(delisted_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-                                     updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                WHERE source = ?
-                  AND is_active = 1
-                  AND id NOT IN (SELECT id FROM _sweep_seen_ids)
-                """,
+            active_rows = self._conn.execute(
+                "SELECT id FROM prebuilts WHERE source = ? AND is_active = 1",
                 (source,),
-            )
-            self._conn.execute("DROP TABLE _sweep_seen_ids")
-        return cur.rowcount
+            ).fetchall()
+            to_deactivate = [r["id"] for r in active_rows if r["id"] not in seen]
+            if not to_deactivate:
+                return 0
+            total = 0
+            for i in range(0, len(to_deactivate), 900):
+                chunk = to_deactivate[i : i + 900]
+                placeholders = ",".join("?" * len(chunk))
+                cur = self._conn.execute(
+                    f"""
+                    UPDATE prebuilts SET is_active = 0,
+                                         delisted_at = COALESCE(delisted_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                                         updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    WHERE is_active = 1
+                      AND id IN ({placeholders})
+                    """,
+                    chunk,
+                )
+                total += cur.rowcount
+        return total
 
     def list_prebuilts(
         self,

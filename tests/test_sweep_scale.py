@@ -1,9 +1,9 @@
 """
 The sweep must work when a source has thousands of parts.
 
-It binds one parameter per seen id; pakbyte alone has 2,589 active rows, and
-some SQLite builds cap a statement at 999 host parameters. A scratch table
-sidesteps the limit entirely and is faster besides.
+Seen ids are diffed against active ids in Python, then the (usually much
+smaller) to-deactivate set is UPDATEd in chunks of <=900 ids, sidestepping
+sqlite's 999-host-parameter cap without a shared scratch table.
 """
 import pytest
 
