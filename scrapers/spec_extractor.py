@@ -64,6 +64,7 @@ _MAKER_BRANDS: list[tuple[str, str]] = [
     ("aoc",             "AOC"),
     ("wd",              "WD"),
     ("lg",              "LG"),
+    ("hp",              "HP"),
     # Budget/grey-market board partners, verified against the active
     # catalogue (were falling through to the chip-vendor fallback below).
     ("afox",            "AFOX"),
@@ -115,6 +116,21 @@ _BOUNDARY_BRANDS = {
     "gunnir", "galax", "manli", "inno3d", "evga", "biostar", "yeston",
     "onda", "vastarmor", "alseye", "dataland", "saphire",
 }
+
+# Word-boundary alone isn't enough for tokens that are also ordinary English
+# words: "Ease" is a legit board-maker name at the FRONT of a listing
+# ("Ease EM510B ... Motherboard") but also shows up mid-description on
+# unrelated products ("...300 nits, Eye Ease with Eyesafe Certification" on
+# an HP monitor -> would wrongly resolve to brand "EASE"). Retailers put the
+# maker at or near the start of the title, so these tokens only count as a
+# brand when they land there. "ninja"/"onda" are the same class (ordinary
+# words/short syllables); the rest of _BOUNDARY_BRANDS are distinctive
+# invented names with no known mid-title collisions (verified against the
+# full active catalogue) and stay plain word-boundary matches anywhere in
+# the string.
+_POSITION_RESTRICTED_BRANDS = {"ease", "ninja", "onda"}
+_BRAND_POSITION_LIMIT = 30  # chars from the start of the name
+
 _SHORT_BRAND_RE: dict[str, re.Pattern] = {
     s: re.compile(rf'\b{re.escape(s)}\b', re.IGNORECASE)
     for s, _ in _ALL_BRANDS if len(s) <= 3 or s in _BOUNDARY_BRANDS
@@ -125,8 +141,12 @@ def _match_brand_list(lower: str, brands: list[tuple[str, str]]) -> Optional[str
     for match_str, canonical in brands:
         pattern = _SHORT_BRAND_RE.get(match_str)
         if pattern:
-            if pattern.search(lower):
-                return canonical
+            m = pattern.search(lower)
+            if not m:
+                continue
+            if match_str in _POSITION_RESTRICTED_BRANDS and m.start() >= _BRAND_POSITION_LIMIT:
+                continue
+            return canonical
         elif match_str in lower:
             return canonical
     return None

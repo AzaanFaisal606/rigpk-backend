@@ -31,6 +31,9 @@ def test_brand_wd():
 def test_brand_missing():
     assert "brand" not in extract_specs("Generic No Name 500W PSU", "psu")
 
+def test_brand_hp_monitor():
+    assert extract_specs("HP M27f - 75Hz 1080p FHD IPS 27\" Monitor", "monitor")["brand"] == "HP"
+
 
 # ── CPU socket ───────────────────────────────────────────────────────────────
 
@@ -380,6 +383,28 @@ def test_ease_does_not_match_inside_release():
         "5x M.2, PCIe 5.0, Q-Release Slim, USB4, AI OCing & Networking"
     )
     assert extract_specs(name, "motherboard")["brand"] == "ASUS"
+
+
+def test_ease_mid_title_does_not_win_over_real_brand():
+    """'Eye Ease' is a whole word ('ease' bounded on both sides) so the plain
+    \\b match still fires — but it sits ~150 chars into the title, nowhere
+    near where a retailer puts the maker. Real catalogue row (data/ppc.db
+    id 25383/27077): must resolve to HP, not EASE."""
+    name = (
+        "HP Series 5 524sw 24 inch FHD Monitor, 100Hz, Full HD Display "
+        "(1920 x 1080), IPS Panel, 99% sRGB, 1500:1 Contrast Ratio, 300 "
+        "nits, Eye Ease with Eyesafe Certification"
+    )
+    assert extract_specs(name, "monitor")["brand"] == "HP"
+
+
+def test_ease_at_start_of_title_still_resolves():
+    """Real catalogue row (data/ppc.db): 'Ease' the board maker sits at
+    position 0, well inside the brand-position window, so it must still
+    resolve — the position restriction must not have broken the original
+    case it was added for."""
+    name = "Ease EM510B DDR4 Intel 10/11th Gen microATX Motherboard"
+    assert extract_specs(name, "motherboard")["brand"] == "EASE"
 
 
 @pytest.mark.parametrize("name,expected", [
