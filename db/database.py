@@ -226,6 +226,44 @@ _CATEGORY_SPEC_KEYS: dict[str, list[str]] = {
 }
 
 
+class _NoCommitConnection:
+    """
+    Wraps a DB connection so commit() is a no-op and everything else passes
+    through. Used by the SCRAPE_NO_DB_WRITE dry run: the scrape executes fully
+    (fetch, parse, counts, logs, anomaly detection) but nothing persists —
+    uncommitted work rolls back on close().
+
+    A proxy rather than attribute assignment because sqlite3.Connection.commit
+    is read-only; assigning over it worked on libSQL and crashed on SQLite.
+    """
+
+    def __init__(self, conn):
+        self._wrapped = conn
+
+    def commit(self, *_args, **_kwargs):
+        return None
+
+    def __getattr__(self, name):
+        return getattr(self._wrapped, name)
+
+    def __setattr__(self, name, value):
+        if name == "_wrapped":
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._wrapped, name, value)
+
+    def __enter__(self):
+        return self._wrapped.__enter__()
+
+    def __exit__(self, *exc):
+        # `with self._conn:` commits on success in sqlite3. Swallow the success
+        # path so a context-managed write is suppressed too; still roll back on
+        # error so an exception behaves normally.
+        if exc[0] is None:
+            return False
+        return self._wrapped.__exit__(*exc)
+
+
 class Database:
     def __init__(self, path: str | Path | None = None):
         url = os.getenv("TURSO_DATABASE_URL")
@@ -255,7 +293,7 @@ class Database:
         # Reverting = delete this block + the SCRAPE_NO_DB_WRITE env in scrape.yml.
         # See CLAUDE.md "## TEMP — Dry-run switch".
         if os.getenv("SCRAPE_NO_DB_WRITE") == "1":
-            self._conn.commit = lambda *a, **k: None
+            self._conn = _NoCommitConnection(self._conn)
 
     def _apply_schema(self):
         # Remote DB: apply schema + migrations once per process (see module note).
