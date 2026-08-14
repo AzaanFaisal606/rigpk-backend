@@ -570,21 +570,40 @@ class Database:
         its entire catalogue.
 
         Returns the number of parts newly marked inactive.
+
+        Uses a scratch table for the seen-id set rather than one bound
+        parameter per id: a single source can have thousands of active rows
+        (pakbyte alone is 2,589), well past sqlite's default 999-variable
+        cap. Shipped as a plain (non-TEMP) table, created and dropped within
+        this call — libSQL's remote driver isn't verified to preserve
+        `CREATE TEMP TABLE` state the way local sqlite3 does, whereas plain
+        CREATE/INSERT/DROP is already relied on elsewhere in this file on
+        both engines.
         """
         seen = getattr(self, "_last_seen_ids", {}).get(source, set())
         if not seen:
             return 0
-        placeholders = ",".join("?" * len(seen))
         with self._conn:
+            self._conn.execute(
+                "CREATE TABLE IF NOT EXISTS _sweep_seen_ids (id INTEGER PRIMARY KEY)"
+            )
+            self._conn.execute("DELETE FROM _sweep_seen_ids")
+            self._conn.executemany(
+                "INSERT OR IGNORE INTO _sweep_seen_ids (id) VALUES (?)",
+                [(i,) for i in seen],
+            )
             cur = self._conn.execute(
-                f"""
+                """
                 UPDATE parts SET is_active = 0,
                                  delisted_at = COALESCE(delisted_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
                                  updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                WHERE source = ? AND is_active = 1 AND id NOT IN ({placeholders})
+                WHERE source = ?
+                  AND is_active = 1
+                  AND id NOT IN (SELECT id FROM _sweep_seen_ids)
                 """,
-                [source, *seen],
+                (source,),
             )
+            self._conn.execute("DROP TABLE _sweep_seen_ids")
         return cur.rowcount
 
     # ------------------------------------------------------------------
@@ -1097,16 +1116,18 @@ class Database:
         Add a `thumbnail_url` to each model group: pick one current listing's
         non-null thumbnail whose extracted specs.model matches the group_key.
         Cheapest matching listing wins (most representative of the segment).
+        Scoped to active listings only, via parts.latest_price rather than a
+        full price_log scan — a delisted row's thumbnail must not win.
         """
         rows = self._conn.execute(
             """
             SELECT json_extract(p.specs, '$.model') AS model,
-                   p.thumbnail_url AS thumbnail_url,
-                   MIN(pl.price_pkr)               AS _min
+                   p.thumbnail_url                  AS thumbnail_url,
+                   MIN(p.latest_price)              AS _min
             FROM parts p
-            JOIN price_log pl ON pl.part_id = p.id
             WHERE p.category = ?
-              AND pl.price_pkr IS NOT NULL
+              AND p.is_active = 1
+              AND p.latest_price IS NOT NULL
               AND p.thumbnail_url IS NOT NULL
               AND json_extract(p.specs, '$.model') IS NOT NULL
             GROUP BY json_extract(p.specs, '$.model')
@@ -1256,22 +1277,34 @@ class Database:
     def deactivate_unseen_prebuilts(self, source: str) -> int:
         """
         Prebuilt equivalent of deactivate_unseen_parts(). Same gating rule:
-        only call after a scrape that actually returned products.
+        only call after a scrape that actually returned products. Same
+        scratch-table treatment for the same reason — see the docstring on
+        deactivate_unseen_parts().
         """
         seen = getattr(self, "_last_seen_prebuilt_ids", {}).get(source, set())
         if not seen:
             return 0
-        placeholders = ",".join("?" * len(seen))
         with self._conn:
+            self._conn.execute(
+                "CREATE TABLE IF NOT EXISTS _sweep_seen_ids (id INTEGER PRIMARY KEY)"
+            )
+            self._conn.execute("DELETE FROM _sweep_seen_ids")
+            self._conn.executemany(
+                "INSERT OR IGNORE INTO _sweep_seen_ids (id) VALUES (?)",
+                [(i,) for i in seen],
+            )
             cur = self._conn.execute(
-                f"""
+                """
                 UPDATE prebuilts SET is_active = 0,
                                      delisted_at = COALESCE(delisted_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
                                      updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                WHERE source = ? AND is_active = 1 AND id NOT IN ({placeholders})
+                WHERE source = ?
+                  AND is_active = 1
+                  AND id NOT IN (SELECT id FROM _sweep_seen_ids)
                 """,
-                [source, *seen],
+                (source,),
             )
+            self._conn.execute("DROP TABLE _sweep_seen_ids")
         return cur.rowcount
 
     def list_prebuilts(
