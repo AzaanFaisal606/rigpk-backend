@@ -1,0 +1,33 @@
+name: Keep API warm
+
+# Render's free dyno spins down after ~15 min idle, and the first request
+# afterwards fails the connection outright (http=000) before recovering. That
+# cold start is the root cause of two reported bugs: the empty /trends page
+# after a deploy (Next prerenders against a dead dyno and caches the empty
+# result for 300s) and the intermittent "search returns nothing".
+#
+# A ping every 10 minutes keeps the dyno up. This is deliberately not gated on
+# DEBUG_MODE — it performs no writes and reads no secrets.
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Ping the API
+        run: |
+          for attempt in 1 2 3; do
+            code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
+              https://ppc-pakistan.onrender.com/api/stats || echo "000")
+            echo "attempt $attempt: HTTP $code"
+            [ "$code" = "200" ] && exit 0
+            sleep 20
+          done
+          echo "API did not return 200 after 3 attempts"
+          exit 1
