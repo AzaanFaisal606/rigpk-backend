@@ -268,10 +268,15 @@ _VALID_SPEC_KEYS = frozenset({
 # ("16GB", "32GB", ...) which its own UI then grouped into range-looking
 # dropdown labels — but a click still filtered on one exact value, so picking
 # a "16-32GB" grouping silently dropped everything except whichever single
-# value the UI happened to send. These two are the fix, and must stay in
-# sync: `_parse_bucket` is the only thing that reads the label shape
-# `get_filter_options` produces below (`_emit_bucket_label`), so a change to
-# one format requires a change to the other.
+# value the UI happened to send. `list_parts` below is the fix: it accepts a
+# "lo-hiUNIT" bucket value and applies a real BETWEEN predicate.
+# `_emit_bucket_label` (below) produces that label shape but, as of fix
+# round 2, is not wired into `get_filter_options`'s response — FilterBar.tsx
+# renders any key it's given as a real dropdown, so shipping a label with no
+# SPEC_LABELS entry and no getParts() allow-list entry would ship a dead
+# control. `_parse_bucket` is the only thing that reads the label shape, so
+# a change to one format still requires a change to the other whenever
+# Phase 4 wires the emit side back up.
 _BUCKETED_SPEC_KEYS = frozenset({"capacity"})
 _BUCKET_VALUE_RE = re.compile(r'^(\d+(?:\.\d+)?)(GB|TB)$', re.IGNORECASE)
 _BUCKET_LABEL_RE = re.compile(r'^(\d+(?:\.\d+)?)-(\d+(?:\.\d+)?)(GB|TB)$', re.IGNORECASE)
@@ -1068,18 +1073,21 @@ class Database:
                 continue
             # The raw value list is the shape the deployed frontend's
             # FilterBar.bucketValues() already groups client-side — never
-            # replace it. Range labels (see _BUCKETED_SPEC_KEYS) are
-            # additive, under a separate "<key>_range" key, so an
-            # un-updated frontend keeps working and Phase 4 can adopt the
-            # range key on its own schedule.
+            # replace it.
             result[key] = values
-            if key in _BUCKETED_SPEC_KEYS:
-                # See the comment above _BUCKETED_SPEC_KEYS: this label must
-                # stay parseable by _parse_bucket. Omitted entirely when the
-                # values aren't one consistent "<number><unit>" shape.
-                label = _emit_bucket_label(values)
-                if label:
-                    result[f"{key}_range"] = [label]
+            # Fix round 2: do NOT also emit "<key>_range" here.
+            # FilterBar.tsx builds its spec dropdowns generically from
+            # Object.entries(filterOptions) — any non-empty key renders as a
+            # real dropdown, snake_case label and all, with no SPEC_LABELS
+            # entry for "capacity_range" and no allow-list entry in
+            # getParts() to carry its value anywhere — so on the live RAM
+            # market page this was a dead, mislabeled control with no
+            # effect, not an inert additive field. The range predicate
+            # itself (_parse_bucket / _BUCKETED_SPEC_KEYS, used by
+            # list_parts above) is unaffected and still works if called
+            # directly with a "lo-hiUNIT" value. Phase 4 must add the
+            # SPEC_LABELS entry and the getParts() allow-list entry in the
+            # same change that starts emitting this key again.
         return result
 
     def get_price_history(self, source_id: str, source: str) -> list[dict]:
