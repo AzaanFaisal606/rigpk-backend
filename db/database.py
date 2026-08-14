@@ -642,7 +642,7 @@ class Database:
         Items have the latest price per part. NULL-price rows excluded.
         specs_filter: e.g. {"brand": "AMD", "socket": "AM5"}
         """
-        conditions: list[str] = ["pl.price_pkr IS NOT NULL", "p.is_active = 1"]
+        conditions: list[str] = ["p.latest_price IS NOT NULL", "p.is_active = 1"]
         params: list = []
 
         if category:
@@ -652,10 +652,10 @@ class Database:
             conditions.append("p.source = ?")
             params.append(source)
         if min_price is not None:
-            conditions.append("pl.price_pkr >= ?")
+            conditions.append("p.latest_price >= ?")
             params.append(min_price)
         if max_price is not None:
-            conditions.append("pl.price_pkr <= ?")
+            conditions.append("p.latest_price <= ?")
             params.append(max_price)
         if q:
             # Match the precomputed normalised name. The leading space in both
@@ -692,20 +692,14 @@ class Database:
             page_params: list = []
         else:
             order = (
-                "ORDER BY pl.price_pkr ASC" if sort == "price_asc"
-                else "ORDER BY pl.price_pkr DESC"
+                "ORDER BY p.latest_price ASC, p.id ASC" if sort == "price_asc"
+                else "ORDER BY p.latest_price DESC, p.id ASC"
             )
             page = "LIMIT ? OFFSET ?"
             page_params = [limit, offset]
 
         base_query = f"""
             FROM parts p
-            JOIN price_log pl ON pl.id = (
-                SELECT id FROM price_log
-                WHERE part_id = p.id
-                ORDER BY scraped_at DESC
-                LIMIT 1
-            )
             {where}
         """
 
@@ -716,7 +710,7 @@ class Database:
         rows = self._conn.execute(
             f"""
             SELECT p.id, p.source, p.name, p.category, p.url, p.thumbnail_url,
-                   p.specs, pl.price_pkr
+                   p.specs, p.latest_price AS price_pkr
             {base_query}
             {order}
             {page}
@@ -1168,7 +1162,7 @@ class Database:
                 conditions.append("LOWER(json_extract(components, '$.gpu')) LIKE '%arc%'")
 
         where = "WHERE " + " AND ".join(conditions)
-        order = "ORDER BY price_pkr ASC" if sort == "price_asc" else "ORDER BY price_pkr DESC"
+        order = "ORDER BY price_pkr ASC, id ASC" if sort == "price_asc" else "ORDER BY price_pkr DESC, id ASC"
 
         total = self._conn.execute(
             f"SELECT COUNT(*) FROM prebuilts {where}", params

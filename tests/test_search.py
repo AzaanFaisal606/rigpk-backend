@@ -38,9 +38,9 @@ def _seed(db, name, category="gpu", price=100000):
     # these tests can seed rows directly and still exercise list_parts()'s
     # real matching path against the same column production writes.
     pid = cur.execute(
-        "INSERT INTO parts (source, source_id, name, category, url, specs, name_norm, is_active) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, 1) RETURNING id",
-        ("test.pk", name, name, category, f"http://x/{name}", json.dumps({}), normalize_name(name)),
+        "INSERT INTO parts (source, source_id, name, category, url, specs, name_norm, is_active, latest_price) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?) RETURNING id",
+        ("test.pk", name, name, category, f"http://x/{name}", json.dumps({}), normalize_name(name), price),
     ).fetchone()["id"]
     cur.execute(
         "INSERT INTO price_log (part_id, price_pkr, scraped_at) VALUES (?, ?, ?)",
