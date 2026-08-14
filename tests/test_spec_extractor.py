@@ -50,8 +50,11 @@ def test_cpu_socket_lga1851():
     assert extract_specs("Intel Core Ultra 9 285K LGA 1851", "cpu")["socket"] == "LGA1851"
 
 def test_cpu_no_socket():
-    # Unmatched by both the in-name regex and the socket lookup table.
-    assert "socket" not in extract_specs("Intel Pentium Gold G6400 Desktop Processor", "cpu")
+    # Genuinely undecidable: no model number at all. Unlike an unmatched-but-
+    # real model (merely uncovered), there is no way to derive a socket from
+    # this string even in principle — "i5" alone spans LGA1156 (i5-750)
+    # through LGA1700 (i5-14600K), 8+ generations apart.
+    assert "socket" not in extract_specs("Intel Core i5 Processor (Tray)", "cpu")
 
 
 # ── GPU VRAM ─────────────────────────────────────────────────────────────────
@@ -352,6 +355,92 @@ def test_cpu_socket_is_derived_from_the_model(name, socket):
 def test_unknown_model_yields_no_socket_rather_than_a_wrong_one():
     specs = extract_specs("Some Unreleased CPU 9999", "cpu")
     assert "socket" not in specs or specs["socket"] is None
+
+
+# ── CPU socket: mobile/soldered parts must NOT get a desktop socket ──────────
+# Regression coverage for F1: Ryzen desktop/mobile and 10th/11th-gen Intel
+# desktop/mobile share the same digit run within a generation. Only the
+# suffix (or an explicit mobile marker) distinguishes them.
+
+@pytest.mark.parametrize("name", [
+    "AMD Ryzen 9 5900HX Mobile Processor",   # AMD mobile: HX suffix
+    "AMD Ryzen 7 7840HS Processor",          # AMD mobile: HS suffix
+    "AMD Ryzen 5 5600U Laptop Processor",    # AMD mobile: U suffix
+    "Intel Core i7-10750H Laptop Processor", # 10th-gen mobile: same 5-digit run as desktop 10750
+    "Intel Core Ultra 7 155H Processor",     # Meteor Lake mobile, no desktop digit match anyway
+    "Intel Core Ultra 7 255H Mobile Processor",  # Arrow Lake-H: same 200-number space as desktop, H suffix
+    "Intel Core i9-13980HX Laptop Processor",     # Intel mobile HX, explicit marker
+])
+def test_mobile_suffix_yields_no_socket(name):
+    assert "socket" not in extract_specs(name, "cpu")
+
+
+def test_explicit_mobile_marker_yields_no_socket_even_with_desktop_looking_digits():
+    # "5600X" alone would resolve to AM4 — the "BGA" marker must veto it.
+    specs = extract_specs("AMD Ryzen 5 5600X BGA Soldered Chip", "cpu")
+    assert "socket" not in specs
+
+
+@pytest.mark.parametrize("name,socket", [
+    ("AMD Ryzen 9 5900X Desktop Processor", "AM4"),        # desktop counterpart of 5900HX
+    ("AMD Ryzen 7 7840X Desktop Processor", "AM5"),        # desktop counterpart of 7840HS
+    ("Intel Core Ultra 7 265K Processor", "LGA1851"),       # desktop counterpart of 255H
+    ("AMD Ryzen 5 5600GE Desktop Processor", "AM4"),        # GE before G in suffix alternation
+])
+def test_desktop_suffix_still_resolves_after_mobile_exclusion(name, socket):
+    assert extract_specs(name, "cpu")["socket"] == socket
+
+
+# ── CPU socket: Pentium Gold G6xxx (F2) ───────────────────────────────────────
+
+def test_pentium_gold_g6400_is_lga1200():
+    # Previously the fixture for "no socket" — it's actually unambiguous.
+    assert extract_specs("Intel Pentium Gold G6400 Desktop Processor", "cpu")["socket"] == "LGA1200"
+
+
+def test_pentium_gold_alder_lake_g6405_not_matched():
+    # Intel reused the "G6" prefix for 12th-gen Alder Lake (LGA1700, not
+    # LGA1200) via G6405/G6405T. The rule is scoped to the exact Comet Lake
+    # model numbers (G6400/G6500/G6600) so this must NOT resolve to LGA1200.
+    assert "socket" not in extract_specs("Intel Pentium Gold G6405 Desktop Processor", "cpu")
+
+
+# ── CPU socket/brand/model: real messy names from the local catalogue ────────
+# Fixture data is otherwise idealized (clean "Brand Model Suffix" strings).
+# These are verbatim names pulled from local data/ppc.db.
+
+def test_real_name_html_entity():
+    name = "AMD Ryzen 7 5700X Desktop Processor &#8211; Tray"
+    specs = extract_specs(name, "cpu")
+    assert specs["brand"] == "AMD"
+    assert specs["socket"] == "AM4"
+    assert specs["model"] == "Ryzen 7 5700X"
+
+
+def test_real_name_tray_in_pakistan_suffix():
+    name = "AMD Ryzen 5 5600X Tray Processor in Pakistan"
+    specs = extract_specs(name, "cpu")
+    assert specs["brand"] == "AMD"
+    assert specs["socket"] == "AM4"
+    assert specs["model"] == "Ryzen 5 5600X"
+
+
+def test_real_name_long_spec_dump_title():
+    name = (
+        "Intel Core Ultra 5 245K – Core Ultra 5 (Series 2) Arrow Lake "
+        "14-Core (6P+8E), LGA 1851, 125W Desktop Processor"
+    )
+    specs = extract_specs(name, "cpu")
+    assert specs["brand"] == "Intel"
+    assert specs["socket"] == "LGA1851"
+    assert specs["model"] == "Ultra 5 245K"
+
+
+def test_real_name_warranty_junk_suffix():
+    name = "AMD Ryzen 5 3500X Chip New in 10 Months Warranty"
+    specs = extract_specs(name, "cpu")
+    assert specs["brand"] == "AMD"
+    assert specs["socket"] == "AM4"
 
 
 # ── Motherboard form_factor ───────────────────────────────────────────────────
