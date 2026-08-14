@@ -81,6 +81,46 @@ def test_persistent_fetch_failure_terminates(monkeypatch):
     assert "consecutive page failures" in str(exc.value)
 
 
+def test_page_failure_after_success_preserves_earlier_pages(monkeypatch):
+    """
+    Pages 1-2 succeed and contribute products; page 3 then fails
+    MAX_CONSECUTIVE_FAILURES times in a row. The raise must carry forward
+    everything already scraped from pages 1-2 on .partial_results, not
+    discard it (the earlier bug: only the outer run_czone() wrapping in
+    run_all.py preserved data, this internal raise site didn't).
+    """
+    import scrapers.czone.all_scraper as mod
+
+    monkeypatch.setattr(mod.time, "sleep", lambda *_a, **_k: None)
+    s = CzoneAllScraper()
+
+    page1_products = [{"name": "p1", "price_pkr": 100, "url": "http://x/1",
+                        "category": "", "source": "czone.com.pk",
+                        "scraped_at": "t", "thumbnail_url": None}]
+    page2_products = [{"name": "p2", "price_pkr": 200, "url": "http://x/2",
+                        "category": "", "source": "czone.com.pk",
+                        "scraped_at": "t", "thumbnail_url": None}]
+    parse_map = {"page1": page1_products, "page2": page2_products}
+
+    fetch_calls = {"n": 0}
+
+    def _fake_fetch(_url):
+        fetch_calls["n"] += 1
+        if fetch_calls["n"] <= 2:
+            return f"page{fetch_calls['n']}"
+        raise OSError("down")
+
+    s.fetch = _fake_fetch
+    monkeypatch.setattr(s, "_extract_total", lambda _html: None)
+    monkeypatch.setattr(s, "_parse_page", lambda html: parse_map.get(html, []))
+
+    with pytest.raises(ScrapeIncomplete) as exc:
+        s.scrape("https://www.czone.com.pk/graphic-cards-pakistan-ppt.154.aspx")
+
+    assert "consecutive page failures" in str(exc.value)
+    assert exc.value.partial_results == page1_products + page2_products
+
+
 def test_identical_page_every_offset_hits_the_page_cap(monkeypatch, load_fixture):
     """
     If the site ever serves the same page regardless of ?page=N (new products
@@ -116,3 +156,7 @@ def test_identical_page_every_offset_hits_the_page_cap(monkeypatch, load_fixture
         s.scrape("https://www.czone.com.pk/graphic-cards-pakistan-ppt.154.aspx")
     assert "MAX_PAGES" in str(exc.value)
     assert calls["n"] == 3
+    # Deliberate asymmetry (matches redtech's MAX_PAGES raise): a page cap
+    # this generous being hit at all means the collected rows aren't trusted
+    # either, so no .partial_results is attached here.
+    assert not hasattr(exc.value, "partial_results")

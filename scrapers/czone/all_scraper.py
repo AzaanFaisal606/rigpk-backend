@@ -96,9 +96,11 @@ class CzoneAllScraper(BaseScraper):
                 failures += 1
                 print(f"    SKIP page {page} ({e}) — failure {failures}/{self.MAX_CONSECUTIVE_FAILURES}")
                 if failures >= self.MAX_CONSECUTIVE_FAILURES:
-                    raise ScrapeIncomplete(
+                    exc = ScrapeIncomplete(
                         f"czone: {failures} consecutive page failures at page {page}"
-                    ) from e
+                    )
+                    exc.partial_results = all_products
+                    raise exc from e
                 page += 1
                 time.sleep(PAGE_DELAY)
                 continue
@@ -133,6 +135,9 @@ class CzoneAllScraper(BaseScraper):
             page += 1
             time.sleep(PAGE_DELAY)
         else:
+            # A page cap this generous getting hit at all means the site is
+            # serving "new" content forever (or is broken) — trust nothing
+            # collected so far rather than deliver a harvest of unknown shape.
             raise ScrapeIncomplete(f"czone: hit MAX_PAGES={self.MAX_PAGES} without finishing")
 
         return all_products

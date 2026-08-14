@@ -57,6 +57,14 @@ def run_czone() -> list[dict]:
             # everything gathered so far on .partial_results.
             print(f"    INCOMPLETE: {e}")
             incomplete.append(f"{category}: {e}")
+            # scrape()'s own MAX_CONSECUTIVE_FAILURES raise carries forward
+            # whatever pages it collected before choking (.partial_results) —
+            # don't drop that here just because the category as a whole
+            # didn't finish.
+            partial = getattr(e, "partial_results", None) or []
+            for p in partial:
+                p["category"] = category
+            results.extend(partial)
             continue
         except Exception as e:
             print(f"    ERROR: {e}")

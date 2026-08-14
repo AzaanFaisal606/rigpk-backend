@@ -79,6 +79,46 @@ def test_run_czone_keeps_other_categories_and_flags_incomplete(monkeypatch):
     )
 
 
+def test_run_czone_keeps_partial_results_from_a_failed_category(monkeypatch):
+    """
+    scrape() itself can raise ScrapeIncomplete with .partial_results set (the
+    MAX_CONSECUTIVE_FAILURES case — pages fetched before the fault). run_czone()
+    must fold those into its own results, not just the categories that fully
+    succeeded, or a category that got 4 good pages before choking on page 5
+    contributes nothing at all.
+    """
+    import run_all
+
+    def fake_scrape(self, url):
+        if "graphic-cards" in url:  # the gpu category's path fragment
+            exc = ScrapeIncomplete("czone: 3 consecutive page failures")
+            exc.partial_results = [{
+                "name": "partial gpu product", "price_pkr": 5000, "url": url,
+                "category": "", "source": "czone.com.pk", "scraped_at": "t",
+                "thumbnail_url": None,
+            }]
+            raise exc
+        return [{
+            "name": f"Product for {url}", "price_pkr": 10000, "url": url,
+            "category": "", "source": "czone.com.pk", "scraped_at": "t",
+            "thumbnail_url": None,
+        }]
+
+    monkeypatch.setattr(run_all.CzoneAllScraper, "scrape", fake_scrape)
+
+    with pytest.raises(ScrapeIncomplete) as exc:
+        run_all.run_czone()
+
+    partial = exc.value.partial_results
+    assert len(partial) == len(run_all.CZONE_CATS), (
+        "the failed category's own partial harvest must be folded in "
+        "alongside every category that fully succeeded"
+    )
+    gpu_rows = [p for p in partial if p["name"] == "partial gpu product"]
+    assert len(gpu_rows) == 1
+    assert gpu_rows[0]["category"] == "gpu"
+
+
 def test_incomplete_run_is_not_ok_and_does_not_sweep(tmp_path, monkeypatch):
     """
     Full path through the real entry point (main()): a source where 1 of N
