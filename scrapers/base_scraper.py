@@ -2,6 +2,7 @@ import json
 import os
 import random
 import socket
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -50,6 +51,26 @@ def is_http_404(exc: BaseException) -> bool:
 #
 # Keyed on netloc, process-global: two scrapers pointed at the same domain
 # share one budget. Reset between runs with reset_host_state().
+#
+# run_all.py now runs one worker thread per source. Two locks make that safe:
+#
+# 1. _host_state_lock guards the top-level dict itself. One thread inserting
+#    a new host key (_state()'s setdefault, on a host's first fetch()) while
+#    another thread iterates the whole dict (blocked_hosts(), or
+#    reset_host_state()'s clear()) is a real race — CPython dict iteration is
+#    not atomic across the whole loop, so a concurrent insert during that
+#    loop raises "dictionary changed size during iteration".
+#
+# 2. Each host's own state dict carries a "lock" (st["lock"]) that fetch()
+#    holds for its entire retry loop — pacing decision, the request itself,
+#    and the fail_429/fail_403/blocked updates. In this codebase every
+#    source maps to exactly one host, so in practice only one thread ever
+#    calls fetch() for a given host anyway — but that's a property of the
+#    SCRAPERS registry, not something the code enforced. st["lock"] makes
+#    "never two concurrent requests to one host" a guarantee fetch() itself
+#    holds, not just an accident of how sources happen to be assigned.
+#    It's per-host, not the module-wide _host_state_lock, so a slow/retrying
+#    request to one host never blocks a different host's thread.
 # ----------------------------------------------------------------------
 
 BLOCK_AFTER_FAILED_FETCHES = 2   # consecutive fully-failed 429 fetches -> blocked
@@ -59,6 +80,7 @@ BACKOFF_CAP = 120.0
 RETRY_AFTER_CAP = 300.0          # ignore absurd Retry-After values
 
 _host_state: dict[str, dict] = {}
+_host_state_lock = threading.Lock()
 
 # Status codes that mean "this URL is wrong", not "slow down". Retrying them
 # wastes the request budget and, on Hostinger/LiteSpeed hosts, a retired
@@ -76,9 +98,11 @@ def _host_of(url: str) -> str:
 
 
 def _state(host: str) -> dict:
-    return _host_state.setdefault(
-        host, {"last_request": 0.0, "fail_429": 0, "fail_403": 0, "blocked": False}
-    )
+    with _host_state_lock:
+        return _host_state.setdefault(
+            host, {"last_request": 0.0, "fail_429": 0, "fail_403": 0,
+                   "blocked": False, "lock": threading.Lock()}
+        )
 
 
 def host_blocked(host: str) -> bool:
@@ -88,15 +112,17 @@ def host_blocked(host: str) -> bool:
 
 def blocked_hosts() -> set[str]:
     """Every host that tripped the circuit breaker this process."""
-    return {h for h, s in _host_state.items() if s["blocked"]}
+    with _host_state_lock:
+        return {h for h, s in _host_state.items() if s["blocked"]}
 
 
 def reset_host_state(host: str | None = None) -> None:
     """Clear breaker/pacing state — for tests, or to retry a host deliberately."""
-    if host is None:
-        _host_state.clear()
-    else:
-        _host_state.pop(host.lower(), None)
+    with _host_state_lock:
+        if host is None:
+            _host_state.clear()
+        else:
+            _host_state.pop(host.lower(), None)
 
 
 def scraped_at_now() -> str:
@@ -226,69 +252,74 @@ class BaseScraper(ABC):
 
         req_headers = {**self.HEADERS, **headers} if headers else self.HEADERS
 
-        last_err: Exception | None = None
-        for attempt in range(retries):
-            self._pace(host)
-            try:
-                req = urllib.request.Request(url, data=data, headers=req_headers)
-                # timeout= covers connect and each individual socket read, not
-                # a body that trickles forever — a hard wall-clock deadline
-                # across the whole read is the only thing that bounds that.
-                with urllib.request.urlopen(req, timeout=self.CONNECT_TIMEOUT) as resp:
-                    deadline = time.monotonic() + self.READ_DEADLINE
-                    chunks = []
-                    while (chunk := resp.read(65536)):
-                        chunks.append(chunk)
-                        if time.monotonic() > deadline:
-                            raise TimeoutError(
-                                f"read of {url} exceeded READ_DEADLINE={self.READ_DEADLINE}s"
-                            )
-                    body = b"".join(chunks).decode("utf-8", errors="ignore")
-                st["fail_429"] = 0
-                st["fail_403"] = 0
-                return body
+        # Held for the whole retry loop below: pacing, the request itself,
+        # and every counter update. This is what actually enforces "one
+        # request to this host at a time" when fetch() is called from
+        # several threads — see the per-host lock note above _host_state.
+        with st["lock"]:
+            last_err: Exception | None = None
+            for attempt in range(retries):
+                self._pace(host)
+                try:
+                    req = urllib.request.Request(url, data=data, headers=req_headers)
+                    # timeout= covers connect and each individual socket read, not
+                    # a body that trickles forever — a hard wall-clock deadline
+                    # across the whole read is the only thing that bounds that.
+                    with urllib.request.urlopen(req, timeout=self.CONNECT_TIMEOUT) as resp:
+                        deadline = time.monotonic() + self.READ_DEADLINE
+                        chunks = []
+                        while (chunk := resp.read(65536)):
+                            chunks.append(chunk)
+                            if time.monotonic() > deadline:
+                                raise TimeoutError(
+                                    f"read of {url} exceeded READ_DEADLINE={self.READ_DEADLINE}s"
+                                )
+                        body = b"".join(chunks).decode("utf-8", errors="ignore")
+                    st["fail_429"] = 0
+                    st["fail_403"] = 0
+                    return body
 
-            except urllib.error.HTTPError as e:
-                last_err = e
-                if e.code in NO_RETRY_CODES:
-                    # A run of 403s is a WAF refusing this client, not a run of
-                    # dead URLs. Trip the breaker so the caller reports "could
-                    # not scrape" instead of a misleading partial harvest that
-                    # would sweep every unseen row. Any 2xx resets the count.
-                    if e.code == 403:
-                        st["fail_403"] += 1
-                        if st["fail_403"] >= BLOCK_AFTER_FORBIDDEN:
+                except urllib.error.HTTPError as e:
+                    last_err = e
+                    if e.code in NO_RETRY_CODES:
+                        # A run of 403s is a WAF refusing this client, not a run of
+                        # dead URLs. Trip the breaker so the caller reports "could
+                        # not scrape" instead of a misleading partial harvest that
+                        # would sweep every unseen row. Any 2xx resets the count.
+                        if e.code == 403:
+                            st["fail_403"] += 1
+                            if st["fail_403"] >= BLOCK_AFTER_FORBIDDEN:
+                                st["blocked"] = True
+                                raise HostBlocked(
+                                    f"{host} returned 403 on {st['fail_403']} consecutive fetches "
+                                    f"— treating as a block, not as dead URLs"
+                                ) from e
+                        raise RuntimeError(f"Failed to fetch {url}: HTTP {e.code}") from e
+                    if e.code == 429:
+                        if attempt < retries - 1:
+                            delay = self._retry_after(e)
+                            if delay is None:
+                                delay = min(BACKOFF_CAP, BACKOFF_BASE * (2 ** attempt))
+                            time.sleep(delay + random.uniform(0, 2))
+                            continue
+                        st["fail_429"] += 1
+                        if st["fail_429"] >= BLOCK_AFTER_FAILED_FETCHES:
                             st["blocked"] = True
                             raise HostBlocked(
-                                f"{host} returned 403 on {st['fail_403']} consecutive fetches "
-                                f"— treating as a block, not as dead URLs"
+                                f"{host} returned 429 on {st['fail_429']} consecutive fetches "
+                                f"— giving up on this host for the rest of the run"
                             ) from e
-                    raise RuntimeError(f"Failed to fetch {url}: HTTP {e.code}") from e
-                if e.code == 429:
-                    if attempt < retries - 1:
-                        delay = self._retry_after(e)
-                        if delay is None:
-                            delay = min(BACKOFF_CAP, BACKOFF_BASE * (2 ** attempt))
-                        time.sleep(delay + random.uniform(0, 2))
+                    elif attempt < retries - 1:
+                        time.sleep(2 ** attempt + random.uniform(0, 1))
                         continue
-                    st["fail_429"] += 1
-                    if st["fail_429"] >= BLOCK_AFTER_FAILED_FETCHES:
-                        st["blocked"] = True
-                        raise HostBlocked(
-                            f"{host} returned 429 on {st['fail_429']} consecutive fetches "
-                            f"— giving up on this host for the rest of the run"
-                        ) from e
-                elif attempt < retries - 1:
-                    time.sleep(2 ** attempt + random.uniform(0, 1))
-                    continue
 
-            except (urllib.error.URLError, socket.timeout, TimeoutError) as e:
-                last_err = e
-                if attempt < retries - 1:
-                    time.sleep(2 ** attempt + random.uniform(0, 1))
-                    continue
+                except (urllib.error.URLError, socket.timeout, TimeoutError) as e:
+                    last_err = e
+                    if attempt < retries - 1:
+                        time.sleep(2 ** attempt + random.uniform(0, 1))
+                        continue
 
-        raise RuntimeError(f"Failed to fetch {url} after {retries} attempts: {last_err}")
+            raise RuntimeError(f"Failed to fetch {url} after {retries} attempts: {last_err}")
 
     @abstractmethod
     def scrape(self, url: str) -> list[dict]:
