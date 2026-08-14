@@ -26,4 +26,19 @@ def test_search_index_keeps_its_own_header(client):
 def test_writes_are_never_cached(client):
     ids = [i["id"] for i in client.get("/api/parts?category=gpu&limit=1").json()["items"]]
     r = client.post("/api/builds/share", json={"gpu": ids[0]})
-    assert "no-store" in r.headers.get("Cache-Control", "no-store")
+    assert "no-store" in r.headers["Cache-Control"]
+
+
+def test_shared_build_lookup_is_private_no_store(client):
+    ids = [i["id"] for i in client.get("/api/parts?category=gpu&limit=1").json()["items"]]
+    share = client.post("/api/builds/share", json={"gpu": ids[0]})
+    code = share.json()["code"]
+
+    r = client.get(f"/api/builds/share/{code}")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["gpu"]["id"] == ids[0]
+
+    cc = r.headers["Cache-Control"]
+    assert "private" in cc
+    assert "no-store" in cc
