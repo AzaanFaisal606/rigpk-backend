@@ -11,6 +11,20 @@ import pytest
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures" / "html"
 
 
+@pytest.fixture(autouse=True)
+def block_network(monkeypatch):
+    """
+    No scraper test may touch the network. A test that calls the real
+    .fetch() should fail loudly, not hang or silently hit czone.com.pk.
+    """
+    import urllib.request
+
+    def _blocked(*args, **kwargs):
+        raise RuntimeError("network blocked in tests")
+
+    monkeypatch.setattr(urllib.request, "urlopen", _blocked)
+
+
 @pytest.fixture
 def load_fixture():
     def _load(name: str) -> str:
