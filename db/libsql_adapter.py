@@ -41,6 +41,13 @@ import libsql
 # Cold libsql connections occasionally fail their first query with a transient
 # network/DNS error (the lookup/connect happens lazily on first use). These fail
 # BEFORE the statement reaches the server, so retrying is safe — nothing ran.
+#
+# `backend/deps.py` also calls into `_is_transient` (via `_is_transient_error`)
+# to decide whether to rebuild-and-retry an ENTIRE marshaled call — which may
+# be a write (e.g. `upsert_products`). This set must stay restricted to
+# failures that provably happened before the statement reached the server;
+# anything that could mean "the server ran it and only the response was lost"
+# belongs in `_TRANSIENT_READ_ONLY_MARKERS` below instead, never here.
 _TRANSIENT_MARKERS = (
     "dns error",
     "failed to lookup",
@@ -51,6 +58,26 @@ _TRANSIENT_MARKERS = (
     "temporarily unavailable",
     "broken pipe",
 )
+
+# Failures that only prove the RESPONSE read broke — the request may already
+# have reached and been executed by the server. Retrying is safe for a read
+# (a SELECT has no side effect to duplicate) but not for a write (retrying an
+# INSERT whose ack was merely lost would double-insert). Only ever consulted
+# by `_Cursor._run` when the statement being retried is known read-only (see
+# `_is_readonly_sql`) — never added to `_TRANSIENT_MARKERS`/`_is_transient`,
+# which `backend/deps.py` also uses to gate retrying arbitrary (possibly
+# write) calls.
+_TRANSIENT_READ_ONLY_MARKERS = (
+    # Observed live rebuilding price trends against Turso:
+    # `ValueError: Hrana: cursor error: cursor error: error reading a body
+    # from connection: unexpected EOF during chunk size line` — mid-stream
+    # chunked-encoding corruption while pulling back the (large, streamed)
+    # result set of a plain SELECT. Succeeded on an immediate retry. Matched
+    # on this distinctive tail rather than the full message: Hrana nests
+    # wrappers ("cursor error" appears twice above), so the outer framing
+    # isn't stable.
+    "unexpected eof during chunk size line",
+)
 _MAX_ATTEMPTS = 4
 _BASE_BACKOFF = 0.6  # seconds; exponential: 0.6, 1.2, 2.4
 
@@ -58,6 +85,46 @@ _BASE_BACKOFF = 0.6  # seconds; exponential: 0.6, 1.2, 2.4
 def _is_transient(exc: Exception) -> bool:
     m = str(exc).lower()
     return any(k in m for k in _TRANSIENT_MARKERS)
+
+
+def _is_transient_read_only(exc: Exception) -> bool:
+    m = str(exc).lower()
+    return any(k in m for k in _TRANSIENT_READ_ONLY_MARKERS)
+
+
+def _retry_transient(fn):
+    """
+    Retry `fn()` on an unconditionally-safe transient failure (see
+    `_TRANSIENT_MARKERS`), same attempt count and backoff as `_Cursor._run`.
+    Used by `LibsqlConnection.commit`/`rollback` — with Task 2's long-lived,
+    reused connection, a transient network blip on commit now matters (it
+    used to just kill one short-lived per-request connection). Never
+    consults the read-only marker tier: a commit finalizes writes, so an
+    ambiguous "response reading failed" error is never safe to retry here.
+    """
+    last_exc: Optional[Exception] = None
+    for attempt in range(_MAX_ATTEMPTS):
+        try:
+            return fn()
+        except ValueError as e:
+            last_exc = e
+            if _is_transient(e) and attempt < _MAX_ATTEMPTS - 1:
+                time.sleep(_BASE_BACKOFF * (2 ** attempt))
+                continue
+            raise
+    raise last_exc  # pragma: no cover - unreachable, mirrors _Cursor._run
+
+
+def _is_readonly_sql(sql: str) -> bool:
+    """
+    True for a statement with no possible write side effect. Currently just
+    SELECT — the only read statement `db/database.py` issues through
+    `execute()` (verified: every other statement type in that module is
+    ALTER/CREATE/DROP/INSERT/UPDATE/DELETE/PRAGMA/ANALYZE). Used to gate
+    `_TRANSIENT_READ_ONLY_MARKERS` so a write is never retried on an
+    ambiguous "response reading failed" error.
+    """
+    return sql.lstrip().lower().startswith("select")
 
 
 class _Row:
@@ -125,7 +192,7 @@ class _Cursor:
         self._cur = cur
 
     # --- execution (error-mapped, transient-retried) ---
-    def _run(self, fn):
+    def _run(self, fn, *, readonly: bool = False):
         last_exc: Optional[Exception] = None
         for attempt in range(_MAX_ATTEMPTS):
             try:
@@ -136,7 +203,8 @@ class _Cursor:
                 mapped = _map_error(e)
                 if mapped is not None:
                     raise mapped from e  # constraint error — never retry
-                if _is_transient(e) and attempt < _MAX_ATTEMPTS - 1:
+                transient = _is_transient(e) or (readonly and _is_transient_read_only(e))
+                if transient and attempt < _MAX_ATTEMPTS - 1:
                     time.sleep(_BASE_BACKOFF * (2 ** attempt))
                     continue
                 raise
@@ -152,9 +220,11 @@ class _Cursor:
 
     def execute(self, sql: str, params: Iterable[Any] = ()):
         p = tuple(params) if params else ()
-        return self._run(lambda: self._cur.execute(sql, p))
+        return self._run(lambda: self._cur.execute(sql, p), readonly=_is_readonly_sql(sql))
 
     def executemany(self, sql: str, seq_of_params: Iterable[Iterable[Any]]):
+        # Always a write (executemany is bulk INSERT/UPDATE in this codebase)
+        # — never eligible for the read-only marker tier.
         seq = [tuple(p) for p in seq_of_params]
         return self._run(lambda: self._cur.executemany(sql, seq))
 
@@ -233,11 +303,11 @@ class LibsqlConnection:
         )
 
     def commit(self):
-        self._conn.commit()
+        _retry_transient(self._conn.commit)
 
     def rollback(self):
         if hasattr(self._conn, "rollback"):
-            self._conn.rollback()
+            _retry_transient(self._conn.rollback)
 
     def close(self):
         self._conn.close()
