@@ -2,7 +2,12 @@ from __future__ import annotations
 import re
 from typing import Optional
 
-_BRANDS: list[tuple[str, str]] = [
+from scrapers.socket_table import socket_for
+
+# Manufacturers — the entity that actually built/boxed the part (ASUS, MSI,
+# Gigabyte, Sapphire...). Checked first: `brand` on the market page's filter
+# is "who do I buy this from", not "whose chip is inside".
+_MAKER_BRANDS: list[tuple[str, str]] = [
     ("cooler master",   "Cooler Master"),
     ("be quiet!",       "be quiet!"),
     ("lian li",         "Lian Li"),
@@ -39,17 +44,12 @@ _BRANDS: list[tuple[str, str]] = [
     ("noctua",          "Noctua"),
     ("cougar",          "Cougar"),
     ("antec",           "Antec"),
-    ("radeon",          "AMD"),
-    ("ryzen",           "AMD"),
-    ("geforce",         "NVIDIA"),
-    ("zotac",           "ZOTAC"),
+    ("zotac",           "Zotac"),
     ("palit",           "Palit"),
     ("arktek",          "Arktek"),
     ("adata",           "ADATA"),
     ("dahua",           "Dahua"),
     ("hikvision",       "Hikvision"),
-    ("intel",           "Intel"),
-    ("nvidia",          "NVIDIA"),
     ("asus",            "ASUS"),
     ("nzxt",            "NZXT"),
     ("benq",            "BenQ"),
@@ -57,7 +57,6 @@ _BRANDS: list[tuple[str, str]] = [
     ("lenovo",          "Lenovo"),
     ("philips",         "Philips"),
     ("iiyama",          "iiyama"),
-    ("amd",             "AMD"),
     ("msi",             "MSI"),
     ("xpg",             "XPG"),
     ("xfx",             "XFX"),
@@ -67,15 +66,27 @@ _BRANDS: list[tuple[str, str]] = [
     ("lg",              "LG"),
 ]
 
+# Chip vendors — fallback only. For CPUs there is no third-party maker, so
+# this list is where CPU brand actually resolves (AMD/Intel ARE the maker
+# there). For GPUs it only fires when no board partner was named at all.
+_CHIP_VENDOR_BRANDS: list[tuple[str, str]] = [
+    ("radeon",          "AMD"),
+    ("ryzen",           "AMD"),
+    ("geforce",         "NVIDIA"),
+    ("intel",           "Intel"),
+    ("nvidia",          "NVIDIA"),
+    ("amd",             "AMD"),
+]
+
+_ALL_BRANDS = _MAKER_BRANDS + _CHIP_VENDOR_BRANDS
 _SHORT_BRAND_RE: dict[str, re.Pattern] = {
     s: re.compile(rf'\b{re.escape(s)}\b', re.IGNORECASE)
-    for s, _ in _BRANDS if len(s) <= 3
+    for s, _ in _ALL_BRANDS if len(s) <= 3
 }
 
 
-def _extract_brand(name: str) -> Optional[str]:
-    lower = name.lower()
-    for match_str, canonical in _BRANDS:
+def _match_brand_list(lower: str, brands: list[tuple[str, str]]) -> Optional[str]:
+    for match_str, canonical in brands:
         if len(match_str) <= 3:
             if _SHORT_BRAND_RE[match_str].search(lower):
                 return canonical
@@ -83,6 +94,14 @@ def _extract_brand(name: str) -> Optional[str]:
             if match_str in lower:
                 return canonical
     return None
+
+
+def _extract_brand(name: str) -> Optional[str]:
+    lower = name.lower()
+    maker = _match_brand_list(lower, _MAKER_BRANDS)
+    if maker:
+        return maker
+    return _match_brand_list(lower, _CHIP_VENDOR_BRANDS)
 
 
 _SOCKET_RE = re.compile(r'\b(AM[45]|LGA\s?\d{4})\b', re.IGNORECASE)
@@ -432,7 +451,7 @@ def extract_specs(name: str, category: str) -> dict:
         specs["brand"] = brand
 
     if category == "cpu":
-        s = _extract_socket(name)
+        s = _extract_socket(name) or socket_for(name)
         if s:
             specs["socket"] = s
         m = _extract_cpu_model(name)
@@ -465,6 +484,9 @@ def extract_specs(name: str, category: str) -> dict:
         cs = _extract_chipset(name)
         if cs:
             specs["chipset"] = cs
+        ff = _extract_form_factor(name)
+        if ff:
+            specs["form_factor"] = ff
 
     elif category == "psu":
         w = _extract_wattage(name)

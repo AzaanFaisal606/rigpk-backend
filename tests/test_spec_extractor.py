@@ -50,7 +50,8 @@ def test_cpu_socket_lga1851():
     assert extract_specs("Intel Core Ultra 9 285K LGA 1851", "cpu")["socket"] == "LGA1851"
 
 def test_cpu_no_socket():
-    assert "socket" not in extract_specs("Intel Core i5-13600K Desktop Processor", "cpu")
+    # Unmatched by both the in-name regex and the socket lookup table.
+    assert "socket" not in extract_specs("Intel Pentium Gold G6400 Desktop Processor", "cpu")
 
 
 # ── GPU VRAM ─────────────────────────────────────────────────────────────────
@@ -303,3 +304,62 @@ def test_cpu_socket_still_extracted_with_model():
     r = extract_specs("AMD Ryzen 5 5600X AM4 Processor", "cpu")
     assert r["model"] == "Ryzen 5 5600X"
     assert r["socket"] == "AM4"
+
+
+# ── Brand is the maker, not the chip vendor ──────────────────────────────────
+#
+# Ordering in the vendor list made NVIDIA/AMD/Intel win over the actual maker
+# on 57.7% of GPUs — so the brand filter, one of the market page's primary
+# filters, was wrong for the majority of the category people most want it for.
+
+@pytest.mark.parametrize("name,expected", [
+    ("Asus Dual GeForce RTX 4060 8GB GDDR6", "ASUS"),
+    ("MSI GeForce RTX 4070 Ti Ventus 3X", "MSI"),
+    ("Gigabyte AORUS Radeon RX 7900 XTX", "Gigabyte"),
+    ("Sapphire Pulse Radeon RX 550 4GB", "Sapphire"),
+    ("Zotac Gaming GeForce RTX 3060", "Zotac"),
+])
+def test_gpu_brand_is_the_maker(name, expected):
+    assert extract_specs(name, "gpu")["brand"] == expected
+
+
+@pytest.mark.parametrize("name,expected", [
+    ("AMD Ryzen 7 9800X3D", "AMD"),
+    ("Intel Core i5-13400F", "Intel"),
+])
+def test_cpu_brand_stays_the_chip_vendor(name, expected):
+    """For CPUs the chip vendor IS the manufacturer — nothing changes here."""
+    assert extract_specs(name, "cpu")["brand"] == expected
+
+
+# ── CPU socket derived from model (lookup table) ─────────────────────────────
+
+@pytest.mark.parametrize("name,socket", [
+    ("AMD Ryzen 7 9800X3D", "AM5"),
+    ("AMD Ryzen 5 5600X", "AM4"),
+    ("Intel Core i5-13400F", "LGA1700"),
+    ("Intel Core i5-14600K", "LGA1700"),
+    ("Intel Core Ultra 7 265K", "LGA1851"),
+])
+def test_cpu_socket_is_derived_from_the_model(name, socket):
+    """
+    Most CPU listings never state a socket. Deriving it from the model is what
+    takes fill rate from 10.8% to something the compatibility checker can use.
+    """
+    assert extract_specs(name, "cpu")["socket"] == socket
+
+
+def test_unknown_model_yields_no_socket_rather_than_a_wrong_one():
+    specs = extract_specs("Some Unreleased CPU 9999", "cpu")
+    assert "socket" not in specs or specs["socket"] is None
+
+
+# ── Motherboard form_factor ───────────────────────────────────────────────────
+
+@pytest.mark.parametrize("name,ff", [
+    ("MSI B650 GAMING PLUS WIFI ATX Motherboard", "ATX"),
+    ("Asus ROG Strix B550-I Gaming Mini-ITX", "Mini-ITX"),
+    ("Gigabyte B760M DS3H Micro-ATX", "Micro-ATX"),
+])
+def test_motherboard_form_factor(name, ff):
+    assert extract_specs(name, "motherboard")["form_factor"] == ff
