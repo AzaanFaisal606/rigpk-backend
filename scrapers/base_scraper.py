@@ -160,7 +160,13 @@ class BaseScraper(ABC):
         except ValueError:
             return None  # HTTP-date form; rare here, not worth parsing
 
-    def fetch(self, url: str, retries: int = 4) -> str:
+    def fetch(
+        self,
+        url: str,
+        retries: int = 4,
+        headers: dict | None = None,
+        data: bytes | None = None,
+    ) -> str:
         """
         Fetch a URL and return the response text.
 
@@ -171,6 +177,12 @@ class BaseScraper(ABC):
           * 4xx in NO_RETRY_CODES — no retry; the URL is wrong, not busy.
           * everything else (5xx, timeouts, DNS) — short backoff, retry.
 
+        `headers` are merged on top of the default HEADERS (letting a caller
+        override e.g. Accept, or add Authorization) without losing the honest
+        bot User-Agent. `data` is passed straight to urllib.request.Request —
+        non-None turns the request into a POST, same as urllib's own rule.
+        Both default to None so every existing caller is unaffected.
+
         Raises HostBlocked if the host is already blocked or becomes blocked,
         RuntimeError for any other exhausted failure.
         """
@@ -179,11 +191,13 @@ class BaseScraper(ABC):
         if st["blocked"]:
             raise HostBlocked(f"{host} is blocked for this run — skipped {url}")
 
+        req_headers = {**self.HEADERS, **headers} if headers else self.HEADERS
+
         last_err: Exception | None = None
         for attempt in range(retries):
             self._pace(host)
             try:
-                req = urllib.request.Request(url, headers=self.HEADERS)
+                req = urllib.request.Request(url, data=data, headers=req_headers)
                 with urllib.request.urlopen(req, timeout=self.TIMEOUT) as resp:
                     body = resp.read().decode("utf-8", errors="ignore")
                 st["fail_429"] = 0
