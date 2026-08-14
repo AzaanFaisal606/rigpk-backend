@@ -6,6 +6,16 @@ import threading
 
 
 def test_requests_share_one_database(client, monkeypatch):
+    """
+    ThreadSafeDatabase connects lazily (on the owner thread, on first actual
+    call) rather than in __init__ -- required so get_database()'s lock never
+    spans a network call (see backend/deps.py). So the one-time connect
+    happens on this test's first request, not during fixture setup; warm the
+    connection up before monkeypatching, then assert the remaining 5
+    requests open none.
+    """
+    client.get("/api/parts?category=gpu&limit=5")  # forces the lazy connect
+
     import db.database as dbmod
     constructed = []
     original = dbmod.Database.__init__
