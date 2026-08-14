@@ -31,6 +31,22 @@ from db.database import Database
 from backend.deps import ThreadSafeDatabase, get_database
 
 
+@pytest.fixture(autouse=True)
+def _reset_share_rate_limit():
+    """
+    `backend/routers/builds.py` keys its share-rate-limit bucket on client IP,
+    and `TestClient` always presents the same IP ("testclient") — so without
+    this, one test's requests count against the next test's budget. Real
+    traffic doesn't have this problem (distinct IPs); this fixture just gives
+    each test its own clean bucket, the same way a fresh dyno would start.
+    """
+    from backend.routers.builds import _RATE
+
+    _RATE.clear()
+    yield
+    _RATE.clear()
+
+
 @pytest.fixture
 def seeded_db(tmp_path):
     db = Database(tmp_path / "api.db")
