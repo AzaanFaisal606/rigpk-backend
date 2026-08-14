@@ -15,6 +15,7 @@ import json
 import re
 import sys
 import time
+import urllib.error
 
 from scrapers.prebuilts.base_prebuilt_scraper import BasePrebuiltScraper
 
@@ -61,6 +62,21 @@ _LABEL_MAP = {
 }
 
 
+def _is_404(exc: BaseException) -> bool:
+    """
+    True if `exc` is (or was caused by) an HTTP 404.
+
+    BaseScraper.fetch() puts 404 in NO_RETRY_CODES and re-raises it as
+    `RuntimeError(...) from e`, so the HTTPError normally shows up as
+    `exc.__cause__`, not as `exc` itself. Check both so this also works
+    against a bare HTTPError (e.g. from a test double).
+    """
+    if isinstance(exc, urllib.error.HTTPError) and exc.code == 404:
+        return True
+    cause = exc.__cause__
+    return isinstance(cause, urllib.error.HTTPError) and cause.code == 404
+
+
 class RedTechScraper(BasePrebuiltScraper):
 
     MAX_PAGES = 50                   # redtech's whole prebuilt catalogue is ~13 products, one page; 50 is insurance
@@ -80,12 +96,30 @@ class RedTechScraper(BasePrebuiltScraper):
                     html = self.fetch(url)
                     failures = 0
                 except Exception as e:
+                    if _is_404(e):
+                        # redtech answers the page after the last one with a
+                        # plain 404 instead of just omitting a "next" link —
+                        # that's the site telling us pagination ended, not a
+                        # failure. Keep everything collected so far and don't
+                        # count it toward the failure budget below.
+                        print(f"  [redtech] page {page} 404 — end of pagination, "
+                              f"{len(all_links)} link(s) collected from {cat_url}.")
+                        break
                     failures += 1
                     print(f"  [redtech] fetch error: {e} — failure {failures}/{self.MAX_CONSECUTIVE_FAILURES}")
                     if failures >= self.MAX_CONSECUTIVE_FAILURES:
-                        raise RuntimeError(
-                            f"redtech: {failures} consecutive page failures at page {page}"
-                        ) from e
+                        # Genuine, repeated failures (timeouts/5xx/resets — not
+                        # 404s, handled above). Give up on this category URL but
+                        # don't discard the partial harvest from pages 1..page-1:
+                        # a caller that gets [] can't tell "nothing to scrape"
+                        # from "we choked partway through", so return what we
+                        # have and say so loudly.
+                        # TODO(Task 6): raise ScrapeIncomplete here instead of
+                        # just warning, once that exception exists.
+                        print(f"  [redtech] WARNING: {failures} consecutive fetch failures at "
+                              f"page {page} of {cat_url} — giving up on this category URL, "
+                              f"keeping {len(all_links)} link(s) collected from pages 1..{page - 1}.")
+                        break
                     page += 1
                     time.sleep(self.PAGE_DELAY)
                     continue
