@@ -326,6 +326,62 @@ def test_gpu_brand_is_the_maker(name, expected):
     assert extract_specs(name, "gpu")["brand"] == expected
 
 
+# ── Budget/grey-market board partners missing from the original list ────────
+#
+# Found by querying the active catalogue for GPUs still resolving to the
+# chip-vendor fallback (NVIDIA/AMD/Intel) or to no brand at all. Names below
+# are taken verbatim from data/ppc.db.
+
+@pytest.mark.parametrize("name,expected", [
+    ("AFOX GT730 4GB 128bit DDR3 Low Profile PCI-E Gen 2.0 Graphics Card", "AFOX"),
+    ("Ninja Nvidia GeForce GT 730 4GB Graphics Card", "Ninja"),
+    ("Ease GeForce GT740 4GB Graphics Card", "EASE"),
+    ("Colorful GT 1030 2GB V5-V GDDR5 Graphics Card", "Colorful"),
+    ("Maxsun Intel Arc B580 iCraft 12G Graphics Card", "MAXSUN"),
+    ("Darkflash 1660S AIGO GTX 4GB-192 BIT DDR6 BIT DDR6 Graphic Card", "DarkFlash"),
+    ("Leadtek Quadro RTX A2000 6GB Graphics Card", "Leadtek"),
+    ("Gunnir INDEX ARC B580 12G New in 10 Months Warranty", "Gunnir"),
+    ("Galax GeForce RTX 4060 EX 1-Click OC 8GB Graphics Card", "Galax"),
+    ("Manli RTX™ 4070 Ti Gallardo 12GB Graphics Card", "Manli"),
+    ("Inno3D GeForce RTX 4060 Twin X2 8GB GDDR6 Gaming Graphics Card", "Inno3D"),
+    ("EVGA GeForce RTX 3080 FTW3 Ultra Gaming Graphics Card", "EVGA"),
+    ("Biostar AMD Radeon RX 7900 XT 20GB Graphics Card - Free Delivery", "Biostar"),
+    ("Amd Yeston Game Ace RX 9060 XT 16GB Tri-Fan New in 10 Months Warranty", "Yeston"),
+    ("Amd ONDA Aegis Radeon RX 7600 XT 16GB GDDR6 New in 10 Months Warranty (White)", "Onda"),
+    ("Amd VASTARMOR RX 9070 GRE 12GB White Alloy New in 10 Months Warranty", "Vastarmor"),
+    ("ALSEYE AMD RX580 8 GB Graphics Card", "Alseye"),
+    ("AMD Dataland RX 5600 XT 6GB X-Serial Ares Tri-Fan used without Box in 1 Month Warranty", "Dataland"),
+])
+def test_gpu_brand_budget_makers(name, expected):
+    assert extract_specs(name, "gpu")["brand"] == expected
+
+
+def test_brand_saphire_misspelling_normalizes_to_sapphire():
+    """'Saphire' (real listing typo for Sapphire) must not become a second,
+    distinct brand value — the filter would then show both spellings."""
+    name = "Saphire RX590 Nitro Plus Special Blue Edition 8GB Graphic Card – Used"
+    assert extract_specs(name, "gpu")["brand"] == "Sapphire"
+
+
+# ── New maker tokens must not fire inside an unrelated word ─────────────────
+
+def test_galax_does_not_match_inside_galaxy():
+    """Xigmatek's 'Galaxy III' fan kit must not be mis-branded as Galax."""
+    name = "Xigmatek Galaxy III Essential Arctic ARGB 3 Fan Pack"
+    assert extract_specs(name, "cooling").get("brand") != "Galax"
+
+
+def test_ease_does_not_match_inside_release():
+    """'ease' as a bare substring lives inside 'Q-Release'/'Quick Release' —
+    real ASUS motherboard names — so it must stay a whole-word match only."""
+    name = (
+        "ASUS ROG Strix X870E-E Gaming WiFi AM5 ATX Motherboard, 18+2+2 "
+        "Power Stages, Dynamic OC Switcher, Core Flex, DDR5 AEMP, WiFi 7, "
+        "5x M.2, PCIe 5.0, Q-Release Slim, USB4, AI OCing & Networking"
+    )
+    assert extract_specs(name, "motherboard")["brand"] == "ASUS"
+
+
 @pytest.mark.parametrize("name,expected", [
     ("AMD Ryzen 7 9800X3D", "AMD"),
     ("Intel Core i5-13400F", "Intel"),

@@ -64,6 +64,29 @@ _MAKER_BRANDS: list[tuple[str, str]] = [
     ("aoc",             "AOC"),
     ("wd",              "WD"),
     ("lg",              "LG"),
+    # Budget/grey-market board partners, verified against the active
+    # catalogue (were falling through to the chip-vendor fallback below).
+    ("afox",            "AFOX"),
+    ("ninja",           "Ninja"),
+    ("ease",            "EASE"),
+    ("colorful",        "Colorful"),
+    ("maxsun",          "MAXSUN"),
+    ("darkflash",       "DarkFlash"),
+    ("leadtek",         "Leadtek"),
+    ("gunnir",          "Gunnir"),
+    ("galax",           "Galax"),
+    ("manli",           "Manli"),
+    ("inno3d",          "Inno3D"),
+    ("evga",            "EVGA"),
+    ("biostar",         "Biostar"),
+    ("yeston",          "Yeston"),
+    ("onda",            "Onda"),
+    ("vastarmor",       "Vastarmor"),
+    ("alseye",          "Alseye"),
+    ("dataland",        "Dataland"),
+    # Misspelling seen in real listings ("Saphire RX590 Nitro Plus...") —
+    # canonicalizes to the existing Sapphire value, not a second brand.
+    ("saphire",         "Sapphire"),
 ]
 
 # Chip vendors — fallback only. For CPUs there is no third-party maker, so
@@ -79,20 +102,33 @@ _CHIP_VENDOR_BRANDS: list[tuple[str, str]] = [
 ]
 
 _ALL_BRANDS = _MAKER_BRANDS + _CHIP_VENDOR_BRANDS
+
+# Tokens matched on a strict \b word boundary rather than a plain substring:
+# short (<=3 char) codes, plus longer single words empirically shown to
+# collide with unrelated substrings in real listings — "ease" fires inside
+# "Q-Release"/"Quick Release" (ASUS motherboards), "galax" fires inside
+# "Galaxy" (Xigmatek fan kits). Every maker added after the original list is
+# boundary-matched by default: a bare substring check is unsafe for any
+# short, ordinary-looking brand word.
+_BOUNDARY_BRANDS = {
+    "afox", "ninja", "ease", "colorful", "maxsun", "darkflash", "leadtek",
+    "gunnir", "galax", "manli", "inno3d", "evga", "biostar", "yeston",
+    "onda", "vastarmor", "alseye", "dataland", "saphire",
+}
 _SHORT_BRAND_RE: dict[str, re.Pattern] = {
     s: re.compile(rf'\b{re.escape(s)}\b', re.IGNORECASE)
-    for s, _ in _ALL_BRANDS if len(s) <= 3
+    for s, _ in _ALL_BRANDS if len(s) <= 3 or s in _BOUNDARY_BRANDS
 }
 
 
 def _match_brand_list(lower: str, brands: list[tuple[str, str]]) -> Optional[str]:
     for match_str, canonical in brands:
-        if len(match_str) <= 3:
-            if _SHORT_BRAND_RE[match_str].search(lower):
+        pattern = _SHORT_BRAND_RE.get(match_str)
+        if pattern:
+            if pattern.search(lower):
                 return canonical
-        else:
-            if match_str in lower:
-                return canonical
+        elif match_str in lower:
+            return canonical
     return None
 
 
