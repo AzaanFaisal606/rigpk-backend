@@ -174,15 +174,15 @@ class TechMatchedScraper(BaseScraper):
                 )
             product_url = url_m.group(1) if url_m else ""
 
-            # Price — try JSON dataLayer first (exact integer rupees)
+            # Price — try JSON dataLayer first (exact integer rupees). No bare
+            # "price": N fallback here — a card can embed a related-product
+            # widget ahead of its own markup, and an unscoped regex picks
+            # that neighbour's price instead of the card's own (M5).
             price_pkr: int | None = None
             dl_m = re.search(
                 r'wpmDataLayer\)\.products\[\d+\]\s*=\s*\{[^}]*"price"\s*:\s*(\d+)',
                 block,
             )
-            if not dl_m:
-                # Broader: any "price": N in the block's script
-                dl_m = re.search(r'"price"\s*:\s*(\d+)', block)
             if dl_m:
                 price_pkr = int(dl_m.group(1))
             else:

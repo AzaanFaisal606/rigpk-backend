@@ -11,6 +11,7 @@ Usage:
     python -m scrapers.amdhouse.scraper
 """
 
+import html as _html
 import os
 import re
 import sys
@@ -49,6 +50,30 @@ CATEGORIES: list[tuple[str, str]] = [
 
 class AmdHouseScraper(BaseScraper):
 
+    # On a discounted card WooCommerce renders the original inside
+    # <del>...<bdi>...</bdi></del> and the price you actually pay inside a
+    # separate <ins>...<bdi>...</bdi></ins>. Sale price wins; regular price
+    # is the fallback for undiscounted cards, which have no <ins>/<del> at all.
+    _SALE_PRICE_RE = re.compile(
+        r'<ins[^>]*>.*?woocommerce-Price-amount[^>]*><bdi>.*?</span>([\d,]+)</bdi>',
+        re.DOTALL,
+    )
+    _PRICE_RE = re.compile(
+        r'woocommerce-Price-amount[^>]*><bdi>.*?</span>([\d,]+)</bdi>', re.DOTALL
+    )
+
+    @staticmethod
+    def _to_int(raw: str) -> int:
+        return int(raw.replace(",", ""))
+
+    def _extract_price(self, block: str) -> int | None:
+        """Sale price wins over the crossed-out regular price."""
+        for pattern in (self._SALE_PRICE_RE, self._PRICE_RE):
+            m = pattern.search(block)
+            if m:
+                return self._to_int(m.group(1))
+        return None
+
     def scrape(self, url: str) -> list[dict]:
         all_products: list[dict] = []
         seen_urls: set[str] = set()
@@ -86,9 +111,22 @@ class AmdHouseScraper(BaseScraper):
     def _parse_page(self, html: str) -> list[dict]:
         scraped_at = self.now()
 
-        # Product blocks — split on product div class
-        blocks = re.split(r'(?=<div[^>]+class="[^"]*product-small\s)', html)
-        # First chunk is page header, skip it
+        # Product blocks — split on product div class. Bound the final block
+        # at the theme's own "<footer id=\"footer\"" marker instead of
+        # end-of-document: unbounded, the last card's block swallows the
+        # entire page tail (widgets, footer copy), and any "out-of-stock"
+        # text anywhere in it would falsely mark that last card sold out.
+        matches = list(re.finditer(r'<div[^>]+class="[^"]*product-small\s', html))
+        blocks = []
+        for i, m in enumerate(matches):
+            start = m.start()
+            if i + 1 < len(matches):
+                end = matches[i + 1].start()
+            else:
+                footer_idx = html.find('<footer id="footer"', start)
+                end = footer_idx if footer_idx != -1 else len(html)
+            blocks.append(html[start:end])
+        # First chunk(s) without a title are the outer wrapper div, not a card
         blocks = [b for b in blocks if 'woocommerce-loop-product__title' in b]
 
         if not blocks:
@@ -107,7 +145,7 @@ class AmdHouseScraper(BaseScraper):
             )
             if not name_m:
                 continue
-            name = name_m.group(1).strip()
+            name = _html.unescape(name_m.group(1)).strip()
 
             # URL
             url_m = re.search(
@@ -118,11 +156,8 @@ class AmdHouseScraper(BaseScraper):
                 url_m = re.search(r'href="(https://amdhouse\.pk/product/[^"]+)"', block)
             product_url = url_m.group(1) if url_m else ""
 
-            # Price: <bdi><span>&#8360;</span>79,000</bdi>
-            price_m = re.search(
-                r'woocommerce-Price-amount[^>]*><bdi>.*?</span>([\d,]+)</bdi>', block, re.DOTALL
-            )
-            price_pkr = int(price_m.group(1).replace(",", "")) if price_m else None
+            # Price: sale price wins over the crossed-out regular price
+            price_pkr = self._extract_price(block)
 
             # Thumbnail
             thumb_m = re.search(
