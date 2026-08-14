@@ -7,9 +7,11 @@ production Turso) after deploying the column.
 
 Usage:
     python scripts/migrations/2026_08_14_latest_price_backfill.py
+    python scripts/migrations/2026_08_14_latest_price_backfill.py --yes-production
 """
 import sys
 
+from scripts.migrations._guard import resolve_target
 from db.database import Database
 
 BACKFILL = """
@@ -33,8 +35,9 @@ WHERE p.latest_price IS NOT (
 
 
 def main() -> int:
+    resolve_target()  # refuses production Turso unless --yes-production;
+                       # must run before Database() opens any connection
     db = Database()
-    print(f"target: {db._target}")
     db._conn.execute(BACKFILL)
     db._conn.commit()
 
