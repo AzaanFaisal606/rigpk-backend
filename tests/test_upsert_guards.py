@@ -74,3 +74,20 @@ def test_null_price_is_skipped_but_not_quarantined(db):
     db.upsert_products([_p("Some GPU", "gpu", None)])
     assert db._conn.execute("SELECT COUNT(*) FROM parts").fetchone()[0] == 0
     assert db.list_quarantined() == []
+
+
+def test_repeat_rejection_dedupes_instead_of_appending(db):
+    """
+    The same junk listing shows up again every weekly scrape. It must UPDATE
+    the existing quarantine row (bumping times_rejected, moving last_seen_at)
+    rather than growing the table forever.
+    """
+    db.upsert_products([_p("RGB Light Bar Strip", "monitor", 50000)])
+    first = db.list_quarantined()[0]
+
+    db.upsert_products([_p("RGB Light Bar Strip", "monitor", 51000)])
+    rows = db.list_quarantined()
+
+    assert len(rows) == 1
+    assert rows[0]["times_rejected"] == 2
+    assert rows[0]["first_seen_at"] == first["first_seen_at"]

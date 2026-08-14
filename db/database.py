@@ -376,6 +376,72 @@ class Database:
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_prebuilts_active ON prebuilts(is_active)"
         )
+        self._migrate_quarantine_dedup()
+
+    def _migrate_quarantine_dedup(self):
+        """
+        Older DBs may have created quarantined_rows before it was deduped on
+        (source, url) — add the missing columns, collapse any rows that
+        already violate the new key, then create the unique index. Runs
+        every time via _migrate(); each step is a no-op once applied. Doing
+        this here (not in schema.sql) matters: schema.sql's CREATE TABLE IF
+        NOT EXISTS never fires again on a DB that already has the table, and
+        creating the unique index before deduping would raise on any
+        pre-existing duplicate (source, url) pair.
+        """
+        q_cols = {
+            r["name"]
+            for r in self._conn.execute("PRAGMA table_info(quarantined_rows)").fetchall()
+        }
+        if not q_cols:
+            return  # table doesn't exist yet (shouldn't happen post schema.sql)
+        had_legacy_ts = "quarantined_at" in q_cols
+        if "times_rejected" not in q_cols:
+            self._conn.execute(
+                "ALTER TABLE quarantined_rows ADD COLUMN times_rejected INTEGER NOT NULL DEFAULT 1"
+            )
+        for col in ("first_seen_at", "last_seen_at"):
+            if col not in q_cols:
+                self._conn.execute(f"ALTER TABLE quarantined_rows ADD COLUMN {col} TEXT")
+                if had_legacy_ts:
+                    self._conn.execute(
+                        f"UPDATE quarantined_rows SET {col} = quarantined_at WHERE {col} IS NULL"
+                    )
+                else:
+                    self._conn.execute(
+                        f"""UPDATE quarantined_rows SET {col} = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                            WHERE {col} IS NULL"""
+                    )
+
+        # Collapse any rows sharing (source, url) from before the dedup existed,
+        # so the unique index below doesn't fail on pre-existing duplicates.
+        dup_groups = self._conn.execute(
+            "SELECT source, url FROM quarantined_rows GROUP BY source, url HAVING COUNT(*) > 1"
+        ).fetchall()
+        for g in dup_groups:
+            rows = self._conn.execute(
+                "SELECT * FROM quarantined_rows WHERE source IS ? AND url IS ? ORDER BY id",
+                (g["source"], g["url"]),
+            ).fetchall()
+            keep_id = rows[0]["id"]
+            total = sum((r["times_rejected"] or 1) for r in rows)
+            first = min(r["first_seen_at"] for r in rows if r["first_seen_at"])
+            last = max(r["last_seen_at"] for r in rows if r["last_seen_at"])
+            self._conn.execute(
+                "UPDATE quarantined_rows SET times_rejected = ?, first_seen_at = ?, last_seen_at = ? WHERE id = ?",
+                (total, first, last, keep_id),
+            )
+            self._conn.executemany(
+                "DELETE FROM quarantined_rows WHERE id = ?",
+                [(r["id"],) for r in rows[1:]],
+            )
+
+        self._conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_quarantine_dedup ON quarantined_rows(source, url)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_quarantine_time ON quarantined_rows(last_seen_at)"
+        )
 
     # ------------------------------------------------------------------
     # Write
@@ -461,13 +527,25 @@ class Database:
                 pass
 
         if quarantined:
-            cur.executemany(
-                """
-                INSERT INTO quarantined_rows (source, name, category, price_pkr, url, rule)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                quarantined,
-            )
+            # Diagnostic-only: a failure here (e.g. a pre-dedup DB the migration
+            # hasn't reached yet) must never abort a real scrape's upsert.
+            try:
+                cur.executemany(
+                    """
+                    INSERT INTO quarantined_rows (source, name, category, price_pkr, url, rule)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(source, url) DO UPDATE SET
+                        name           = excluded.name,
+                        category       = excluded.category,
+                        price_pkr      = excluded.price_pkr,
+                        rule           = excluded.rule,
+                        times_rejected = quarantined_rows.times_rejected + 1,
+                        last_seen_at   = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    """,
+                    quarantined,
+                )
+            except Exception as e:
+                print(f"    WARNING: quarantine write failed (non-fatal): {e}")
 
         self._conn.commit()
         self._last_seen_ids = seen_ids

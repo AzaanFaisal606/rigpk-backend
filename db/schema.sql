@@ -138,6 +138,15 @@ CREATE INDEX IF NOT EXISTS idx_scrape_runs_source
 -- Rows rejected by upsert_products' guards. Not user-facing — this exists so an
 -- over-broad blocklist term is discoverable instead of silently eating real
 -- products. `rule` names exactly which guard fired.
+--
+-- Deduped on (source, url) — the same rejected listing shows up again every
+-- weekly scrape, so a repeat rejection UPDATEs this row (bumping
+-- times_rejected, moving last_seen_at) instead of appending a fresh one
+-- forever. url is what the rejected payload always carries at the point the
+-- guards fire; source_id isn't derived until a row passes them. The unique
+-- index that backs the dedup (and the ON CONFLICT below) is created in
+-- _migrate() rather than here, since CREATE TABLE IF NOT EXISTS never runs
+-- again on a DB that already has this table pre-dedup.
 CREATE TABLE IF NOT EXISTS quarantined_rows (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     source         TEXT NOT NULL,
@@ -146,7 +155,13 @@ CREATE TABLE IF NOT EXISTS quarantined_rows (
     price_pkr      INTEGER,
     url            TEXT,
     rule           TEXT NOT NULL,          -- "min_price:gpu:4000" | "blocklist:global:combo" | "blocklist:monitor:keyboard"
-    quarantined_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    times_rejected INTEGER NOT NULL DEFAULT 1,
+    first_seen_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    last_seen_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
-CREATE INDEX IF NOT EXISTS idx_quarantine_time ON quarantined_rows(quarantined_at);
+-- idx_quarantine_time (on last_seen_at) and the (source, url) unique index
+-- are created in _migrate() instead of here — an existing DB's table
+-- predates the last_seen_at column, and this file's CREATE TABLE IF NOT
+-- EXISTS never re-runs to add it, so an index on it here would fail on
+-- every such DB before _migrate() gets a chance to add the column.
