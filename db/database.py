@@ -971,20 +971,22 @@ class Database:
         the payload at 4-35 KB gzipped instead of 176 KB for the whole
         catalogue. Source names are interned; price is included so the client
         can sort and paginate without a round trip.
+
+        Reads parts.latest_price and applies the same `latest_price IS NOT
+        NULL` predicate as list_parts() — the client matches, sorts and
+        price-filters against this index, then /api/parts?ids=... (list_parts)
+        re-fetches exactly those ids. Two different price sources here used to
+        let the two disagree (a part visible in search but absent from the
+        grid, or a price filter selecting on one number while the grid showed
+        another), pinned for up to an hour by this endpoint's ETag cache.
         """
         rows = self._conn.execute(
             """
-            SELECT p.id, p.name, p.source, pl.price_pkr
+            SELECT p.id, p.name, p.source, p.latest_price
             FROM parts p
-            JOIN price_log pl ON pl.id = (
-                SELECT id FROM price_log
-                WHERE part_id = p.id
-                ORDER BY scraped_at DESC
-                LIMIT 1
-            )
             WHERE p.category = ?
               AND p.is_active = 1
-              AND pl.price_pkr IS NOT NULL
+              AND p.latest_price IS NOT NULL
             ORDER BY p.id
             """,
             (category,),
@@ -1129,6 +1131,7 @@ class Database:
                 FROM parts
                 WHERE category = ?
                   AND is_active = 1
+                  AND latest_price IS NOT NULL
                   AND json_extract(specs, ?) IS NOT NULL
                 ORDER BY val
                 """,
@@ -1460,7 +1463,9 @@ class Database:
     def resolve_shared_build(self, code: str) -> Optional[dict]:
         """
         Resolve a shared build code to a dict of {slot: full_part_dict}.
-        Skips slots where the part no longer exists in DB.
+        Skips slots where the part no longer exists in DB, or has no
+        latest_price (same predicate list_parts/search_index use, so a part
+        that's invisible everywhere else doesn't resolve here either).
 
         Args:
             code: 6-char alphanumeric code
@@ -1481,12 +1486,11 @@ class Database:
         placeholders = ",".join("?" * len(id_to_slot))
         rows = self._conn.execute(
             f"""
-            SELECT p.id, p.source, p.name, p.category, p.url, p.thumbnail_url, p.specs, pl.price_pkr
+            SELECT p.id, p.source, p.name, p.category, p.url, p.thumbnail_url, p.specs,
+                   p.latest_price AS price_pkr
             FROM parts p
-            JOIN price_log pl ON pl.id = (
-                SELECT id FROM price_log WHERE part_id = p.id ORDER BY scraped_at DESC LIMIT 1
-            )
             WHERE p.id IN ({placeholders})
+              AND p.latest_price IS NOT NULL
             """,
             list(id_to_slot.keys()),
         ).fetchall()
