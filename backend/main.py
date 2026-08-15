@@ -23,6 +23,11 @@ async def _database_timeout_handler(request: Request, exc: DatabaseTimeoutError)
     # ready). The exception text itself is safe (no paths/tokens — see
     # backend/deps.py), but the response stays generic on principle and the
     # detail is logged server-side for whoever's debugging it.
+    #
+    # "Retryable" here means safe to retry for a read. It is NOT a
+    # guarantee the write behind this call never applied — see
+    # `DatabaseTimeoutError`'s docstring in backend/deps.py for exactly
+    # what a client can and can't assume about a write after this.
     logger.error("database call timed out: %s", exc)
     return JSONResponse(
         status_code=503,

@@ -38,9 +38,10 @@ class _FakeDB:
 
     def __init__(self):
         self.calls = 0
+        self.close_calls = 0
 
     def close(self):
-        pass
+        self.close_calls += 1
 
     def hang(self, sleep_seconds):
         # Simulate a stalled network read: sleeps past the caller-supplied
@@ -120,6 +121,38 @@ def test_hung_call_times_out_and_does_not_wedge_later_calls(seeded_db):
         f"call took {elapsed:.2f}s -- looks like it queued behind the hung call "
         "instead of running on a fresh owner thread"
     )
+
+    wrapper.close()
+
+
+def test_abandoned_owner_is_closed_and_counted_once_its_call_finishes(seeded_db):
+    """
+    F5 regression: a timed-out call's owner thread is abandoned, not
+    killed (Python cannot force-stop a blocked thread) -- but once that
+    abandoned call finally finishes on its own, its connection must be
+    closed (not leaked forever) and the abandonment must be observable via
+    `abandoned_owner_count()`, not a silent leak.
+    """
+    wrapper = ThreadSafeDatabase(seeded_db, call_timeout=_TEST_TIMEOUT)
+    fake = _FakeDB()
+    wrapper._set_owner_db(fake)
+
+    assert wrapper.abandoned_owner_count() == 0
+
+    hang_seconds = _TEST_TIMEOUT + 0.3
+    with pytest.raises(DatabaseTimeoutError):
+        wrapper.hang(hang_seconds)
+
+    # The caller already got its DatabaseTimeoutError; the abandoned task
+    # is still asleep in the background at this point. Poll rather than a
+    # single fixed sleep -- give it up to hang_seconds + a margin to finish
+    # and run its own cleanup on the (abandoned) owner thread.
+    poll_deadline = time.monotonic() + hang_seconds + 2
+    while time.monotonic() < poll_deadline and wrapper.abandoned_owner_count() == 0:
+        time.sleep(0.02)
+
+    assert wrapper.abandoned_owner_count() == 1
+    assert fake.close_calls == 1, "the abandoned owner's connection was never closed"
 
     wrapper.close()
 

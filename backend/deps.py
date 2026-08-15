@@ -50,6 +50,7 @@ detail.
 """
 from __future__ import annotations
 
+import logging
 import os
 import threading
 import time
@@ -62,6 +63,8 @@ from fastapi import FastAPI
 
 from backend.config import DB_PATH
 from db.database import Database
+
+logger = logging.getLogger(__name__)
 
 # This is a wedge-breaker, not a latency SLO. Its only job is to guarantee a
 # marshaled call eventually gives up instead of hanging the owner thread
@@ -96,7 +99,31 @@ _CALL_TIMEOUT = 30.0 if _env_call_timeout is None else float(_env_call_timeout)
 
 
 class DatabaseTimeoutError(RuntimeError):
-    """A database call marshaled onto the owner thread exceeded `_CALL_TIMEOUT`."""
+    """
+    A database call marshaled onto the owner thread exceeded `_CALL_TIMEOUT`.
+    `backend/main.py` maps this to an HTTP 503.
+
+    What a client should assume after seeing this: the write MAY OR MAY NOT
+    have applied. The owner thread that was running the call is abandoned,
+    not killed — Python cannot force-stop a blocked thread — so it keeps
+    running in the background and, if it was a write, may go on to execute
+    and commit after the 503 has already been returned. There is no
+    way to observe from here whether that happens for any given call.
+
+    `_note_abandoned_owner_finished` narrows this window where it can (the
+    abandoned connection is closed, which discards rather than commits a
+    transaction still open at that moment) but that only helps if the call
+    hadn't already committed by the time its `finally` runs — the common
+    successful-retry-eventually-lands case is not affected by it.
+
+    Practical consequence: a 503 from this handler is safe to retry for an
+    idempotent read, but retrying a write blind can double-apply it (see
+    `db/libsql_adapter.py`'s `_TRANSIENT_READ_ONLY_MARKERS` for the same
+    ambiguity at the network layer). A write endpoint that needs an exactly-
+    once guarantee across a 503 needs a caller-supplied idempotency key —
+    none of the current write endpoints (`create_shared_build` included)
+    have one yet.
+    """
 
 
 def _is_transient_error(exc: Exception) -> bool:
@@ -179,6 +206,14 @@ class ThreadSafeDatabase:
         self._swap_lock = threading.Lock()
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="db-owner")
         self._call_timeout = _CALL_TIMEOUT if call_timeout is None else call_timeout
+        # How many owner threads have been abandoned (timed out, swapped
+        # out from under an in-flight call via `_replace_owner`) AND have
+        # since finished that in-flight call and been cleaned up. Protected
+        # by `_swap_lock`, same as `_executor`. See `_run`'s use of
+        # `_note_abandoned_owner_finished` — this is what makes an
+        # abandoned owner an accounted-for, bounded leak instead of a
+        # silent one (see `abandoned_owner_count`).
+        self._abandoned_owner_count = 0
 
     def _connect_if_needed(self) -> Database:
         # Only ever called from inside a task running ON the owner thread —
@@ -259,13 +294,9 @@ class ThreadSafeDatabase:
         with self._swap_lock:
             executor = self._executor
         deadline = time.monotonic() + self._call_timeout
+        bounded_task = self._make_bounded_task(task, deadline, executor)
 
-        def _bounded_task() -> Any:
-            remaining = max(0.0, deadline - time.monotonic())
-            with _deadline_scope(remaining):
-                return task()
-
-        future = executor.submit(_bounded_task)
+        future = executor.submit(bounded_task)
         try:
             return future.result(timeout=self._call_timeout)
         except _FutureTimeoutError as exc:
@@ -275,6 +306,16 @@ class ThreadSafeDatabase:
             # takes over for every subsequent call so one wedged call can't
             # block the rest of the app behind it forever — that permanent
             # hang is exactly the bug this fix exists to close.
+            #
+            # The old owner thread is NOT interrupted — Python cannot force
+            # a blocked thread to stop — so `bounded_task` (still running,
+            # somewhere inside `task()`) will eventually finish or raise on
+            # its own, whenever the network call it's stuck in returns.
+            # `bounded_task`'s own `finally` (see `_make_bounded_task`)
+            # notices, once that happens, that `self._executor` has moved
+            # on without it and closes/accounts for that connection then —
+            # see `_note_abandoned_owner_finished` for exactly what "safe
+            # and bounded" means here, including for a write.
             self._replace_owner(wait_for_old=False)
             raise DatabaseTimeoutError(
                 f"database call did not complete within {self._call_timeout}s"
@@ -297,7 +338,8 @@ class ThreadSafeDatabase:
                 ) from exc
             with self._swap_lock:
                 executor = self._executor
-            return executor.submit(_bounded_task).result(timeout=remaining)
+            retry_task = self._make_bounded_task(task, deadline, executor)
+            return executor.submit(retry_task).result(timeout=remaining)
 
     def __getattr__(self, name: str):
         # Reading the attribute off the connected Database (to get a bound
@@ -324,6 +366,84 @@ class ThreadSafeDatabase:
         if db is not None:
             db.close()
             self._local.db = None
+
+    def _make_bounded_task(
+        self, task: Callable[[], Any], deadline: float, owner_executor: ThreadPoolExecutor
+    ) -> Callable[[], Any]:
+        """
+        Wrap `task` for submission to `owner_executor`: bound its inner
+        retry budget to `deadline` (see `_run`'s docstring comment on
+        sharing one deadline), and — new here — detect, in a `finally`
+        that always runs once `task()` returns OR raises, whether THIS
+        owner was abandoned (swapped out by `_replace_owner`) while it was
+        still running. `owner_executor` is captured per-call, not read
+        fresh from `self._executor`, precisely so this comparison means
+        "was I replaced", not "what is current right now" (those differ
+        exactly during the abandonment window this exists to detect).
+        """
+
+        def _bounded_task() -> Any:
+            remaining = max(0.0, deadline - time.monotonic())
+            try:
+                with _deadline_scope(remaining):
+                    return task()
+            finally:
+                with self._swap_lock:
+                    abandoned = self._executor is not owner_executor
+                if abandoned:
+                    self._note_abandoned_owner_finished()
+
+        return _bounded_task
+
+    def _note_abandoned_owner_finished(self) -> None:
+        """
+        Runs ON an abandoned owner thread, strictly after its in-flight
+        call has fully returned or raised — i.e. after whatever it was
+        doing (including, for a write, its own `commit()`) is already
+        over. Nothing else will ever submit more work to this thread
+        (`_replace_owner` already moved `self._executor` on), so:
+
+          - close this thread's own connection. Freeing it here, rather
+            than never, is what turns "one leaked thread + socket per
+            timeout" into a bounded leak — bounded because it is cleaned
+            up as soon as the abandoned call stops running, not held
+            forever.
+          - `close()` on a connection with a transaction still open
+            (sqlite3 and libsql both) discards it rather than committing
+            it. That's the closest this design can get to "roll back
+            instead of commit" for the abandoned call: it only helps if
+            `task()` raised (or is otherwise still short of its own
+            commit) by the time this runs — if `task()` already returned
+            normally, its commit already happened, on this same thread,
+            before this `finally` ever got a chance to run, and nothing
+            outside that thread can un-commit it. There is no way to
+            interrupt code already past that point without genuinely
+            killing the thread, which Python does not support — so this
+            is a best-effort narrowing of the write-safety window, not a
+            guarantee. See `get_database`'s docstring for what a caller
+            should assume after a 503.
+          - increment and log `abandoned_owner_count()` so this leak is
+            observable (an operator can alert on it climbing) instead of
+            silent.
+        """
+        self._close_local_db()
+        with self._swap_lock:
+            self._abandoned_owner_count += 1
+            count = self._abandoned_owner_count
+        logger.warning(
+            "ThreadSafeDatabase: an abandoned owner thread finished its "
+            "in-flight call and has been closed (%d abandoned owner(s) "
+            "closed so far on this wrapper)",
+            count,
+        )
+
+    def abandoned_owner_count(self) -> int:
+        """How many abandoned owner threads have finished their in-flight
+        call and been closed, over this wrapper's lifetime. Observability
+        seam for `_note_abandoned_owner_finished` — an operator (or a
+        test) can watch this climb instead of it being a silent leak."""
+        with self._swap_lock:
+            return self._abandoned_owner_count
 
     def close(self) -> None:
         with self._swap_lock:
