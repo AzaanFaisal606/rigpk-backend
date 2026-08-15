@@ -402,7 +402,15 @@ class _NoCommitConnection:
             setattr(self._wrapped, name, value)
 
     def __enter__(self):
-        return self._wrapped.__enter__()
+        # Must return self, not self._wrapped: the latter hands a bare
+        # `with self._conn as c:` the real connection, and c.commit() would
+        # bypass the no-op wrapper entirely — a refactor from the bare
+        # `with self._conn:` form (safe today, since __exit__ below already
+        # swallows the implicit success-commit) to the `as c:` form would
+        # silently make SCRAPE_NO_DB_WRITE inert. Returning self keeps every
+        # write inside the with-block going through this proxy's commit().
+        self._wrapped.__enter__()
+        return self
 
     def __exit__(self, *exc):
         # `with self._conn:` commits on success in sqlite3. Swallow the success
