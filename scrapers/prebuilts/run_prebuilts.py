@@ -87,7 +87,7 @@ def main():
             print(f"  SKIP sweep for {name} — keeping existing rows (marked stale)")
 
         n = swept = 0
-        with get_db(db_path) as db:
+        with get_db(db_path, allow_remote_migrations=True) as db:
             # Active count for this source before/after — the scrape report's
             # before → after columns. before captured pre-upsert.
             before_n = db.prebuilt_stats()["by_source"].get(source, 0)
@@ -120,7 +120,7 @@ def main():
         print("\nNo prebuilts scraped.")
         sys.exit(1)
 
-    with get_db(db_path) as db:
+    with get_db(db_path, allow_remote_migrations=True) as db:
         stats = db.prebuilt_stats()
 
     print(f"\n=== DONE ===")

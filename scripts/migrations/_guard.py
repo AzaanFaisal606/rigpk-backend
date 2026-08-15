@@ -81,4 +81,12 @@ def resolve_target(argv: list[str] | None = None) -> str:
         )
         raise SystemExit(1)
 
+    # A migration script reaching this line has already had its production
+    # target explicitly confirmed above (or resolved to a non-production /
+    # local target). That is exactly the confirmation db.database's remote
+    # migration guard (ALLOW_REMOTE_MIGRATIONS) requires, so grant it here
+    # rather than making every migration script set it by hand. setdefault
+    # so an operator's own explicit env choice is never overridden.
+    os.environ.setdefault("ALLOW_REMOTE_MIGRATIONS", "1")
+
     return target

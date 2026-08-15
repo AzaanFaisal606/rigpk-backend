@@ -507,7 +507,7 @@ def main():
 
     if not all_results:
         print("\nNo products scraped across any site.")
-        with get_db(DB_PATH) as db:
+        with get_db(DB_PATH, allow_remote_migrations=True) as db:
             # Nothing scraped → nothing mutated, so before == after (rows kept).
             active = db.stats()["by_source"]
             for r in runs:
@@ -529,7 +529,7 @@ def main():
     if backup:
         print(f"\nDB: backup written to {backup}")
 
-    with get_db(DB_PATH) as db:
+    with get_db(DB_PATH, allow_remote_migrations=True) as db:
         # Active counts before this run mutates anything — the "before" side of the
         # report and the health check. Captured pre-upsert so the sweep can't skew them.
         before_active = db.stats()["by_source"]

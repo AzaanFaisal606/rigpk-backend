@@ -57,6 +57,39 @@ _DEFAULT_DB = Path(os.getenv("DB_PATH", str(Path(__file__).parent.parent / "data
 # Local SQLite keeps applying on every open — it is cheap and offline.
 _REMOTE_SCHEMA_APPLIED: set[str] = set()
 
+# Opt-in for running schema/migrations against a remote (Turso) target. See
+# _check_remote_migration_allowed() below.
+_ALLOW_REMOTE_MIGRATIONS_ENV = "ALLOW_REMOTE_MIGRATIONS"
+
+
+def _check_remote_migration_allowed(target: str, allowed: bool) -> None:
+    """
+    Refuse to run schema/migrations against a remote target unless the
+    caller explicitly opted in.
+
+    Database() used to run _apply_schema()/_migrate() unconditionally on
+    every construction, remote or local. That meant any ad hoc script,
+    notebook, or REPL session that called Database() with no explicit
+    target silently applied schema/column changes to production Turso —
+    the exact mechanism behind production's unplanned drift (latest_price,
+    delisted_at, idx_parts_cat_active_price all landed outside any intended
+    migration window).
+
+    Refusal is a loud RuntimeError, not a silent skip: silently skipping
+    the migration and continuing on would let a caller serve requests
+    against a schema it never confirmed is current, which is worse than
+    failing to start.
+    """
+    if allowed:
+        return
+    raise RuntimeError(
+        f"Refusing to run schema/migrations against remote database "
+        f"{target!r} without explicit opt-in — this would apply schema "
+        "changes to a live remote target. Pass allow_remote_migrations=True "
+        f"to Database()/get_db(), or set {_ALLOW_REMOTE_MIGRATIONS_ENV}=1 in "
+        "the environment, before opening this connection."
+    )
+
 
 def _strip_sql_line_comments(script: str) -> str:
     """
@@ -381,7 +414,19 @@ class _NoCommitConnection:
 
 
 class Database:
-    def __init__(self, path: str | Path | None = None):
+    def __init__(
+        self,
+        path: str | Path | None = None,
+        *,
+        allow_remote_migrations: bool | None = None,
+    ):
+        # None means "defer to the environment" — explicit True/False from a
+        # caller always wins over ALLOW_REMOTE_MIGRATIONS.
+        self._allow_remote_migrations = (
+            allow_remote_migrations
+            if allow_remote_migrations is not None
+            else os.getenv(_ALLOW_REMOTE_MIGRATIONS_ENV) == "1"
+        )
         url = os.getenv("TURSO_DATABASE_URL")
         if url:
             # Remote Turso (libSQL). `path` is ignored in this mode.
@@ -423,6 +468,8 @@ class Database:
         # Remote DB: apply schema + migrations once per process (see module note).
         if self._remote and self._target in _REMOTE_SCHEMA_APPLIED:
             return
+        if self._remote:
+            _check_remote_migration_allowed(self._target, self._allow_remote_migrations)
         with open(_SCHEMA, encoding="utf-8") as f:
             script = f.read()
         for stmt in _split_sql_statements(script):
@@ -1725,14 +1772,20 @@ class Database:
         self.close()
 
 
-def get_db(path: str | Path = _DEFAULT_DB) -> Database:
+def get_db(
+    path: str | Path = _DEFAULT_DB,
+    *,
+    allow_remote_migrations: bool | None = None,
+) -> Database:
     """
     Open (or create) the PPC database.
 
     When TURSO_DATABASE_URL is set the connection is remote (Turso/libSQL) and
     `path` is ignored; otherwise it is the local SQLite file at `path`.
+
+    allow_remote_migrations: see Database.__init__ / _check_remote_migration_allowed.
     """
-    return Database(path)
+    return Database(path, allow_remote_migrations=allow_remote_migrations)
 
 
 def backup_db(path: str | Path = _DEFAULT_DB, keep: int = 10) -> Optional[Path]:
