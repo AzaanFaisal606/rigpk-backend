@@ -76,6 +76,16 @@ class ListingScraper(BaseScraper):
         seen: set[str] = set()
         failures = 0
         total: Optional[int] = None
+        # Sticky, unlike `failures`: sets once and never resets on a later
+        # success. `failures` exists to bound CONSECUTIVE failures, so a
+        # later success deliberately clears it — but that same reset used
+        # to also erase the memory that a page was skipped at all, so a
+        # site that clamps out-of-range page numbers (or serves a
+        # duplicate page next) could hit the normal "no new products"
+        # `break` below with no exception raised, reporting a skipped page
+        # as "there was nothing there" — see the class docstring's fetch
+        # hazard and F6 in the audit.
+        pages_skipped = False
 
         for page in range(1, self.MAX_PAGES + 1):
             page_url = self.next_page_url(url, page)
@@ -84,6 +94,7 @@ class ListingScraper(BaseScraper):
                 failures = 0
             except Exception as exc:
                 failures += 1
+                pages_skipped = True
                 if failures >= self.MAX_CONSECUTIVE_FAILURES:
                     err = ScrapeIncomplete(
                         f"{self.SOURCE}: {failures} consecutive page failures at page {page}"
@@ -114,6 +125,20 @@ class ListingScraper(BaseScraper):
             # shape. Deliberate asymmetry with the failures raise above: no
             # .partial_results here.
             raise ScrapeIncomplete(f"{self.SOURCE}: hit MAX_PAGES={self.MAX_PAGES} without finishing")
+
+        if pages_skipped:
+            # Reached a normal `break` (or ran out of pages to try) but at
+            # least one page along the way was never actually fetched. A
+            # page we never saw must not count as a page with nothing on
+            # it — that reads as a clean, complete scrape to callers (see
+            # run_all.py's `ok = bool(results) and error is None`), which
+            # then runs the freshness sweep and delists whatever that
+            # skipped page would have contributed.
+            err = ScrapeIncomplete(
+                f"{self.SOURCE}: at least one page failed to fetch before the scrape ended"
+            )
+            err.partial_results = products
+            raise err
 
         return products
 

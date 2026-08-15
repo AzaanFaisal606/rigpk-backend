@@ -18,6 +18,7 @@ import urllib.error
 import pytest
 
 from scrapers.exceptions import ScrapeIncomplete
+from scrapers.listing_scraper import ListingScraper
 
 
 # ----------------------------------------------------------------------
@@ -323,3 +324,92 @@ def test_read_deadline_bounds_a_stalled_trickling_body(monkeypatch):
     with pytest.raises(RuntimeError, match="READ_DEADLINE"):
         DummyScraper().fetch("https://trickle.test/x", retries=1)
     reset_host_state()
+
+
+# ----------------------------------------------------------------------
+# F6 — a page fetch that failed must not be reported as "a page with
+# nothing new on it" just because a later page loaded fine and the
+# consecutive-failure counter reset. Left unfixed, ListingScraper.scrape()
+# returns normally (no exception at all), run_all's `ok = bool(results)
+# and error is None` reads that as a clean success, and
+# deactivate_unseen_parts then delists every product the skipped page
+# would have contributed.
+# ----------------------------------------------------------------------
+
+
+class _SkipPageScraper(ListingScraper):
+    SOURCE = "faketest"
+
+    def __init__(self, pages):
+        # pages: {page_number: "a|b|c" (card-block string) or an Exception
+        # instance to raise on fetch}
+        self._pages = pages
+
+    def card_blocks(self, html):
+        return html.split("|") if html else []
+
+    def parse_card(self, block):
+        return {
+            "name": block, "price_pkr": 1000, "url": f"https://example.com/{block}",
+            "category": "gpu", "source": self.SOURCE, "scraped_at": "t",
+        }
+
+    def fetch(self, url):
+        page = 1 if "?page=" not in url else int(url.rsplit("=", 1)[1])
+        content = self._pages.get(page, "")
+        if isinstance(content, Exception):
+            raise content
+        return content
+
+
+def test_a_failed_page_is_not_reported_as_a_clean_end_of_listing():
+    """
+    Page 1 succeeds (2 products). Page 2's fetch fails once (under
+    MAX_CONSECUTIVE_FAILURES, so the old code just `continue`s). Page 3
+    succeeds but re-serves the SAME products as page 1 -- zero NEW items,
+    which is the normal "end of listing" signal and used to `break` with no
+    exception at all. The page 2 products were never seen by anyone.
+    """
+    scraper = _SkipPageScraper({
+        1: "a|b",
+        2: RuntimeError("page 2 fetch failed"),
+        3: "a|b",  # already-seen -> new == 0 -> the loop's normal exit
+    })
+
+    with pytest.raises(ScrapeIncomplete) as exc:
+        scraper.scrape("https://example.com/cat")
+
+    partial = exc.value.partial_results
+    assert [p["name"] for p in partial] == ["a", "b"], (
+        "partial_results must hold exactly what page 1 collected before "
+        "the skipped page"
+    )
+
+
+def test_no_skipped_pages_still_returns_normally():
+    """Control case: nothing was skipped, so the normal empty-`break` exit
+    must still return the product list, not raise."""
+    scraper = _SkipPageScraper({
+        1: "a|b",
+        2: "a|b",  # already-seen on page 2 -> new == 0 -> clean end
+    })
+
+    products = scraper.scrape("https://example.com/cat")
+
+    assert [p["name"] for p in products] == ["a", "b"]
+
+
+def test_max_pages_raise_still_carries_no_partial_results():
+    """
+    Deliberate asymmetry, preserved: MAX_PAGES exhaustion means the site
+    kept serving "new" content forever (or is broken) -- trust nothing
+    collected, unlike the failed-page case above which trusts what came
+    before the gap.
+    """
+    pages = {p: f"item{p}" for p in range(1, ListingScraper.MAX_PAGES + 1)}
+    scraper = _SkipPageScraper(pages)
+
+    with pytest.raises(ScrapeIncomplete) as exc:
+        scraper.scrape("https://example.com/cat")
+
+    assert not hasattr(exc.value, "partial_results") or exc.value.partial_results is None
