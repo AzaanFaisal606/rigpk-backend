@@ -10,6 +10,8 @@ shared budget for everyone. Behind Render (the deploy target) that means the
 
 import re
 
+import pytest
+
 
 def test_nonexistent_part_id_is_rejected(client):
     r = client.post("/api/builds/share", json={"gpu": 999999})
@@ -85,6 +87,52 @@ def test_429_carries_positive_retry_after(client):
     retry_after = blocked[0].headers.get("retry-after")
     assert retry_after is not None
     assert int(retry_after) > 0
+
+
+def test_bare_int_slot_still_works_and_defaults_qty_to_one(client):
+    ids = [i["id"] for i in client.get("/api/parts?category=gpu&limit=1").json()["items"]]
+    code = client.post("/api/builds/share", json={"gpu": ids[0]}).json()["code"]
+
+    resolved = client.get(f"/api/builds/share/{code}").json()
+    assert resolved["gpu"]["qty"] == 1
+
+
+def test_qty_object_round_trips(client):
+    item = client.get("/api/parts?category=gpu&limit=1").json()["items"][0]
+    code = client.post(
+        "/api/builds/share", json={"gpu": {"id": item["id"], "qty": 2}}
+    ).json()["code"]
+
+    resolved = client.get(f"/api/builds/share/{code}").json()
+    assert resolved["gpu"]["qty"] == 2
+    assert resolved["gpu"]["price_at_share"] == item["price_pkr"]
+
+
+@pytest.mark.parametrize("qty", [0, 5, -1])
+def test_qty_out_of_range_is_rejected(client, qty):
+    ids = [i["id"] for i in client.get("/api/parts?category=gpu&limit=1").json()["items"]]
+    r = client.post("/api/builds/share", json={"gpu": {"id": ids[0], "qty": qty}})
+    assert r.status_code == 400
+
+
+def test_qty_non_int_is_rejected(client):
+    ids = [i["id"] for i in client.get("/api/parts?category=gpu&limit=1").json()["items"]]
+    r = client.post("/api/builds/share", json={"gpu": {"id": ids[0], "qty": "two"}})
+    assert r.status_code == 400
+
+
+def test_price_at_share_is_taken_from_server_not_client(client):
+    """Whatever price_at_share the client sends is ignored -- the server
+    always snapshots its own current latest_price at share time."""
+    item = client.get("/api/parts?category=gpu&limit=1").json()["items"][0]
+    code = client.post(
+        "/api/builds/share",
+        json={"gpu": {"id": item["id"], "qty": 1, "price_at_share": 1}},
+    ).json()["code"]
+
+    resolved = client.get(f"/api/builds/share/{code}").json()
+    assert resolved["gpu"]["price_at_share"] == item["price_pkr"]
+    assert resolved["gpu"]["price_at_share"] != 1
 
 
 def test_garbage_forwarded_for_does_not_create_a_bucket_key(client):

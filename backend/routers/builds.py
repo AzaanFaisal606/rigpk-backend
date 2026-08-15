@@ -5,7 +5,7 @@ import math
 import os
 import time
 from collections import defaultdict
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel, ConfigDict
@@ -96,38 +96,84 @@ def _check_rate(request: Request) -> None:
     _RATE[key] = hits
 
 
+# Per-slot value accepted from the client: either a bare part id (legacy
+# shorthand, treated as qty=1) or an object with id/qty. `qty` is capped at
+# 4 server-side below -- an unbounded qty would be a trivially abusable
+# multiplier on this public endpoint. Any `price_at_share` the client sends
+# is ignored; it's always taken from the server's own latest_price.
+SlotValue = Union[int, dict]
+
+_MIN_QTY = 1
+_MAX_QTY = 4
+
+
 class ShareBuildRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    cpu: Optional[int] = None
-    gpu: Optional[int] = None
-    ram: Optional[int] = None
-    motherboard: Optional[int] = None
-    psu: Optional[int] = None
-    case: Optional[int] = None
-    ssd: Optional[int] = None
-    cooling: Optional[int] = None
+    cpu: Optional[SlotValue] = None
+    gpu: Optional[SlotValue] = None
+    ram: Optional[SlotValue] = None
+    motherboard: Optional[SlotValue] = None
+    psu: Optional[SlotValue] = None
+    case: Optional[SlotValue] = None
+    ssd: Optional[SlotValue] = None
+    cooling: Optional[SlotValue] = None
 
 
 class ShareBuildResponse(BaseModel):
     code: str
 
 
+def _normalize_slot(slot: str, value: SlotValue) -> dict:
+    """
+    Normalize one slot's request value into {"id": int, "qty": int}.
+
+    Accepts a bare int (legacy shorthand -> qty=1) or an object with
+    id/qty, and is liberal about extra keys an object might carry (e.g. a
+    client echoing back a price_at_share it received earlier) -- those are
+    simply ignored, never trusted. Raises HTTPException(400) for anything
+    that doesn't resolve to a real int id or a qty in 1..4.
+    """
+    if isinstance(value, bool):
+        raise HTTPException(status_code=400, detail=f"Invalid part id for slot '{slot}'")
+    if isinstance(value, int):
+        return {"id": value, "qty": 1}
+    if isinstance(value, dict):
+        part_id = value.get("id")
+        qty = value.get("qty", 1)
+        if isinstance(part_id, bool) or not isinstance(part_id, int):
+            raise HTTPException(status_code=400, detail=f"Invalid part id for slot '{slot}'")
+        if isinstance(qty, bool) or not isinstance(qty, int) or not (_MIN_QTY <= qty <= _MAX_QTY):
+            raise HTTPException(
+                status_code=400,
+                detail=f"qty for slot '{slot}' must be an integer between {_MIN_QTY} and {_MAX_QTY}",
+            )
+        return {"id": part_id, "qty": qty}
+    raise HTTPException(status_code=400, detail=f"Invalid value for slot '{slot}'")
+
+
 @router.post("/share", response_model=ShareBuildResponse)
 def share_build(body: ShareBuildRequest, request: Request, db: Database = Depends(get_database)):
     _check_rate(request)
-    build = {
+    raw = {
         field: value
         for field, value in body.model_dump().items()
         if value is not None
     }
-    if not build:
+    if not raw:
         raise HTTPException(status_code=400, detail="Build has no parts selected")
 
-    statuses = db.resolve_part_status(list(build.values()))
-    missing = [pid for pid in build.values() if pid not in statuses]
+    build = {slot: _normalize_slot(slot, value) for slot, value in raw.items()}
+
+    statuses = db.resolve_part_status([slot["id"] for slot in build.values()])
+    missing = [slot["id"] for slot in build.values() if slot["id"] not in statuses]
     if missing:
         raise HTTPException(status_code=400, detail=f"Unknown part id(s): {missing}")
+
+    # price_at_share always comes from the server's current latest_price --
+    # never from the client, which could send any number it likes.
+    for slot in build.values():
+        slot["price_at_share"] = statuses[slot["id"]]["latest_price"]
 
     code = db.create_shared_build(build)
     return {"code": code}

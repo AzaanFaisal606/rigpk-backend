@@ -968,7 +968,14 @@ class Database:
         Create a shared build and return its 6-char alphanumeric code.
 
         Args:
-            build: dict of {slot: part_id} (e.g. {"cpu": 42, "gpu": 17})
+            build: dict of {slot: {"id": <int>, "qty": <int>,
+                "price_at_share": <int|None>}} (e.g.
+                {"gpu": {"id": 17, "qty": 1, "price_at_share": 900000}}).
+                Stored verbatim as JSON -- this method does no shape
+                validation or normalization, that's the caller's job
+                (see backend/routers/builds.py). resolve_shared_build()
+                also accepts the older bare-int-per-slot shape written by
+                codes created before qty/price-snapshot support existed.
 
         Returns:
             6-char alphanumeric code
@@ -1506,23 +1513,50 @@ class Database:
     def resolve_shared_build(self, code: str) -> Optional[dict]:
         """
         Resolve a shared build code to a dict of {slot: full_part_dict}.
-        Skips slots where the part no longer exists in DB, or has no
-        latest_price (same predicate list_parts/search_index use, so a part
-        that's invisible everywhere else doesn't resolve here either).
+
+        Handles both the current per-slot shape ({"id": <int>, "qty": <int>,
+        "price_at_share": <int|None>}) and the legacy bare-int-per-slot shape
+        ({"slot": <part_id>}) written by codes created before qty/price
+        snapshot support -- a bare int is treated as qty=1 with no snapshot.
+
+        A part that's since been delisted, or lost its price, is still
+        returned (not skipped) -- a build silently missing a component is
+        more confusing than one that shows the component as unavailable.
+        Callers get is_active/delisted_at/price_at_share alongside the
+        current price_pkr (which may be NULL) to decide how to render it.
 
         Args:
             code: 6-char alphanumeric code
 
         Returns:
             dict of {slot: part_dict} or None if code not found.
-            part_dict includes: id, source, name, category, url, thumbnail_url, specs, price_pkr
+            part_dict includes: id, source, name, category, url, thumbnail_url,
+            specs, price_pkr, is_active, delisted_at, price_at_share, qty
         """
-        slot_ids = self.get_shared_build(code)
-        if slot_ids is None:
+        slot_data = self.get_shared_build(code)
+        if slot_data is None:
             return None
 
-        # Collect all valid part_ids
-        id_to_slot: dict[int, str] = {part_id: slot for slot, part_id in slot_ids.items() if part_id is not None}
+        # Normalize both shapes into (part_id, qty, price_at_share) per slot.
+        id_to_slot: dict[int, str] = {}
+        slot_meta: dict[str, dict] = {}
+        for slot, val in slot_data.items():
+            if val is None:
+                continue
+            if isinstance(val, dict):
+                part_id = val.get("id")
+                qty = val.get("qty", 1)
+                price_at_share = val.get("price_at_share")
+            else:
+                # Legacy shape: bare part_id.
+                part_id = val
+                qty = 1
+                price_at_share = None
+            if part_id is None:
+                continue
+            id_to_slot[part_id] = slot
+            slot_meta[slot] = {"qty": qty, "price_at_share": price_at_share}
+
         if not id_to_slot:
             return {}
 
@@ -1530,10 +1564,9 @@ class Database:
         rows = self._conn.execute(
             f"""
             SELECT p.id, p.source, p.name, p.category, p.url, p.thumbnail_url, p.specs,
-                   p.latest_price AS price_pkr
+                   p.latest_price AS price_pkr, p.is_active, p.delisted_at
             FROM parts p
             WHERE p.id IN ({placeholders})
-              AND p.latest_price IS NOT NULL
             """,
             list(id_to_slot.keys()),
         ).fetchall()
@@ -1542,6 +1575,10 @@ class Database:
         for row in rows:
             d = dict(row)
             slot = id_to_slot[d["id"]]
+            meta = slot_meta[slot]
+            d["is_active"] = bool(d["is_active"])
+            d["qty"] = meta["qty"]
+            d["price_at_share"] = meta["price_at_share"]
             result[slot] = d
         return result
 
@@ -1561,7 +1598,7 @@ class Database:
         placeholders = ",".join("?" * len(part_ids))
         rows = self._conn.execute(
             f"""
-            SELECT id, is_active, last_seen_at, delisted_at
+            SELECT id, is_active, last_seen_at, delisted_at, latest_price
             FROM parts WHERE id IN ({placeholders})
             """,
             list(part_ids),
@@ -1571,6 +1608,7 @@ class Database:
                 "is_active": bool(r["is_active"]),
                 "last_seen_at": r["last_seen_at"],
                 "delisted_at": r["delisted_at"],
+                "latest_price": r["latest_price"],
             }
             for r in rows
         }
