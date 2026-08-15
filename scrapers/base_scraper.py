@@ -257,6 +257,14 @@ class BaseScraper(ABC):
         # request to this host at a time" when fetch() is called from
         # several threads — see the per-host lock note above _host_state.
         with st["lock"]:
+            # Re-check: the check above the lock can pass, then this thread
+            # queues on st["lock"] while another thread (holding it) trips
+            # the breaker and releases. Without re-checking here, the queued
+            # thread would go on to issue one more live request past the
+            # trip — a ban risk on hosts (amdhouse/techmatched/zestro) that
+            # ban bots, not just a cosmetic race.
+            if st["blocked"]:
+                raise HostBlocked(f"{host} is blocked for this run — skipped {url}")
             last_err: Exception | None = None
             for attempt in range(retries):
                 self._pace(host)

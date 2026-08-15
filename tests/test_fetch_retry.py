@@ -269,6 +269,55 @@ def test_success_resets_the_429_counter(monkeypatch):
     assert not blocked_hosts()
 
 
+def test_breaker_check_is_re_verified_inside_the_lock(monkeypatch):
+    """
+    G5: `if st["blocked"]: raise HostBlocked` used to run only BEFORE
+    `st["lock"]` is acquired, and was never re-checked once inside it. A
+    thread that queues on the lock while another thread trips the breaker
+    would therefore go on to issue one more live request after acquiring the
+    lock. That's a ban risk, not a cosmetic race, on the hosts
+    (amdhouse/techmatched/zestro) the breaker exists for in the first place.
+
+    Simulated deterministically: hold the host lock from the main thread (as
+    if a first fetch() call were mid-request), start a second thread calling
+    fetch() so it queues on that same lock, confirm it's actually blocked,
+    then trip the breaker and release the lock exactly like the real
+    with-block does. The queued thread must raise HostBlocked immediately on
+    acquiring the lock, without calling urlopen.
+    """
+    import threading
+
+    calls = script(monkeypatch, [b"<html>should never be reached</html>"])
+    scraper = DummyScraper()
+    host = base_scraper._host_of(URL)
+    st = base_scraper._state(host)
+
+    st["lock"].acquire()
+    result: dict = {}
+
+    def worker():
+        try:
+            scraper.fetch(URL)
+        except HostBlocked as e:
+            result["raised"] = e
+        except Exception as e:  # pragma: no cover - would indicate a bug
+            result["other"] = e
+
+    t = threading.Thread(target=worker)
+    t.start()
+    t.join(timeout=0.2)
+    assert t.is_alive(), "worker must still be queued on the held lock"
+
+    st["blocked"] = True
+    st["lock"].release()
+
+    t.join(timeout=2)
+    assert not t.is_alive(), "worker did not finish after the lock was released"
+
+    assert "raised" in result, result
+    assert calls == [], "a thread queued behind a tripped breaker must not fetch"
+
+
 def test_user_agent_is_not_browser_like():
     """
     The spoofed Chrome UA is what got amdhouse/zestro/techmatched 429ing every
