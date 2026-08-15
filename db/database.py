@@ -480,6 +480,25 @@ class Database:
             self._conn.execute(
                 "ALTER TABLE parts ADD COLUMN latest_price INTEGER DEFAULT NULL"
             )
+        # Backfill, not just add: list_parts() gates on
+        # `latest_price IS NOT NULL`, so a DB that gains the column above
+        # (or any row that otherwise ended up with a NULL latest_price)
+        # would serve an empty catalogue with HTTP 200 until someone
+        # remembered to run the standalone backfill script by hand.
+        # NULL-only so this can never fight that script or overwrite a
+        # fresher cached value — cheap to run every open when there are no
+        # NULLs (the WHERE makes it match zero rows and do no work).
+        self._conn.execute(
+            """
+            UPDATE parts SET latest_price = (
+                SELECT price_pkr FROM price_log
+                WHERE part_id = parts.id AND price_pkr IS NOT NULL
+                ORDER BY scraped_at DESC, id DESC
+                LIMIT 1
+            )
+            WHERE latest_price IS NULL
+            """
+        )
         run_cols = {
             r["name"]
             for r in self._conn.execute("PRAGMA table_info(scrape_runs)").fetchall()

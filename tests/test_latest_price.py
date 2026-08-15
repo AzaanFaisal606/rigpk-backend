@@ -80,3 +80,42 @@ def test_migrate_adds_column_to_existing_db(tmp_path):
     cols = {r["name"] for r in d._conn.execute("PRAGMA table_info(parts)").fetchall()}
     d.close()
     assert "latest_price" in cols
+
+
+def test_migrate_backfills_latest_price_for_existing_rows(tmp_path):
+    """A DB that gains the latest_price column must not serve an empty
+    catalogue: list_parts gates on latest_price IS NOT NULL, so _migrate()
+    must backfill it from price_log, not just add the column.
+    """
+    import sqlite3
+    path = tmp_path / "old.db"
+    con = sqlite3.connect(path)
+    con.execute(
+        "CREATE TABLE parts (id INTEGER PRIMARY KEY, source TEXT, source_id TEXT, "
+        "name TEXT, category TEXT, url TEXT, thumbnail_url TEXT, "
+        "is_active INTEGER NOT NULL DEFAULT 1, "
+        "last_seen_at TEXT, name_norm TEXT)"
+    )
+    con.execute(
+        "CREATE TABLE price_log (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "part_id INTEGER NOT NULL, price_pkr INTEGER, scraped_at TEXT NOT NULL)"
+    )
+    con.execute(
+        "INSERT INTO parts (id, source, source_id, name, category, url, "
+        "is_active, last_seen_at, name_norm) VALUES "
+        "(1, 'czone', 'rtx-5090', 'RTX 5090 Test Card', 'gpu', "
+        "'https://example.com/p/rtx-5090', 1, '2026-08-01T00:00:00Z', "
+        "' rtx 5090 test card ')"
+    )
+    con.execute(
+        "INSERT INTO price_log (part_id, price_pkr, scraped_at) VALUES "
+        "(1, 500000, '2026-08-01T00:00:00Z')"
+    )
+    con.commit()
+    con.close()
+
+    d = Database(path)
+    items, total = d.list_parts(category="gpu")
+    d.close()
+    assert total == 1
+    assert items[0]["price_pkr"] == 500000
