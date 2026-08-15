@@ -365,7 +365,7 @@ _CATEGORY_SPEC_KEYS: dict[str, list[str]] = {
     "cpu":         ["brand", "socket", "model"],
     "gpu":         ["brand", "vram", "model"],
     "ram":         ["brand", "ddr_type", "speed", "capacity"],
-    "motherboard": ["brand", "socket", "chipset"],
+    "motherboard": ["brand", "socket", "chipset", "form_factor"],
     "psu":         ["brand", "wattage", "rating"],
     "case":        ["brand", "form_factor"],
     "cooling":     ["brand", "type", "aio_size", "fan_size"],
