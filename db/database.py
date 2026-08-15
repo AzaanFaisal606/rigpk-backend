@@ -1292,15 +1292,27 @@ class Database:
         for (category, group_type, group_key), by_date in series.items():
             dates = sorted(by_date)
             level: Optional[float] = None
+            anchored = False
             for i, date in enumerate(dates):
                 prices_now = by_date[date]
-                if i == 0:
-                    # Anchor the chain at the real price level of the first date.
+                if not anchored:
+                    # Anchor the chain at the first date whose OWN basket
+                    # meets _TREND_MIN_BASKET. The anchor sets the level for
+                    # every later point in the chain, so a too-small anchor
+                    # (e.g. basket_size=1) undercuts the churn-neutrality the
+                    # matched-basket rewrite was built for just as much as a
+                    # too-small mid-series point does (handled below) — G7.
+                    # A too-small date is skipped, not the whole series
+                    # dropped: the group may simply not have enough listings
+                    # yet and gain them on a later date.
+                    if len(prices_now) < self._TREND_MIN_BASKET:
+                        continue
                     basket = prices_now
                     matched = list(basket.values())
                     level = _median(matched)
                     basket_size = len(matched)
                     method = "matched_basket_median"
+                    anchored = True
                 else:
                     prev = by_date[dates[i - 1]]
                     shared = set(prev) & set(prices_now)
