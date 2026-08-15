@@ -32,7 +32,7 @@ _TEST_TIMEOUT = 0.2
 
 
 class _FakeDB:
-    """Stand-in swapped onto a live ThreadSafeDatabase's ._db to simulate
+    """Stand-in installed via `ThreadSafeDatabase._set_owner_db` to simulate
     failure modes without needing a real hung network call or a live libsql
     connection."""
 
@@ -77,7 +77,7 @@ def test_hung_call_times_out_and_does_not_wedge_later_calls(seeded_db):
     (30s) `_CALL_TIMEOUT` -- see module docstring for why.
     """
     wrapper = ThreadSafeDatabase(seeded_db, call_timeout=_TEST_TIMEOUT)
-    wrapper._db = _FakeDB()
+    wrapper._set_owner_db(_FakeDB())
 
     result_holder = {}
 
@@ -168,11 +168,66 @@ def test_transient_error_retries_exactly_once_and_succeeds(seeded_db, monkeypatc
 def test_sql_error_is_never_retried(seeded_db):
     wrapper = ThreadSafeDatabase(seeded_db)
     fake = _FakeDB()
-    wrapper._db = fake
+    wrapper._set_owner_db(fake)
 
     with pytest.raises(ValueError):
         wrapper.always_bad_sql()
 
     assert fake.calls == 1  # no retry attempted
+
+    wrapper.close()
+
+
+def test_abandoned_owner_thread_never_leaks_its_connection_to_new_owner(seeded_db):
+    """
+    Regression for the two-owner-threads race: `_connect_if_needed` used to
+    read/write a single `self._db` instance attribute shared by whichever
+    thread happened to be running a task at the time. An old owner thread
+    that is still draining its queue after `shutdown(wait=False)` (a queued
+    task can start running well after the timeout/rebuild that abandoned
+    it) could connect on ITS thread and publish that connection into the
+    same slot a brand-new owner thread was about to read — a connection
+    escaping the thread that created it (permanent sqlite3.ProgrammingError,
+    or silent cross-thread cursor sharing on libsql).
+
+    Exercises `_connect_if_needed` directly on two real OS threads, ordered
+    so the "old" thread connects first and the "new" thread connects
+    second — exactly the ordering that let the old code's shared `self._db`
+    leak the old thread's connection into the new thread's subsequent reads.
+    """
+    wrapper = ThreadSafeDatabase(seeded_db)
+
+    old_connected = threading.Event()
+    result = {}
+
+    def old_owner_thread():
+        # Simulates a queued task on an abandoned executor finally getting
+        # to run its connect step, after the timeout/rebuild that swapped
+        # in a new owner has already happened.
+        result["old_db"] = wrapper._connect_if_needed()
+        old_connected.set()
+
+    def new_owner_thread():
+        old_connected.wait(5)
+        result["new_db_1"] = wrapper._connect_if_needed()
+        # Read again — must still be THIS thread's own connection, never
+        # overwritten by the old (abandoned) thread's connect above.
+        result["new_db_2"] = wrapper._connect_if_needed()
+
+    t_old = threading.Thread(target=old_owner_thread)
+    t_new = threading.Thread(target=new_owner_thread)
+    t_old.start()
+    t_old.join(timeout=5)
+    t_new.start()
+    t_new.join(timeout=5)
+
+    assert result["new_db_1"] is result["new_db_2"], (
+        "new owner thread's connection changed between two reads on its "
+        "own thread"
+    )
+    assert result["new_db_1"] is not result["old_db"], (
+        "new owner thread observed the abandoned old owner thread's "
+        "Database instance"
+    )
 
     wrapper.close()

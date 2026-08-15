@@ -54,7 +54,7 @@ def test_stats_issues_few_queries(client):
     client.get("/api/parts?category=gpu&limit=1")  # force the lazy connect
 
     inst = client.app.dependency_overrides[get_database]()
-    real_db = inst._db
+    real_db = inst._owner_db()
     calls: list = []
     real_db._conn = _CountingConn(real_db._conn, calls)
 

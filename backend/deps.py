@@ -136,16 +136,62 @@ class ThreadSafeDatabase:
         # construction time, not baked in as a default-arg, so it also picks
         # up a monkeypatched `deps._CALL_TIMEOUT` when not explicitly passed.
         self._path = path
-        self._db: Database | None = None
+        # NOT a shared instance attribute: connection storage below is a
+        # threading.local, one slot per real OS thread. See the class
+        # docstring for why a shared `self._db` is unsafe even with a lock
+        # protecting the read-modify-write — the hazard is a *second* owner
+        # thread (an abandoned one, still draining its queue after
+        # `ThreadPoolExecutor.shutdown(wait=False)`) publishing a connection
+        # it built into the slot the *current* owner reads from. A
+        # threading.local has no such shared slot to race on in the first
+        # place: each OS thread's `.db` attribute lives in a namespace no
+        # other thread can see or write, by Python's guarantee, not by any
+        # lock this class remembers to take. That makes it airtight rather
+        # than merely narrower than the old race window.
+        self._local = threading.local()
         self._swap_lock = threading.Lock()
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="db-owner")
         self._call_timeout = _CALL_TIMEOUT if call_timeout is None else call_timeout
 
     def _connect_if_needed(self) -> Database:
-        # Only ever called from inside a task running ON the owner thread.
-        if self._db is None:
-            self._db = Database(self._path)
-        return self._db
+        # Only ever called from inside a task running ON the owner thread —
+        # so `self._local.db` here is that thread's own slot, untouched by
+        # whatever any other (including an abandoned) owner thread is doing
+        # to ITS OWN `self._local.db`.
+        db = getattr(self._local, "db", None)
+        if db is None:
+            db = Database(self._path)
+            self._local.db = db
+        return db
+
+    def _owner_db(self) -> Database | None:
+        """
+        Return whatever `Database` is currently connected on the owner
+        thread, without creating a new connection — or None if the owner
+        hasn't connected yet. Marshaled like every real call: `self._local`
+        is a genuine per-OS-thread slot, so reading it from the calling
+        thread would see the CALLER's own (unrelated, almost always empty)
+        slot, never the owner's. Test-only seam; production code never
+        needs to peek at the connection object itself.
+        """
+        with self._swap_lock:
+            executor = self._executor
+        return executor.submit(lambda: getattr(self._local, "db", None)).result(
+            timeout=self._call_timeout
+        )
+
+    def _set_owner_db(self, db: Any) -> None:
+        """
+        Install `db` as the owner thread's connection without a real
+        connect — marshaled onto the owner thread for the same reason as
+        `_owner_db`. Test-only, for simulating failure modes (a hung call,
+        a flaky reconnect) without a live network connection.
+        """
+        with self._swap_lock:
+            executor = self._executor
+        executor.submit(lambda: setattr(self._local, "db", db)).result(
+            timeout=self._call_timeout
+        )
 
     def _replace_owner(self, *, wait_for_old: bool) -> None:
         """
@@ -161,11 +207,15 @@ class ThreadSafeDatabase:
         True` is used after a synchronous transient error, where the old
         owner thread's task has already returned (that's how we got the
         exception to react to), so waiting for shutdown is instant.
+
+        No `self._db = None` here (there is no such shared slot anymore):
+        the new owner thread starts with an empty `threading.local` slot of
+        its own regardless of what the old owner thread's slot holds, so
+        there is nothing to reset.
         """
         new_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="db-owner")
         with self._swap_lock:
             old_executor, self._executor = self._executor, new_executor
-            self._db = None  # reconnect lazily, on the new owner thread, on next use
         old_executor.shutdown(wait=wait_for_old)
 
     def _run(self, task: Callable[[], Any]) -> Any:
@@ -197,10 +247,12 @@ class ThreadSafeDatabase:
             return executor.submit(task).result(timeout=self._call_timeout)
 
     def __getattr__(self, name: str):
-        # Reading the attribute off self._db (to get a bound method) has to
-        # happen on the owner thread too now, since self._db can be None
-        # (not yet connected) or get swapped out mid-flight by a rebuild —
-        # so the whole lookup-and-call is wrapped in one task.
+        # Reading the attribute off the connected Database (to get a bound
+        # method) has to happen on the owner thread too now, since it may
+        # not be connected yet, or the owner thread itself may get swapped
+        # out mid-flight by a rebuild — so the whole lookup-and-call is
+        # wrapped in one task, run via `_connect_if_needed()` on whichever
+        # thread ends up executing it.
         def _call(*args, __name=name, **kwargs):
             def task():
                 db = self._connect_if_needed()
@@ -210,14 +262,23 @@ class ThreadSafeDatabase:
 
         return _call
 
+    def _close_local_db(self) -> None:
+        # Runs ON the owner thread: close (and forget) THIS thread's own
+        # slot, never another thread's — closing a sqlite3/libsql
+        # connection off the thread that created it is exactly the hazard
+        # this whole class exists to avoid.
+        db = getattr(self._local, "db", None)
+        if db is not None:
+            db.close()
+            self._local.db = None
+
     def close(self) -> None:
         with self._swap_lock:
-            executor, db = self._executor, self._db
-        if db is not None:
-            try:
-                executor.submit(db.close).result(timeout=self._call_timeout)
-            except Exception:
-                pass
+            executor = self._executor
+        try:
+            executor.submit(self._close_local_db).result(timeout=self._call_timeout)
+        except Exception:
+            pass
         # wait=False: if the owner thread is (still) stuck on a hung call,
         # shutdown must not block process/app teardown waiting for it.
         executor.shutdown(wait=False)
