@@ -152,12 +152,17 @@ class _FlakyOnceConn:
     def commit(self):
         self.commit_calls += 1
         if self.commit_calls == 1:
-            raise ValueError("connection reset by peer")
+            # A connect-time-shaped marker (provably before anything could
+            # have reached the server) — stays in the unconditional tier,
+            # unlike "connection reset"/"timed out"/"broken pipe" (see the
+            # F4 tests below), so this still exercises _retry_transient's
+            # normal retry path.
+            raise ValueError("temporarily unavailable")
 
     def rollback(self):
         self.rollback_calls += 1
         if self.rollback_calls == 1:
-            raise ValueError("connection reset by peer")
+            raise ValueError("temporarily unavailable")
 
 
 def test_commit_retries_on_transient_marker():
@@ -197,4 +202,104 @@ def test_commit_does_not_retry_on_read_only_marker():
     assert fake.commit_calls == 1, (
         "commit() finalizes writes — a response-read failure is ambiguous "
         "there too, so it must not be retried"
+    )
+
+
+# --- F4 regression: "connection reset", "timed out" and "broken pipe" are
+# reachable AFTER the server already executed a statement (an ack that got
+# lost), same ambiguity class as the Hrana body-read marker above — they
+# must not live in the unconditionally-safe tier. ---
+
+
+class _AmbiguousMarkerCursor:
+    """Fakes a cursor whose execute() always fails with a connection-drop
+    style message reachable after the server already ran the statement."""
+
+    def __init__(self, message="connection reset by peer"):
+        self.calls = 0
+        self._message = message
+
+    def execute(self, sql, params):
+        self.calls += 1
+        raise ValueError(self._message)
+
+
+class _FlakyOnceAmbiguousCursor:
+    def __init__(self, message="connection reset by peer"):
+        self.calls = 0
+        self._message = message
+
+    def execute(self, sql, params):
+        self.calls += 1
+        if self.calls == 1:
+            raise ValueError(self._message)
+
+
+@pytest.mark.parametrize(
+    "message", ["connection reset by peer", "operation timed out", "broken pipe"]
+)
+def test_ambiguous_marker_retries_a_select(message):
+    fake = _FlakyOnceAmbiguousCursor(message)
+    cur = _Cursor(fake)
+
+    cur.execute("SELECT id FROM parts")
+
+    assert fake.calls == 2, f"a SELECT must retry past {message!r}"
+
+
+@pytest.mark.parametrize(
+    "message", ["connection reset by peer", "operation timed out", "broken pipe"]
+)
+def test_ambiguous_marker_not_retried_for_a_write(message):
+    fake = _AmbiguousMarkerCursor(message)
+    cur = _Cursor(fake)
+
+    with pytest.raises(ValueError):
+        cur.execute("INSERT INTO parts (name) VALUES (?)", ("x",))
+
+    assert fake.calls == 1, (
+        f"an INSERT must NOT retry on {message!r} — the statement may already "
+        "have executed server-side, and retrying would double-insert"
+    )
+
+
+def test_general_is_transient_excludes_the_ambiguous_connection_markers():
+    """
+    Same property as test_general_is_transient_excludes_the_read_only_marker
+    above, for the three markers this fix relocated: backend/deps.py's
+    `_is_transient_error` (which gates replaying an ENTIRE marshaled call,
+    possibly a write) must never treat these as unconditionally safe.
+    """
+    for message in ("connection reset by peer", "operation timed out", "broken pipe"):
+        exc = ValueError(message)
+        assert libsql_adapter._is_transient(exc) is False, message
+        assert libsql_adapter._is_transient_read_only(exc) is True, message
+
+
+class _AmbiguousMarkerOnCommitConn:
+    def __init__(self):
+        self.commit_calls = 0
+
+    def commit(self):
+        self.commit_calls += 1
+        raise ValueError("connection reset by peer")
+
+
+def test_commit_does_not_retry_on_ambiguous_connection_marker():
+    """
+    commit() finalizes writes, same as the Hrana-marker case above — an
+    ambiguous "the ack may have been lost after the server ran it" failure
+    must not be retried there either, now that these three markers carry
+    that same ambiguity instead of the old (incorrect) "provably before
+    the server saw it" classification.
+    """
+    fake = _AmbiguousMarkerOnCommitConn()
+    conn = _wrap_fake_conn(fake)
+
+    with pytest.raises(ValueError, match="connection reset"):
+        conn.commit()
+
+    assert fake.commit_calls == 1, (
+        "commit() must not retry on a marker that may mean the write "
+        "already landed server-side"
     )

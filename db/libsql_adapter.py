@@ -45,19 +45,25 @@ import libsql
 #
 # `backend/deps.py` also calls into `_is_transient` (via `_is_transient_error`)
 # to decide whether to rebuild-and-retry an ENTIRE marshaled call — which may
-# be a write (e.g. `upsert_products`). This set must stay restricted to
-# failures that provably happened before the statement reached the server;
-# anything that could mean "the server ran it and only the response was lost"
-# belongs in `_TRANSIENT_READ_ONLY_MARKERS` below instead, never here.
+# be a write (e.g. `upsert_products`). This set — and `_is_transient`, and
+# `_retry_transient`'s use of it for commit()/rollback() — GUARANTEES only
+# this: every member can ONLY mean "the attempt never reached, or never was
+# accepted by, the server" (a DNS/lookup failure, a refused or otherwise
+# rejected connection attempt). It must never contain anything that could
+# ALSO mean "the server ran the statement and only the acknowledgement was
+# lost" — that ambiguity is exactly what `_TRANSIENT_READ_ONLY_MARKERS`
+# below exists to isolate, and reachable-after-execution markers used to sit
+# here by mistake (see the historical note there) until an audit found that
+# `_Cursor.executemany` and `backend/deps.py`'s whole-call replay were both
+# retrying writes on them, risking a double-insert / double-mint. Anything
+# that could mean "the server ran it and only the response was lost" belongs
+# in `_TRANSIENT_READ_ONLY_MARKERS` instead, never here.
 _TRANSIENT_MARKERS = (
     "dns error",
     "failed to lookup",
     "error trying to connect",
-    "connection reset",
     "connection refused",
-    "timed out",
     "temporarily unavailable",
-    "broken pipe",
 )
 
 # Failures that only prove the RESPONSE read broke — the request may already
@@ -67,7 +73,8 @@ _TRANSIENT_MARKERS = (
 # by `_Cursor._run` when the statement being retried is known read-only (see
 # `_is_readonly_sql`) — never added to `_TRANSIENT_MARKERS`/`_is_transient`,
 # which `backend/deps.py` also uses to gate retrying arbitrary (possibly
-# write) calls.
+# write) calls, and never consulted by `_retry_transient` (commit/rollback
+# also finalize writes and get no special exemption from this ambiguity).
 _TRANSIENT_READ_ONLY_MARKERS = (
     # Observed live rebuilding price trends against Turso:
     # `ValueError: Hrana: cursor error: cursor error: error reading a body
@@ -78,6 +85,16 @@ _TRANSIENT_READ_ONLY_MARKERS = (
     # wrappers ("cursor error" appears twice above), so the outer framing
     # isn't stable.
     "unexpected eof during chunk size line",
+    # Relocated here from `_TRANSIENT_MARKERS` (an audit finding): all three
+    # are reachable AFTER the server already executed a statement — a reset
+    # or a dropped pipe can arrive while the ack is in flight back to the
+    # client, and "timed out" during a response read is the exact same
+    # shape as the Hrana EOF case above, just a different underlying cause.
+    # None of the three prove the request never reached the server, so none
+    # of them belong in the unconditionally-safe tier.
+    "connection reset",
+    "timed out",
+    "broken pipe",
 )
 _MAX_ATTEMPTS = 4
 _BASE_BACKOFF = 0.6  # seconds; exponential: 0.6, 1.2, 2.4

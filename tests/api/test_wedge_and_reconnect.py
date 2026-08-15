@@ -51,13 +51,25 @@ class _FakeDB:
         return "should never be observed"
 
     def flaky_once(self):
-        # First call raises a connection-shaped error (matches one of
-        # db/libsql_adapter.py's _TRANSIENT_MARKERS: "connection reset").
-        # Second call (the retry) succeeds.
+        # First call raises a connect-time-shaped error (matches
+        # db/libsql_adapter.py's _TRANSIENT_MARKERS: "temporarily
+        # unavailable" -- provably before any statement could have reached
+        # the server, so safe to retry regardless of what the marshaled
+        # call does). Second call (the retry) succeeds.
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("temporarily unavailable")
+        return "ok-after-retry"
+
+    def flaky_once_ambiguous(self):
+        # First call raises a marker that's reachable AFTER the server
+        # already ran the statement (see db/libsql_adapter.py's
+        # _TRANSIENT_READ_ONLY_MARKERS and the F4 fix) -- must NOT be
+        # retried here, since this whole marshaled call could be a write.
         self.calls += 1
         if self.calls == 1:
             raise RuntimeError("connection reset by peer")
-        return "ok-after-retry"
+        return "should never be observed"
 
     def always_bad_sql(self):
         # A real SQL-shaped error (e.g. a constraint violation) -- must
@@ -174,6 +186,32 @@ def test_sql_error_is_never_retried(seeded_db):
         wrapper.always_bad_sql()
 
     assert fake.calls == 1  # no retry attempted
+
+    wrapper.close()
+
+
+def test_ambiguous_marker_is_never_replayed_at_the_outer_layer(seeded_db):
+    """
+    F4 regression, deps.py side: `ThreadSafeDatabase._run` must not replay
+    an ENTIRE marshaled call (which may be a write, e.g. `create_shared_build`
+    minting and inserting a new code) on a marker that's reachable after the
+    server already ran whatever the call did. "connection reset" used to sit
+    in db/libsql_adapter.py's unconditionally-safe `_TRANSIENT_MARKERS`,
+    which `_is_transient_error` consults here -- it has since moved to the
+    read-only-only tier, so the outer layer must now treat it the same as
+    any ordinary, non-retried error: raise immediately, exactly once.
+    """
+    wrapper = ThreadSafeDatabase(seeded_db)
+    fake = _FakeDB()
+    wrapper._set_owner_db(fake)
+
+    with pytest.raises(RuntimeError, match="connection reset"):
+        wrapper.flaky_once_ambiguous()
+
+    assert fake.calls == 1, (
+        "the outer layer replayed a call on an ambiguous marker -- for a "
+        "write, that could double-execute it"
+    )
 
     wrapper.close()
 
