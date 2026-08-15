@@ -2,6 +2,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from typing import Any, Optional
 from fastapi import APIRouter, Query, HTTPException, Response, Depends
 from pydantic import BaseModel
@@ -120,8 +121,41 @@ _FIXED_SAFE_ERROR_MESSAGES: frozenset[str] = frozenset(
 )
 _HTTP_STATUS_PHRASE_RE = re.compile(r"^Fetch failed — site returned HTTP [45]\d{2}$")
 
+# ---------------------------------------------------------------------------
+# Per-source rate limit on the full-detail log line below.
+#
+# /api/stats is public and .github/workflows/keepwarm.yml pings it every 10
+# minutes (144x/day) on top of real traffic. While a source stays broken,
+# get_stats() calls _safe_error() once per source per request, and it used to
+# unconditionally log the untruncated error every single call — ~1000 lines a
+# week of exactly the content this classifier exists to keep out of the
+# public response. Logging once per (source, exact error text) per window
+# keeps the full detail available server-side without the flood; a *new*
+# error text for a source still logs immediately, since that's a genuinely
+# new thing to know about.
+# ---------------------------------------------------------------------------
+_ERROR_LOG_WINDOW_SECONDS = 3600
+_last_logged_source_error: dict[str, tuple[str, float]] = {}
 
-def _safe_error(error: str | None) -> str | None:
+
+def _should_log_for_source(source: str, stripped: str) -> bool:
+    """
+    True at most once per (source, exact error text) per
+    _ERROR_LOG_WINDOW_SECONDS; True immediately again if `stripped` differs
+    from what was last logged for this source. Updates the bookkeeping as a
+    side effect of the check (module-level, one process per API instance).
+    """
+    now = time.monotonic()
+    cached = _last_logged_source_error.get(source)
+    if cached is not None:
+        cached_error, cached_at = cached
+        if cached_error == stripped and (now - cached_at) < _ERROR_LOG_WINDOW_SECONDS:
+            return False
+    _last_logged_source_error[source] = (stripped, now)
+    return True
+
+
+def _safe_error(error: str | None, *, source: str | None = None) -> str | None:
     """
     Deny-by-default classifier for the `error` text stored in scrape_runs
     and surfaced through source_health() into /api/stats, which drives the
@@ -141,6 +175,10 @@ def _safe_error(error: str | None) -> str | None:
     `Database.record_scrape_run`. This function only guards what leaves the
     `/api/stats` response boundary — storage and logs are unaffected.
 
+    `source`, when given, rate-limits that server-side log via
+    `_should_log_for_source` — see its docstring. Callers that don't pass one
+    (direct/unit calls) always log, same as before this existed.
+
     `None` means "no error" (the DB column was NULL / the run succeeded)
     and is passed through as `None`. Any other falsy-after-strip value — an
     empty string, an exception whose str() was empty, a whitespace-only
@@ -152,10 +190,12 @@ def _safe_error(error: str | None) -> str | None:
 
     stripped = error.strip()
     if not stripped:
-        logger.error("scrape run failed with an empty error message")
+        if source is None or _should_log_for_source(source, stripped):
+            logger.error("scrape run failed with an empty error message")
         return _SAFE_ERROR_FALLBACK
 
-    logger.error("scrape run error (full detail, pre-redaction): %s", stripped)
+    if source is None or _should_log_for_source(source, stripped):
+        logger.error("scrape run error (full detail, pre-redaction): %s", stripped)
 
     first = stripped.splitlines()[0].strip()
     if not first:
@@ -177,8 +217,8 @@ def _safe_error(error: str | None) -> str | None:
 @router.get("/stats", response_model=StatsResponse)
 def get_stats(db: Database = Depends(get_database)):
     data = db.stats()
-    for health in data["sources"].values():
-        health["last_error"] = _safe_error(health.get("last_error"))
+    for source_name, health in data["sources"].items():
+        health["last_error"] = _safe_error(health.get("last_error"), source=source_name)
     return data
 
 
