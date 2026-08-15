@@ -33,6 +33,7 @@ reintroduce a call to `conn.executescript()` against a remote connection.
 from __future__ import annotations
 
 import sqlite3
+import threading
 import time
 from typing import Any, Iterable, Optional, Sequence
 
@@ -81,6 +82,82 @@ _TRANSIENT_READ_ONLY_MARKERS = (
 _MAX_ATTEMPTS = 4
 _BASE_BACKOFF = 0.6  # seconds; exponential: 0.6, 1.2, 2.4
 
+# A retry loop below has no way to know, on its own, how much of the
+# caller's overall time budget is left — `backend/deps.py` wraps a marshaled
+# call in its own `_CALL_TIMEOUT` (30s default), and this module's retries
+# used to restart their own 4.2s sleep budget with no awareness of that outer
+# clock at all. Two independent retry budgets stacked (an inner one here, an
+# outer one in deps.py that could ALSO retry once) meant one transient error
+# could cost up to ~2x the documented wedge-breaker before a caller ever saw
+# a result.
+#
+# `deadline_scope` lets a caller (only `backend/deps.py` today) publish ONE
+# absolute deadline that every retry loop in this module — both `_Cursor._run`
+# and `_retry_transient` — checks before sleeping for another attempt, so
+# the retries here spend from the SAME budget the caller is bounding its
+# `future.result(timeout=...)` by, not a separate one layered on top.
+#
+# threading.local, not a module-level variable: this module's retry loops
+# run wherever the caller's task happens to execute — for `backend/deps.py`
+# that is always the single owner thread, but nothing here should assume
+# only one thread ever calls in. A bare module attribute would let two
+# concurrent owner threads (from two independent ThreadSafeDatabase
+# instances, e.g. in tests) stomp each other's deadline.
+_deadline_local = threading.local()
+
+
+class deadline_scope:
+    """
+    Context manager: publish an absolute deadline (`time.monotonic() +
+    seconds`) that this module's retry loops honor for their remaining
+    lifetime, on the CURRENT thread only. Nests correctly (restores the
+    previous value, if any, on exit) though nesting isn't expected in
+    practice. Outside any scope, `_deadline_remaining` returns None,
+    meaning "no bound" — the original unrestricted-retry behavior, still
+    used by anything that talks to `db/database.py` directly (scripts,
+    tests) rather than through `backend/deps.py`'s marshaling.
+    """
+
+    __slots__ = ("_seconds", "_deadline", "_prev")
+
+    def __init__(self, seconds: float):
+        self._seconds = max(0.0, seconds)
+
+    def __enter__(self) -> "deadline_scope":
+        self._deadline = time.monotonic() + self._seconds
+        self._prev = getattr(_deadline_local, "value", None)
+        _deadline_local.value = self._deadline
+        return self
+
+    def __exit__(self, *exc_info) -> bool:
+        _deadline_local.value = self._prev
+        return False
+
+
+def _deadline_remaining() -> Optional[float]:
+    """Seconds left on the current thread's published deadline, or None if
+    no `deadline_scope` is active (unrestricted retries)."""
+    deadline = getattr(_deadline_local, "value", None)
+    if deadline is None:
+        return None
+    return deadline - time.monotonic()
+
+
+def _bounded_backoff(default: float) -> Optional[float]:
+    """
+    How long the next retry attempt should sleep, honoring the active
+    deadline: `default` when there is no active deadline or plenty of room
+    left; less than `default` (down to 0) when the deadline is close; None
+    when there is no time left at all and the retry loop must stop instead
+    of sleeping and trying again.
+    """
+    remaining = _deadline_remaining()
+    if remaining is None:
+        return default
+    if remaining <= 0:
+        return None
+    return min(default, remaining)
+
 
 def _is_transient(exc: Exception) -> bool:
     m = str(exc).lower()
@@ -109,7 +186,15 @@ def _retry_transient(fn):
         except ValueError as e:
             last_exc = e
             if _is_transient(e) and attempt < _MAX_ATTEMPTS - 1:
-                time.sleep(_BASE_BACKOFF * (2 ** attempt))
+                backoff = _bounded_backoff(_BASE_BACKOFF * (2 ** attempt))
+                if backoff is None:
+                    # Active deadline (see `deadline_scope`) has already
+                    # expired — another attempt has no realistic chance to
+                    # both run and be waited on by the caller. Surface the
+                    # transient error now instead of eating into time the
+                    # caller no longer has.
+                    raise
+                time.sleep(backoff)
                 continue
             raise
     raise last_exc  # pragma: no cover - unreachable, mirrors _Cursor._run
@@ -205,7 +290,13 @@ class _Cursor:
                     raise mapped from e  # constraint error — never retry
                 transient = _is_transient(e) or (readonly and _is_transient_read_only(e))
                 if transient and attempt < _MAX_ATTEMPTS - 1:
-                    time.sleep(_BASE_BACKOFF * (2 ** attempt))
+                    backoff = _bounded_backoff(_BASE_BACKOFF * (2 ** attempt))
+                    if backoff is None:
+                        # Active deadline (see `deadline_scope`) has already
+                        # expired — stop retrying instead of spending time
+                        # the caller no longer has.
+                        raise
+                    time.sleep(backoff)
                     continue
                 raise
         # Unreachable given the branches above (every path returns or raises),

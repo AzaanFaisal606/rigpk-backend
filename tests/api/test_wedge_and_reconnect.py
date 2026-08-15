@@ -231,3 +231,61 @@ def test_abandoned_owner_thread_never_leaks_its_connection_to_new_owner(seeded_d
     )
 
     wrapper.close()
+
+
+def test_transient_failure_at_both_layers_stays_within_one_call_timeout(
+    tmp_path, monkeypatch
+):
+    """
+    A call that fails transiently on BOTH db/libsql_adapter.py's own inner
+    retry loop AND backend/deps.py's outer retry must not cost ~2x
+    `call_timeout` end to end. Before this fix, the outer retry restarted a
+    FRESH `future.result(timeout=call_timeout)` instead of sharing the
+    first attempt's budget, and the inner loop had no idea an outer
+    deadline existed at all -- so it ran its full backoff schedule
+    regardless of how little time the caller had left, on EVERY outer
+    attempt.
+
+    _BASE_BACKOFF is shrunk (not _MAX_ATTEMPTS -- the retry COUNT is real)
+    so a full inner-loop exhaustion fits comfortably inside a small
+    `call_timeout`, and TWO of them don't -- that's what lets a real
+    (never mocked) clock tell "one shared budget" apart from "two
+    independent ones" in well under a second, per the instruction to
+    avoid a real 30s sleep.
+    """
+    from db import libsql_adapter
+
+    monkeypatch.setattr(libsql_adapter, "_BASE_BACKOFF", 0.1)
+    # One full inner exhaustion sleeps 0.1 + 0.2 + 0.4 = 0.7s (3 gaps
+    # between 4 attempts). Budget room for one exhaustion plus a little
+    # (so the fixed retry gets SOME room and still has to cut itself
+    # short), but nowhere near two full exhaustions (1.4s).
+    call_timeout = 1.0
+
+    wrapper = ThreadSafeDatabase(tmp_path / "t.db", call_timeout=call_timeout)
+
+    def always_transient():
+        # Matches db/libsql_adapter.py's _TRANSIENT_MARKERS, so both the
+        # inner loop (via _retry_transient) and the outer retry (via
+        # _is_transient_error) treat it as retryable.
+        raise ValueError("connection reset by peer")
+
+    def task():
+        return libsql_adapter._retry_transient(always_transient)
+
+    start = time.monotonic()
+    with pytest.raises((DatabaseTimeoutError, ValueError)):
+        wrapper._run(task)
+    elapsed = time.monotonic() - start
+
+    # Comfortably above one exhaustion (~0.7s) plus overhead, comfortably
+    # below two independent exhaustions (~1.4s) -- what this must never
+    # look like is the outer retry paying for a second full, un-bounded
+    # inner exhaustion on top of the first.
+    assert elapsed < call_timeout * 1.2, (
+        f"took {elapsed:.2f}s for call_timeout={call_timeout}s -- looks "
+        "like the outer retry restarted its own budget instead of sharing "
+        "one deadline with the inner retry loop"
+    )
+
+    wrapper.close()

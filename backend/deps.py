@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as _FutureTimeoutError
 from contextlib import asynccontextmanager
@@ -113,6 +114,32 @@ def _is_transient_error(exc: Exception) -> bool:
     from db.libsql_adapter import _is_transient  # local import: libsql optional offline
 
     return _is_transient(exc)
+
+
+def _deadline_scope(seconds: float):
+    """
+    Publish `seconds` as the active deadline for `db/libsql_adapter.py`'s
+    internal transient-retry loops (`_Cursor._run`, `_retry_transient`), on
+    whichever thread this is entered on — always the owner thread here,
+    since it's only ever used inside a task run via `ThreadSafeDatabase._run`.
+
+    Without this, a single marshaled call could restart its own inner retry
+    budget independently of the outer `future.result(timeout=...)` bound —
+    see `ThreadSafeDatabase._run` for the full accounting. Sharing one
+    deadline means the inner loop can never outlive the outer one.
+
+    Deferred import for the same reason as `_is_transient_error` above, with
+    an extra fallback: if `libsql` genuinely isn't installed (pure local
+    SQLite dev), there is no retry loop to bound in the first place, so a
+    no-op context manager is correct, not just a workaround.
+    """
+    try:
+        from db.libsql_adapter import deadline_scope  # local import: libsql optional offline
+    except ImportError:
+        from contextlib import nullcontext
+
+        return nullcontext()
+    return deadline_scope(seconds)
 
 
 class ThreadSafeDatabase:
@@ -219,9 +246,26 @@ class ThreadSafeDatabase:
         old_executor.shutdown(wait=wait_for_old)
 
     def _run(self, task: Callable[[], Any]) -> Any:
+        # ONE deadline for this whole call, first attempt and retry alike.
+        # Previously the retry branch below called `future.result(timeout=
+        # self._call_timeout)` again — a FRESH `_call_timeout`, not the time
+        # left on the original one. Combined with db/libsql_adapter.py's own
+        # inner retry loop (4 attempts, its own backoff) restarting on every
+        # attempt too, one transient failure could cost up to ~2x
+        # `_call_timeout` end to end before a caller saw any result. Now
+        # both this outer retry and every inner retry loop
+        # (`_deadline_scope`, consulted by `_Cursor._run`/`_retry_transient`)
+        # spend from this single absolute deadline.
         with self._swap_lock:
             executor = self._executor
-        future = executor.submit(task)
+        deadline = time.monotonic() + self._call_timeout
+
+        def _bounded_task() -> Any:
+            remaining = max(0.0, deadline - time.monotonic())
+            with _deadline_scope(remaining):
+                return task()
+
+        future = executor.submit(_bounded_task)
         try:
             return future.result(timeout=self._call_timeout)
         except _FutureTimeoutError as exc:
@@ -239,12 +283,21 @@ class ThreadSafeDatabase:
             if not _is_transient_error(exc):
                 raise  # ordinary SQL error (e.g. a constraint violation) — never retried
             # Connection-level failure (dead / idle-dropped connection).
-            # Rebuild once and retry this exact call exactly once; if the
-            # retry also fails, let that exception propagate.
+            # Rebuild the owner regardless (so later calls aren't stuck on
+            # the same dead connection), but only actually retry THIS call
+            # if the shared deadline still has room — otherwise the retry
+            # would just be a second, doomed wait past a budget the caller
+            # has already been told is exhausted.
             self._replace_owner(wait_for_old=True)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise DatabaseTimeoutError(
+                    f"database call did not complete within {self._call_timeout}s "
+                    "(no time left for a retry after a transient-error rebuild)"
+                ) from exc
             with self._swap_lock:
                 executor = self._executor
-            return executor.submit(task).result(timeout=self._call_timeout)
+            return executor.submit(_bounded_task).result(timeout=remaining)
 
     def __getattr__(self, name: str):
         # Reading the attribute off the connected Database (to get a bound
