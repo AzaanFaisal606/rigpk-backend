@@ -58,14 +58,13 @@ _DEFAULT_DB = Path(os.getenv("DB_PATH", str(Path(__file__).parent.parent / "data
 _REMOTE_SCHEMA_APPLIED: set[str] = set()
 
 # Opt-in for running schema/migrations against a remote (Turso) target. See
-# _check_remote_migration_allowed() below.
+# _remote_migration_mode() below.
 _ALLOW_REMOTE_MIGRATIONS_ENV = "ALLOW_REMOTE_MIGRATIONS"
 
 
-def _check_remote_migration_allowed(target: str, allowed: bool) -> None:
+def _remote_migration_mode(allow: bool | None) -> str:
     """
-    Refuse to run schema/migrations against a remote target unless the
-    caller explicitly opted in.
+    Decide what opening a REMOTE target does about schema/migrations.
 
     Database() used to run _apply_schema()/_migrate() unconditionally on
     every construction, remote or local. That meant any ad hoc script,
@@ -75,19 +74,40 @@ def _check_remote_migration_allowed(target: str, allowed: bool) -> None:
     delisted_at, idx_parts_cat_active_price all landed outside any intended
     migration window).
 
-    Refusal is a loud RuntimeError, not a silent skip: silently skipping
-    the migration and continuing on would let a caller serve requests
-    against a schema it never confirmed is current, which is worse than
-    failing to start.
+    Three outcomes, because there are genuinely three kinds of caller:
+
+    "run"     — allow=True, or ALLOW_REMOTE_MIGRATIONS=1. The caller owns the
+                schema: migration scripts (via scripts/migrations/_guard.py,
+                which sets the env var only after confirming the target) and
+                the scrape orchestrators.
+    "skip"    — allow=False. The caller has explicitly declared it does not
+                own the schema and must not touch it: the API server, the
+                Discord notifier, ad hoc read paths. It connects normally
+                and never runs DDL.
+    "refuse"  — allow is None and the env var is unset. Nobody has said
+                anything, so this is the ad hoc REPL/notebook case the drift
+                came from. Raise loudly.
+
+    "skip" is not the same as the silent skip that would be wrong here.
+    A caller passing False has stated it doesn't manage the schema, and a
+    reader that cannot migrate cannot drift the schema; refusing to start
+    would only take the API down for a schema it was never going to change.
     """
-    if allowed:
-        return
+    if allow is True:
+        return "run"
+    if allow is False:
+        return "skip"
+    return "run" if os.getenv(_ALLOW_REMOTE_MIGRATIONS_ENV) == "1" else "refuse"
+
+
+def _refuse_remote_migration(target: str) -> None:
     raise RuntimeError(
         f"Refusing to run schema/migrations against remote database "
         f"{target!r} without explicit opt-in — this would apply schema "
         "changes to a live remote target. Pass allow_remote_migrations=True "
-        f"to Database()/get_db(), or set {_ALLOW_REMOTE_MIGRATIONS_ENV}=1 in "
-        "the environment, before opening this connection."
+        f"to Database()/get_db(), or set {_ALLOW_REMOTE_MIGRATIONS_ENV}=1, to "
+        "migrate it; pass allow_remote_migrations=False if this caller only "
+        "reads and writes rows and does not manage the schema."
     )
 
 
@@ -428,13 +448,9 @@ class Database:
         *,
         allow_remote_migrations: bool | None = None,
     ):
-        # None means "defer to the environment" — explicit True/False from a
-        # caller always wins over ALLOW_REMOTE_MIGRATIONS.
-        self._allow_remote_migrations = (
-            allow_remote_migrations
-            if allow_remote_migrations is not None
-            else os.getenv(_ALLOW_REMOTE_MIGRATIONS_ENV) == "1"
-        )
+        # "run" / "skip" / "refuse" — see _remote_migration_mode(). Only
+        # consulted when the resolved target is remote.
+        self._remote_migration_mode = _remote_migration_mode(allow_remote_migrations)
         url = os.getenv("TURSO_DATABASE_URL")
         if url:
             # Remote Turso (libSQL). `path` is ignored in this mode.
@@ -477,7 +493,14 @@ class Database:
         if self._remote and self._target in _REMOTE_SCHEMA_APPLIED:
             return
         if self._remote:
-            _check_remote_migration_allowed(self._target, self._allow_remote_migrations)
+            if self._remote_migration_mode == "refuse":
+                _refuse_remote_migration(self._target)
+            if self._remote_migration_mode == "skip":
+                # The caller declared it does not own the schema. Connect
+                # without running a single DDL statement — and do NOT mark
+                # the target as applied, so a later opt-in caller in the
+                # same process still migrates.
+                return
         with open(_SCHEMA, encoding="utf-8") as f:
             script = f.read()
         for stmt in _split_sql_statements(script):
@@ -1807,7 +1830,9 @@ def get_db(
     When TURSO_DATABASE_URL is set the connection is remote (Turso/libSQL) and
     `path` is ignored; otherwise it is the local SQLite file at `path`.
 
-    allow_remote_migrations: see Database.__init__ / _check_remote_migration_allowed.
+    allow_remote_migrations: True to migrate a remote target, False to connect
+    without touching its schema, None (default) to refuse a remote target
+    outright unless ALLOW_REMOTE_MIGRATIONS=1. See _remote_migration_mode().
     """
     return Database(path, allow_remote_migrations=allow_remote_migrations)
 

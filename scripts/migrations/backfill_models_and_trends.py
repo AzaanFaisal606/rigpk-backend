@@ -64,7 +64,8 @@ def run():
     _backfill_specs()
 
     print("\nRebuilding price_trends from price_log ...")
-    with get_db(DB_PATH) as db:
+    # Rewrites price_trends rows; owns no schema.
+    with get_db(DB_PATH, allow_remote_migrations=False) as db:
         n = db.rebuild_price_trends()
     print(f"price_trends rebuilt: {n} rows written.")
 

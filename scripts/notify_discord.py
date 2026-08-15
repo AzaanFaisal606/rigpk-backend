@@ -77,7 +77,10 @@ def _fmt_source_lines(health: dict[str, dict]) -> str:
 
 
 def build_embed(parts_status: str, prebuilts_status: str) -> dict:
-    with get_db(DB_PATH) as db:
+    # Read-only reporting — never migrates the DB it reports on. Without the
+    # explicit False this raises against Turso, which is where scrape.yml
+    # always runs it.
+    with get_db(DB_PATH, allow_remote_migrations=False) as db:
         parts_health = db.source_health(kind="parts")
         prebuilt_health = db.source_health(kind="prebuilt")
         stats = db.stats()

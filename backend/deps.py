@@ -222,7 +222,12 @@ class ThreadSafeDatabase:
         # to ITS OWN `self._local.db`.
         db = getattr(self._local, "db", None)
         if db is None:
-            db = Database(self._path)
+            # allow_remote_migrations=False: the API server reads and writes
+            # rows, it does not own the schema. Against Turso it must connect
+            # without running a single DDL statement — migrating production
+            # from a request handler is the drift the guard exists to stop,
+            # and refusing to connect at all would be a total outage.
+            db = Database(self._path, allow_remote_migrations=False)
             self._local.db = db
         return db
 

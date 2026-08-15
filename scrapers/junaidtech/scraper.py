@@ -258,7 +258,8 @@ def main():
     sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..")))
     from db.database import get_db
     db_path = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "data", "ppc.db"))
-    with get_db(db_path) as db:
+    # Standalone smoke test — writes rows, never schema.
+    with get_db(db_path, allow_remote_migrations=False) as db:
         inserted = db.upsert_products(all_results)
         print(f"\nDB: {inserted} price rows written")
         s = db.stats()

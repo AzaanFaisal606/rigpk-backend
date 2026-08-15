@@ -199,7 +199,7 @@ def test_transient_error_retries_exactly_once_and_succeeds(seeded_db, monkeypatc
     real reconnect would land on a real (recovered) connection.
     """
     fake = _FakeDB()
-    monkeypatch.setattr(deps, "Database", lambda path: fake)
+    monkeypatch.setattr(deps, "Database", lambda path, **kwargs: fake)
     wrapper = ThreadSafeDatabase(seeded_db)
 
     result = wrapper.flaky_once()
