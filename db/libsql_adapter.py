@@ -96,6 +96,30 @@ _TRANSIENT_READ_ONLY_MARKERS = (
     "timed out",
     "broken pipe",
 )
+# The server has forgotten the Hrana stream this connection was talking over.
+# Observed live after the API sat idle: every subsequent request failed with
+#   ValueError: Hrana: `api error: `status=404 Not Found,
+#   body={"error":"stream not found: 5a0d73ea:ad6418"}``
+# and kept failing until the process was restarted — the connection is opened
+# once in `LibsqlConnection.__init__` and there was no path that ever opened
+# another. On Render's free tier, where the dyno idles between requests, that
+# is an outage that outlives the idle period rather than a blip.
+#
+# This is NOT a member of either tier above, and the distinction matters:
+#   * Not `_TRANSIENT_MARKERS` — those are retried on the SAME connection,
+#     which for a dead stream fails identically every attempt. Retrying is
+#     not the fix; reconnecting is.
+#   * Not `_TRANSIENT_READ_ONLY_MARKERS` — same reason.
+# A 404 also carries stronger information than either tier: the server has no
+# such stream, so it cannot have executed the statement on one. What it does
+# NOT tell us is whether an enclosing transaction was mid-flight when the
+# stream died — see `_Cursor._run` for why that, not execution ambiguity, is
+# what gates the replay.
+_STREAM_LOST_MARKERS = (
+    "stream not found",
+    "stream expired",
+)
+
 _MAX_ATTEMPTS = 4
 _BASE_BACKOFF = 0.6  # seconds; exponential: 0.6, 1.2, 2.4
 
@@ -184,6 +208,11 @@ def _is_transient(exc: Exception) -> bool:
 def _is_transient_read_only(exc: Exception) -> bool:
     m = str(exc).lower()
     return any(k in m for k in _TRANSIENT_READ_ONLY_MARKERS)
+
+
+def _is_stream_lost(exc: Exception) -> bool:
+    m = str(exc).lower()
+    return any(k in m for k in _STREAM_LOST_MARKERS)
 
 
 def _retry_transient(fn):
@@ -290,21 +319,55 @@ def _cols_index(description) -> tuple[Optional[tuple[str, ...]], Optional[dict[s
 class _Cursor:
     """Wraps a libsql cursor: maps errors on execute, wraps rows on fetch."""
 
-    def __init__(self, cur):
+    def __init__(self, cur, owner: "Optional[LibsqlConnection]" = None):
         self._cur = cur
+        # The connection that minted this cursor. Needed to rebuild a lost
+        # Hrana stream — `owner` is None only for the hand-built cursors in
+        # the adapter's own unit tests, which get the old raise-through
+        # behaviour.
+        self._owner = owner
+        # The last statement run on this cursor, as (callable, readonly), so a
+        # fetch that fails mid-response can re-run it. See `_fetch`.
+        self._replay: Optional[tuple[Any, bool]] = None
+        # Whether any row has already been handed to the caller from the
+        # current result set. Once it has, re-running the statement would
+        # restart the result set and hand back rows the caller already saw.
+        self._consumed = False
 
     # --- execution (error-mapped, transient-retried) ---
     def _run(self, fn, *, readonly: bool = False):
         last_exc: Optional[Exception] = None
         for attempt in range(_MAX_ATTEMPTS):
             try:
-                fn()
+                fn(self._cur)
+                self._replay = (fn, readonly)
+                self._consumed = False
                 return self
             except ValueError as e:
                 last_exc = e
                 mapped = _map_error(e)
                 if mapped is not None:
                     raise mapped from e  # constraint error — never retry
+                if _is_stream_lost(e) and self._owner is not None:
+                    # Heal the connection unconditionally, even when this
+                    # statement itself cannot be replayed: leaving a dead
+                    # stream in place is what turned one idle period into an
+                    # outage lasting until the next deploy. The next caller
+                    # gets a working connection either way.
+                    replay = self._owner._recover_stream(self)
+                    # Replaying is gated on the statement being read-only AND
+                    # no `with conn:` block being open. The transaction check
+                    # is the load-bearing half: a stream dying mid-transaction
+                    # takes the whole transaction with it, so replaying just
+                    # the failed statement on a fresh stream would run it
+                    # ALONE, outside the transaction its caller wrote. For
+                    # `rebuild_price_trends` — DELETE, then executemany INSERT,
+                    # inside one `with` — that would mean re-inserting every
+                    # trend row on top of the ones the lost DELETE never
+                    # removed.
+                    if replay and readonly and attempt < _MAX_ATTEMPTS - 1:
+                        continue
+                    raise
                 transient = _is_transient(e) or (readonly and _is_transient_read_only(e))
                 if transient and attempt < _MAX_ATTEMPTS - 1:
                     backoff = _bounded_backoff(_BASE_BACKOFF * (2 ** attempt))
@@ -327,25 +390,85 @@ class _Cursor:
         raise RuntimeError("libsql _Cursor._run exhausted retries without capturing an error")
 
     def execute(self, sql: str, params: Iterable[Any] = ()):
+        # `_run` passes the CURRENT raw cursor in rather than the closure
+        # capturing `self._cur` — a stream recovery swaps that attribute, and
+        # a captured reference would replay onto the dead cursor.
         p = tuple(params) if params else ()
-        return self._run(lambda: self._cur.execute(sql, p), readonly=_is_readonly_sql(sql))
+        return self._run(lambda cur: cur.execute(sql, p), readonly=_is_readonly_sql(sql))
 
     def executemany(self, sql: str, seq_of_params: Iterable[Iterable[Any]]):
         # Always a write (executemany is bulk INSERT/UPDATE in this codebase)
         # — never eligible for the read-only marker tier.
         seq = [tuple(p) for p in seq_of_params]
-        return self._run(lambda: self._cur.executemany(sql, seq))
+        return self._run(lambda cur: cur.executemany(sql, seq))
 
-    # --- fetching (row-wrapped) ---
+    # --- fetching (row-wrapped, transient-retried by re-running) ---
+    def _fetch(self, fn):
+        """
+        Run a fetch, re-running the whole statement if pulling the response
+        back fails transiently.
+
+        `_run` only ever covered `execute()`, but for a large streamed result
+        set the connection is still being read long after execute() returned —
+        and that is where it breaks. Live example, rebuilding price trends
+        against Turso over ~68k price_log rows:
+
+            File "db/libsql_adapter.py", in fetchall
+              rows = self._cur.fetchall()
+            ValueError: Hrana: `cursor error: ... error reading a body from
+            connection: unexpected EOF during chunk size line`
+
+        `_TRANSIENT_READ_ONLY_MARKERS` already named that exact failure, and
+        `_is_readonly_sql` already classified the statement — but no retry
+        wrapped the fetch, so the marker had no effect on the one call that
+        actually raises it.
+
+        A fetch cannot be retried on its own: the failed result set is gone,
+        so recovery means re-running the SELECT. That is why this is gated on
+        `readonly` (a write must never re-execute) and on `_consumed` (once a
+        row has been handed out, re-running would replay rows the caller
+        already has).
+        """
+        last_exc: Optional[Exception] = None
+        for attempt in range(_MAX_ATTEMPTS):
+            try:
+                return fn()
+            except ValueError as e:
+                last_exc = e
+                stream_lost = _is_stream_lost(e) and self._owner is not None
+                recoverable = (
+                    self._replay is not None
+                    and self._replay[1]          # the statement was read-only
+                    and not self._consumed
+                    and (stream_lost or _is_transient(e) or _is_transient_read_only(e))
+                )
+                if not recoverable or attempt == _MAX_ATTEMPTS - 1:
+                    raise
+                if stream_lost:
+                    # Reconnecting returns False inside a transaction, where
+                    # re-running the statement on a fresh stream would read
+                    # outside the transaction the caller believes it is in.
+                    if not self._owner._recover_stream(self):
+                        raise
+                else:
+                    backoff = _bounded_backoff(_BASE_BACKOFF * (2 ** attempt))
+                    if backoff is None:
+                        raise
+                    time.sleep(backoff)
+                self._replay[0](self._cur)   # re-run the SELECT
+        raise last_exc  # pragma: no cover - loop above always returns or raises
+
     def fetchone(self):
-        row = self._cur.fetchone()
+        row = self._fetch(self._cur.fetchone)
+        self._consumed = True
         if row is None:
             return None
         cols, idx = _cols_index(self._cur.description)
         return _Row(cols, idx, row) if cols else row
 
     def fetchall(self):
-        rows = self._cur.fetchall()
+        rows = self._fetch(self._cur.fetchall)
+        self._consumed = True
         cols, idx = _cols_index(self._cur.description)
         if not cols:
             return list(rows)
@@ -383,11 +506,43 @@ class LibsqlConnection:
     """
 
     def __init__(self, url: str, auth_token: Optional[str]):
+        # Kept so a lost Hrana stream can be rebuilt in place. The token is
+        # held only in memory, exactly as it already was inside the libsql
+        # connection object, and is never logged or surfaced in an error.
+        self._url = url
+        self._auth_token = auth_token
         self._conn = libsql.connect(url, auth_token=auth_token)
+        # True between `__enter__` and `__exit__`. Gates statement replay
+        # after a stream recovery — see `_Cursor._run`.
+        self._in_transaction = False
         self.row_factory = None  # accepted for API parity, ignored
 
+    def _recover_stream(self, cursor: "Optional[_Cursor]" = None) -> bool:
+        """
+        Rebuild the underlying libsql connection after its Hrana stream was
+        lost, and point `cursor` at a cursor on the new one.
+
+        Returns whether the caller's statement is safe to replay: True only
+        outside a `with conn:` block. Inside one, the transaction died with
+        the stream, so the only correct outcome is to surface the error and
+        let the caller redo the whole unit of work.
+
+        No lock: `db/database.py` marshals every call onto a single owner
+        thread (`ThreadSafeDatabase`), so two threads never reach here on one
+        connection. A failure to reconnect is left to propagate — a
+        connection that cannot be rebuilt is not a state worth hiding.
+        """
+        try:
+            self._conn.close()
+        except Exception:
+            pass  # already dead; closing is best-effort cleanup
+        self._conn = libsql.connect(self._url, auth_token=self._auth_token)
+        if cursor is not None:
+            cursor._cur = self._conn.cursor()
+        return not self._in_transaction
+
     def cursor(self) -> _Cursor:
-        return _Cursor(self._conn.cursor())
+        return _Cursor(self._conn.cursor(), owner=self)
 
     def execute(self, sql: str, params: Iterable[Any] = ()) -> _Cursor:
         return self.cursor().execute(sql, params)
@@ -411,24 +566,56 @@ class LibsqlConnection:
         )
 
     def commit(self):
-        _retry_transient(self._conn.commit)
+        # A lost stream is never replayed here — a commit finalizes writes,
+        # and the transaction it would have finalized no longer exists on the
+        # server. Reconnect so the process isn't wedged, then let the caller
+        # see that its transaction did not land.
+        try:
+            _retry_transient(self._conn.commit)
+        except ValueError as e:
+            if _is_stream_lost(e):
+                self._recover_stream()
+            raise
+        finally:
+            self._in_transaction = False
 
     def rollback(self):
-        if hasattr(self._conn, "rollback"):
+        if not hasattr(self._conn, "rollback"):
+            self._in_transaction = False
+            return
+        try:
             _retry_transient(self._conn.rollback)
+        except ValueError as e:
+            # A stream that no longer exists has already discarded whatever
+            # it was holding — the rollback's goal is met. Reconnect and
+            # swallow, rather than raising out of cleanup and masking the
+            # original exception that triggered the rollback.
+            if not _is_stream_lost(e):
+                raise
+            self._recover_stream()
+        finally:
+            self._in_transaction = False
 
     def close(self):
         self._conn.close()
 
     # `with conn:` — commit on clean exit, roll back on exception, like sqlite3.
     def __enter__(self):
+        self._in_transaction = True
         return self
 
     def __exit__(self, exc_type, exc, tb):
-        if exc_type is None:
-            self.commit()
-        else:
-            self.rollback()
+        # commit()/rollback() clear the flag themselves; the finally is here
+        # for the case where one of them raises on the way out, so a failed
+        # exit can't leave the connection permanently marked in-transaction
+        # and block every later stream recovery from replaying.
+        try:
+            if exc_type is None:
+                self.commit()
+            else:
+                self.rollback()
+        finally:
+            self._in_transaction = False
         return False
 
 

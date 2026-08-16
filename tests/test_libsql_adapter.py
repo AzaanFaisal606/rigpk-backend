@@ -140,6 +140,9 @@ def _wrap_fake_conn(fake):
     going through __init__ (which opens a real network connection)."""
     conn = object.__new__(libsql_adapter.LibsqlConnection)
     conn._conn = fake
+    conn._url = "libsql://fake"
+    conn._auth_token = None
+    conn._in_transaction = False
     conn.row_factory = None
     return conn
 
@@ -303,3 +306,304 @@ def test_commit_does_not_retry_on_ambiguous_connection_marker():
         "commit() must not retry on a marker that may mean the write "
         "already landed server-side"
     )
+
+
+# --- lost Hrana stream: the connection is opened once and lives for the
+# process, so when the server forgets its stream (observed after the API sat
+# idle) every later statement failed identically until a restart. Recovery is
+# a reconnect, not a retry — and replaying the failed statement is gated on
+# there being no open transaction to have lost. ---
+
+_STREAM_LOST_ERROR = (
+    'Hrana: `api error: `status=404 Not Found, '
+    'body={"error":"stream not found: 5a0d73ea:ad6418"}``'
+)
+
+
+class _StreamLostOnceCursor:
+    """Raw cursor whose first execute() reports a lost stream. A recovered
+    connection hands out a FRESH instance, so a replay lands on a cursor that
+    succeeds — mirroring the real thing, where the dead stream can never
+    succeed again no matter how many times it is retried."""
+
+    def __init__(self, dead: bool):
+        self.dead = dead
+        self.calls = 0
+
+    def execute(self, sql, params):
+        self.calls += 1
+        if self.dead:
+            raise ValueError(_STREAM_LOST_ERROR)
+
+    def executemany(self, sql, seq):
+        self.calls += 1
+        if self.dead:
+            raise ValueError(_STREAM_LOST_ERROR)
+
+
+class _ReconnectingConn:
+    """Underlying libsql connection: the first cursor is on a dead stream,
+    every cursor minted after a reconnect is live."""
+
+    def __init__(self):
+        self.reconnects = 0
+        self.closed = 0
+
+    def cursor(self):
+        return _StreamLostOnceCursor(dead=self.reconnects == 0)
+
+    def close(self):
+        self.closed += 1
+
+
+def _conn_that_reconnects(monkeypatch):
+    """A LibsqlConnection whose libsql.connect is faked: the object returned
+    the first time serves a dead stream, and reconnecting bumps its counter so
+    later cursors are live."""
+    fake = _ReconnectingConn()
+
+    def _fake_connect(url, auth_token=None):
+        fake.reconnects += 1
+        return fake
+
+    monkeypatch.setattr(libsql_adapter.libsql, "connect", _fake_connect)
+    conn = _wrap_fake_conn(fake)
+    return conn, fake
+
+
+def test_stream_lost_marker_is_not_in_either_transient_tier():
+    """
+    Retrying a dead stream on the same connection fails identically every
+    attempt — that is why this marker gets its own recovery path instead of
+    being added to either retry tier. `_is_transient` in particular is also
+    consulted by backend/deps.py to replay whole (possibly write) calls.
+    """
+    exc = ValueError(_STREAM_LOST_ERROR)
+    assert libsql_adapter._is_stream_lost(exc) is True
+    assert libsql_adapter._is_transient(exc) is False
+    assert libsql_adapter._is_transient_read_only(exc) is False
+
+
+def test_select_recovers_by_reconnecting_and_replaying(monkeypatch):
+    conn, fake = _conn_that_reconnects(monkeypatch)
+    cur = conn.cursor()          # cursor on the dead stream
+
+    cur.execute("SELECT 1")      # must not raise
+
+    assert fake.reconnects == 1, "the connection must be rebuilt exactly once"
+    assert fake.closed == 1, "the dead connection must be closed first"
+
+
+def test_write_reconnects_but_does_not_replay(monkeypatch):
+    """
+    A 404 proves the server never ran the statement, but not that an
+    enclosing transaction survived. Writes surface the error; the connection
+    is still healed so the next caller isn't stuck with a dead stream.
+    """
+    conn, fake = _conn_that_reconnects(monkeypatch)
+    cur = conn.cursor()
+
+    with pytest.raises(ValueError, match="stream not found"):
+        cur.execute("INSERT INTO parts (name) VALUES (?)", ("x",))
+
+    assert fake.reconnects == 1, "the connection must still be healed"
+
+
+def test_select_inside_a_transaction_does_not_replay(monkeypatch):
+    """
+    The transaction died with the stream. Replaying even a SELECT would hand
+    the caller a row read outside the transaction it believes it is in, and
+    would let a `with conn:` block continue past the point where its earlier
+    statements were silently discarded.
+    """
+    conn, fake = _conn_that_reconnects(monkeypatch)
+
+    with pytest.raises(ValueError, match="stream not found"):
+        with conn:
+            conn.cursor().execute("SELECT 1")
+
+    assert fake.reconnects == 1, "the connection must still be healed"
+
+
+def test_executemany_reconnects_but_does_not_replay(monkeypatch):
+    conn, fake = _conn_that_reconnects(monkeypatch)
+    cur = conn.cursor()
+
+    with pytest.raises(ValueError, match="stream not found"):
+        cur.executemany("INSERT INTO price_trends VALUES (?)", [(1,), (2,)])
+
+    assert fake.reconnects == 1
+
+
+class _StreamLostOnCommitConn:
+    def __init__(self):
+        self.commit_calls = 0
+        self.rollback_calls = 0
+        self.closed = 0
+
+    def commit(self):
+        self.commit_calls += 1
+        raise ValueError(_STREAM_LOST_ERROR)
+
+    def rollback(self):
+        self.rollback_calls += 1
+        raise ValueError(_STREAM_LOST_ERROR)
+
+    def cursor(self):
+        return _StreamLostOnceCursor(dead=False)
+
+    def close(self):
+        self.closed += 1
+
+
+def test_commit_reconnects_and_still_raises(monkeypatch):
+    """
+    The transaction the commit would have finalized no longer exists, so the
+    caller MUST learn its writes did not land — but the process must not be
+    left holding a dead connection either.
+    """
+    fake = _StreamLostOnCommitConn()
+    monkeypatch.setattr(libsql_adapter.libsql, "connect",
+                        lambda url, auth_token=None: fake)
+    conn = _wrap_fake_conn(fake)
+
+    with pytest.raises(ValueError, match="stream not found"):
+        conn.commit()
+
+    assert fake.commit_calls == 1, "a commit is never replayed"
+    assert fake.closed == 1, "the dead connection must still be rebuilt"
+
+
+def test_rollback_on_lost_stream_is_swallowed(monkeypatch):
+    """
+    A stream that no longer exists has already discarded what it held, so the
+    rollback's goal is met. Raising out of cleanup would mask the original
+    exception that caused the rollback.
+    """
+    fake = _StreamLostOnCommitConn()
+    monkeypatch.setattr(libsql_adapter.libsql, "connect",
+                        lambda url, auth_token=None: fake)
+    conn = _wrap_fake_conn(fake)
+
+    conn.rollback()  # must not raise
+
+    assert fake.closed == 1
+
+
+def test_failed_exit_still_clears_the_transaction_flag(monkeypatch):
+    """
+    `_in_transaction` gates every later replay. If a raising commit could
+    leave it set, one failed transaction would disable stream recovery for
+    the rest of the process's life.
+    """
+    fake = _StreamLostOnCommitConn()
+    monkeypatch.setattr(libsql_adapter.libsql, "connect",
+                        lambda url, auth_token=None: fake)
+    conn = _wrap_fake_conn(fake)
+
+    with pytest.raises(ValueError, match="stream not found"):
+        with conn:
+            pass
+
+    assert conn._in_transaction is False
+
+
+# --- the response-read failure surfaces on fetch, not execute: for a large
+# streamed result set the connection is still being read long after execute()
+# returned. The read-only marker tier existed for exactly this error and had
+# no effect there, because no retry wrapped the fetch. ---
+
+
+class _EofOnFetchCursor:
+    """execute() always succeeds; fetchall() fails the first N times with the
+    observed Hrana body-read error, then returns rows."""
+
+    def __init__(self, failures=1):
+        self.failures = failures
+        self.executes = 0
+        self.fetches = 0
+        self.description = (("id",),)
+
+    def execute(self, sql, params):
+        self.executes += 1
+
+    def executemany(self, sql, seq):
+        self.executes += 1
+
+    def fetchall(self):
+        self.fetches += 1
+        if self.fetches <= self.failures:
+            raise ValueError(_HRANA_EOF_ERROR)
+        return [(1,)]
+
+    def fetchone(self):
+        self.fetches += 1
+        if self.fetches <= self.failures:
+            raise ValueError(_HRANA_EOF_ERROR)
+        return (1,)
+
+
+def test_fetchall_reruns_the_select_on_a_response_read_failure():
+    fake = _EofOnFetchCursor()
+    cur = _Cursor(fake)
+    cur.execute("SELECT id FROM price_log")
+
+    rows = cur.fetchall()
+
+    assert len(rows) == 1
+    assert fake.executes == 2, "the SELECT must be re-run — the result set is gone"
+    assert fake.fetches == 2
+
+
+def test_fetchone_reruns_the_select_on_a_response_read_failure():
+    fake = _EofOnFetchCursor()
+    cur = _Cursor(fake)
+    cur.execute("SELECT id FROM parts WHERE id = 1")
+
+    assert cur.fetchone() is not None
+    assert fake.executes == 2
+
+
+def test_fetch_does_not_rerun_a_write():
+    """
+    Re-running an INSERT because its response read broke would double-insert
+    — the same ambiguity that keeps this marker out of the unconditional tier
+    on the execute path.
+    """
+    fake = _EofOnFetchCursor(failures=_MAX_ATTEMPTS)
+    cur = _Cursor(fake)
+    cur.execute("INSERT INTO parts (name) VALUES (?) RETURNING id", ("x",))
+
+    with pytest.raises(ValueError, match="unexpected EOF"):
+        cur.fetchone()
+
+    assert fake.executes == 1, "a write must never be re-run to satisfy a fetch"
+
+
+def test_fetch_gives_up_after_max_attempts():
+    fake = _EofOnFetchCursor(failures=_MAX_ATTEMPTS)
+    cur = _Cursor(fake)
+    cur.execute("SELECT id FROM price_log")
+
+    with pytest.raises(ValueError, match="unexpected EOF"):
+        cur.fetchall()
+
+    assert fake.fetches == _MAX_ATTEMPTS
+
+
+def test_fetch_does_not_rerun_once_rows_were_handed_out():
+    """
+    A second fetch on the same cursor must not restart the result set — the
+    caller would receive rows it has already processed.
+    """
+    fake = _EofOnFetchCursor(failures=0)
+    cur = _Cursor(fake)
+    cur.execute("SELECT id FROM price_log")
+    cur.fetchall()               # consumes the result set
+
+    fake.failures = _MAX_ATTEMPTS
+    fake.fetches = 0
+    with pytest.raises(ValueError, match="unexpected EOF"):
+        cur.fetchall()
+
+    assert fake.executes == 1, "an already-consumed cursor must not re-run its statement"
