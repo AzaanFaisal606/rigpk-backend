@@ -28,7 +28,7 @@ import sys
 from collections import Counter
 from typing import Iterable, Optional
 
-from scrapers.base_scraper import BaseScraper
+from scrapers.base_scraper import BaseScraper, is_http_404
 from scrapers.exceptions import ScrapeIncomplete
 
 
@@ -93,6 +93,28 @@ class ListingScraper(BaseScraper):
                 html = self.fetch(page_url)
                 failures = 0
             except Exception as exc:
+                # A 404 past page 1 is how a WooCommerce listing says "there
+                # is no page N" — the normal end of a category, not a fault.
+                # Counting it as a failure made short categories fail
+                # deterministically: techmatched's SSD listing is a single
+                # page of 16 products, so pages 2/3/4 all 404 and tripped
+                # MAX_CONSECUTIVE_FAILURES every single run. Measured across
+                # a full pass, that alone failed amdhouse, rbtechngames,
+                # redtech and techmatched outright, at byte-identical page
+                # numbers on repeat runs.
+                #
+                # `is_http_404` exists precisely to tell "page retired" from
+                # "something is actually wrong"; this template method was the
+                # one place that fetched pages and never consulted it.
+                #
+                # Page 1 is deliberately excluded: a 404 there means the
+                # category URL itself is dead, which IS a fault worth
+                # reporting. And this must not set `pages_skipped` — a page
+                # that never existed is not a page we failed to see, so it
+                # must not trigger the incomplete-scrape raise below and
+                # suppress the freshness sweep.
+                if page > 1 and is_http_404(exc):
+                    break
                 failures += 1
                 pages_skipped = True
                 if failures >= self.MAX_CONSECUTIVE_FAILURES:

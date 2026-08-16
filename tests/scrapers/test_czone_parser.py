@@ -160,3 +160,72 @@ def test_identical_page_every_offset_hits_the_page_cap(monkeypatch, load_fixture
     # this generous being hit at all means the collected rows aren't trusted
     # either, so no .partial_results is attached here.
     assert not hasattr(exc.value, "partial_results")
+
+
+def _http_404(url="http://x/page/2"):
+    """The exact shape BaseScraper.fetch() raises for a 404: a RuntimeError
+    whose __cause__ is the HTTPError (404 is in NO_RETRY_CODES)."""
+    import urllib.error
+    cause = urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+    err = RuntimeError(f"Failed to fetch {url}: HTTP 404")
+    err.__cause__ = cause
+    return err
+
+
+def test_a_404_past_page_one_ends_the_listing_cleanly(monkeypatch):
+    """
+    A WooCommerce category with fewer pages than the loop tries returns 404
+    for page N+1 — that is the end of the listing, not a fault. Counting it
+    as a failure made every short category fail deterministically:
+    techmatched's SSD listing is one page of 16 products, so pages 2/3/4 all
+    404 and tripped MAX_CONSECUTIVE_FAILURES on every single run.
+    """
+    import scrapers.czone.all_scraper as mod
+
+    monkeypatch.setattr(mod.time, "sleep", lambda *_a, **_k: None)
+    s = CzoneAllScraper()
+
+    page1 = [{"name": "p1", "price_pkr": 100, "url": "http://x/1",
+              "category": "", "source": "czone.com.pk",
+              "scraped_at": "t", "thumbnail_url": None}]
+    calls = {"n": 0}
+
+    def _fake_fetch(_url):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return "page1"
+        raise _http_404()
+
+    s.fetch = _fake_fetch
+    monkeypatch.setattr(s, "_extract_total", lambda _html: None)
+    monkeypatch.setattr(s, "_parse_page", lambda html: page1 if html == "page1" else [])
+
+    products = s.scrape("https://www.czone.com.pk/graphic-cards-pakistan-ppt.154.aspx")
+
+    assert products == page1, "page 1's harvest must be returned, not discarded"
+    assert calls["n"] == 2, "the 404 must stop the loop immediately, not retry pages 3 and 4"
+
+
+def test_a_404_on_page_one_is_still_a_failure(monkeypatch):
+    """
+    A dead category URL is a real fault — only a 404 PAST page 1 means "the
+    listing ended". Without this distinction a mistyped or retired category
+    would scrape zero products and report success, which then lets the
+    freshness sweep delist everything that category holds.
+    """
+    import scrapers.czone.all_scraper as mod
+
+    monkeypatch.setattr(mod.time, "sleep", lambda *_a, **_k: None)
+    s = CzoneAllScraper()
+    s.fetch = lambda _url: (_ for _ in ()).throw(_http_404("http://x/dead"))
+
+    with pytest.raises(ScrapeIncomplete) as exc:
+        s.scrape("https://www.czone.com.pk/graphic-cards-pakistan-ppt.154.aspx")
+
+    # Page 1's 404 counts as a real failure and sets the sticky
+    # `pages_skipped` flag, so the run still raises even though the page-2
+    # 404 is what breaks the loop. Asserting the type, not the wording: what
+    # must hold is that this never returns cleanly — a clean return is
+    # precisely what lets the freshness sweep delist the whole category.
+    assert isinstance(exc.value, ScrapeIncomplete)
+    assert not getattr(exc.value, "partial_results", None)
