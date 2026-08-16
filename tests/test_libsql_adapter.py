@@ -607,3 +607,52 @@ def test_fetch_does_not_rerun_once_rows_were_handed_out():
         cur.fetchall()
 
     assert fake.executes == 1, "an already-consumed cursor must not re-run its statement"
+
+
+class _EofThenStreamLostCursor:
+    """The exact live sequence: fetchall() fails with the body-read EOF, and
+    the re-run of the SELECT that recovery issues then fails with a lost
+    stream. Before the replay was guarded, that second error escaped the retry
+    loop entirely."""
+
+    def __init__(self):
+        self.executes = 0
+        self.fetches = 0
+        self.description = (("id",),)
+        self.recovered = False
+
+    def execute(self, sql, params):
+        self.executes += 1
+        # execute #1 = the caller's; #2 = the replay, onto the dead stream.
+        if self.executes == 2 and not self.recovered:
+            raise ValueError(_STREAM_LOST_ERROR)
+
+    def fetchall(self):
+        self.fetches += 1
+        if self.fetches == 1:
+            raise ValueError(_HRANA_EOF_ERROR)
+        return [(1,)]
+
+    def cursor(self):
+        # Stands in for both the raw connection and the raw cursor, so a
+        # reconnect keeps the same call counters.
+        return self
+
+
+def test_a_replay_that_hits_a_lost_stream_recovers_instead_of_escaping(monkeypatch):
+    fake = _EofThenStreamLostCursor()
+    conn = _wrap_fake_conn(fake)
+    # Reconnecting hands back the same fake, now flagged as recovered so its
+    # next execute() succeeds — matching a fresh stream on the same server.
+    def _fake_connect(url, auth_token=None):
+        fake.recovered = True
+        return fake
+    monkeypatch.setattr(libsql_adapter.libsql, "connect", _fake_connect)
+
+    cur = _Cursor(fake, owner=conn)
+    cur.execute("SELECT id FROM price_log")
+
+    rows = cur.fetchall()
+
+    assert len(rows) == 1
+    assert fake.executes == 3, "caller's execute, the failed replay, then the replay on a fresh stream"

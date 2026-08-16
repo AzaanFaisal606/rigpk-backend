@@ -455,7 +455,22 @@ class _Cursor:
                     if backoff is None:
                         raise
                     time.sleep(backoff)
-                self._replay[0](self._cur)   # re-run the SELECT
+                try:
+                    self._replay[0](self._cur)   # re-run the SELECT
+                except ValueError as re_exc:
+                    # The re-run can fail differently from the fetch that
+                    # triggered it. Observed live: a body-read EOF re-ran onto
+                    # a stream the server had since dropped, and the resulting
+                    # "stream not found" escaped this loop entirely — the next
+                    # iteration would otherwise have called fn() on a cursor
+                    # with no result set behind it. A lost stream is worth one
+                    # rebuild-and-retry here; anything else propagates.
+                    last_exc = re_exc
+                    if not (_is_stream_lost(re_exc) and self._owner is not None):
+                        raise
+                    if not self._owner._recover_stream(self):
+                        raise
+                    self._replay[0](self._cur)
         raise last_exc  # pragma: no cover - loop above always returns or raises
 
     def fetchone(self):
