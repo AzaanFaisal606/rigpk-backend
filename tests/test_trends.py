@@ -1,10 +1,11 @@
 """Unit tests for price-trend aggregation helpers and rebuild_price_trends."""
 import tempfile
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
 
-from db.database import _median, _trimmed_mean, get_db
+from db.database import _TREND_MAX_DATES, _median, _trimmed_mean, get_db
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -256,21 +257,31 @@ def test_median_even_used_count(db):
 
 # --- recent-scrapes window -------------------------------------------------
 
-_EIGHT_DATES = [f"2026-0{m}-01" for m in range(1, 9)]
+# Derived from the constant rather than hardcoded, so tuning the display
+# window is a one-line change instead of a test rewrite. Always three dates
+# more than the window, so there is always something for the cut to remove.
+_WINDOW = _TREND_MAX_DATES
+_MANY_DATES = [
+    (date(2026, 1, 5) + timedelta(weeks=i)).isoformat()
+    for i in range(_WINDOW + 3)
+]
+# The dates that fall OUTSIDE the window — seeding only these means a group
+# contributes no visible points at all.
+_OUTSIDE_DATES = _MANY_DATES[:-_WINDOW]
 
 
 def _seed_many_dates(db, n_parts=6):
-    """n_parts RTX 4070 listings priced across 8 scrape dates."""
+    """n_parts RTX 4070 listings priced across more dates than the window."""
     for i in range(n_parts):
         _seed(db, f"MSI RTX 4070 {i}", "gpu",
-              {d: 200000 + 1000 * j for j, d in enumerate(_EIGHT_DATES)})
+              {d: 200000 + 1000 * j for j, d in enumerate(_MANY_DATES)})
 
 
 def test_series_limited_to_last_five_scrapes(db):
     _seed_many_dates(db)
     db.rebuild_price_trends()
     dates = [r["scrape_date"] for r in db.get_price_trends("gpu", "RTX 4070")]
-    assert dates == _EIGHT_DATES[-5:]
+    assert dates == _MANY_DATES[-_WINDOW:]
 
 
 def test_series_window_is_opt_out(db):
@@ -278,14 +289,14 @@ def test_series_window_is_opt_out(db):
     _seed_many_dates(db)
     db.rebuild_price_trends()
     dates = [r["scrape_date"] for r in db.get_price_trends("gpu", "RTX 4070", max_dates=None)]
-    assert dates == _EIGHT_DATES
+    assert dates == _MANY_DATES
 
 
 def test_series_window_respects_explicit_size(db):
     _seed_many_dates(db)
     db.rebuild_price_trends()
     dates = [r["scrape_date"] for r in db.get_price_trends("gpu", "RTX 4070", max_dates=2)]
-    assert dates == _EIGHT_DATES[-2:]
+    assert dates == _MANY_DATES[-2:]
 
 
 def test_fewer_scrapes_than_window_returns_all(db):
@@ -304,7 +315,7 @@ def test_window_is_per_category_so_groups_share_an_axis(db):
     """
     _seed_many_dates(db)  # RTX 4070 across all 8 dates
     for i in range(6):    # RTX 4060 only in the first three
-        _seed(db, f"MSI RTX 4060 {i}", "gpu", dict.fromkeys(_EIGHT_DATES[:3], 90000))
+        _seed(db, f"MSI RTX 4060 {i}", "gpu", dict.fromkeys(_OUTSIDE_DATES, 90000))
     db.rebuild_price_trends()
 
     rows = db.get_price_trends("gpu")
@@ -312,7 +323,7 @@ def test_window_is_per_category_so_groups_share_an_axis(db):
     for r in rows:
         by_group.setdefault(r["group_key"], []).append(r["scrape_date"])
 
-    assert by_group["RTX 4070"] == _EIGHT_DATES[-5:]
+    assert by_group["RTX 4070"] == _MANY_DATES[-_WINDOW:]
     # Every one of the 4060's dates falls outside the window, so it contributes
     # no points at all rather than back-filling with older ones.
     assert "RTX 4060" not in by_group

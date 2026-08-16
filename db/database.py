@@ -200,6 +200,33 @@ def _trimmed_band(values: list[int], frac: float = 0.05) -> tuple[int, int]:
     return kept[0], kept[-1]
 
 
+def _ratio_index(ratios: list[float], frac: float = 0.05) -> float:
+    """
+    The period-over-period price relative for a matched basket: a trimmed
+    geometric mean (a Jevons elementary index), not a median.
+
+    The median was the original choice and it was too blunt for baskets this
+    small. `_median` of a list of ratios returns EXACTLY 1.0 whenever half or
+    more of the basket held its price — which, for retailers that reprice a
+    couple of SKUs at a time, is most weeks. Measured over the live
+    catalogue: median-of-ratios left 38 of 101 multi-point series perfectly
+    flat with a median total movement of 0.93%; the trimmed geometric mean
+    leaves 27 flat at 2.07%. The 13 series that differ are ones where a real
+    subset repriced and the median discarded it, so the chart claimed
+    "unchanged" about a group that had moved.
+
+    Geometric, not arithmetic: price relatives compound, so a +10% followed
+    by a -10% must return to the start. The same trim as `_trimmed_band`
+    (n>=5 only) guards the tail without pretending it can help a 3-item
+    basket, where there is no non-extreme element to fall back on.
+    """
+    s = sorted(ratios)
+    if len(s) >= 5:
+        k = max(1, math.ceil(len(s) * frac))
+        s = s[k: len(s) - k] or s
+    return math.exp(sum(math.log(r) for r in s) / len(s))
+
+
 # Terms that — regardless of category — flag an item as non-PC-part junk.
 # Matched case-insensitively against the product name.
 _GLOBAL_BLOCKLIST: tuple[str, ...] = (
@@ -296,7 +323,15 @@ _MIN_PRICE: dict[str, int] = {
 # are irregular, so this is "the last N scrapes", not a time window. At ~300px
 # of sparkline the points and their hover targets get unusable past a handful.
 # Temporary ceiling until the trends page grows a proper range filter.
-_TREND_MAX_DATES = 5
+#
+# Raised 5 -> 10. At 5 the page was mostly dead-flat lines and the window was
+# the biggest single reason: measured on the live catalogue, 63 of 93 visible
+# multi-point series (68%) were perfectly flat inside the last 5 buckets, vs
+# 27 of 101 (27%) over full history. The movement is real, it is just older
+# than five weeks — the recent tail happens to be quiet. 10 covers every
+# bucket currently held (cpu/gpu 10, ram 8) and still leaves ~32px between
+# points on a 300px sparkline, so the hover targets stay usable.
+_TREND_MAX_DATES = 10
 
 
 def _blocked_by(name: str, category: str) -> Optional[str]:
@@ -1358,14 +1393,35 @@ class Database:
                         level = _median(list(basket.values()))
                         method = "matched_basket_median"
                     else:
-                        ratios = sorted(prices_now[p] / prev[p] for p in shared)
-                        ratio = _median(ratios)
+                        ratio = _ratio_index([prices_now[p] / prev[p] for p in shared],
+                                             self._TREND_BAND_FRAC)
                         level = level * ratio
                         method = "matched_basket_chained"
 
                 matched_prices = list(basket.values())
                 used = len(matched_prices)
-                band_lo, band_hi = _trimmed_band(matched_prices, self._TREND_BAND_FRAC)
+                raw_lo, raw_hi = _trimmed_band(matched_prices, self._TREND_BAND_FRAC)
+                # Re-express the band at the chained level.
+                #
+                # `level` is an INDEX — anchored weeks ago and moved only by
+                # matched price relatives — while raw_lo/raw_hi are absolute
+                # prices from this date's basket. Storing the two side by side
+                # meant they answered different questions, and they drifted
+                # apart: on the live catalogue 94 of 727 points (12.9%, across
+                # 23 series) had center_price falling OUTSIDE its own
+                # [min_price, max_price]. That is not a display glitch, it is
+                # two incompatible quantities in adjacent columns — and it
+                # rendered as a chart whose line ran along the frame edge, or
+                # vanished entirely, above or below its band.
+                #
+                # Scaling by the basket's own median makes the band a relative
+                # dispersion carried to wherever the index sits, so the center
+                # is inside it by construction. On an anchor date `level` IS
+                # that median, so this is the identity there.
+                raw_center = _median(matched_prices)
+                scale = (level / raw_center) if raw_center else 1.0
+                band_lo = round(raw_lo * scale)
+                band_hi = round(raw_hi * scale)
                 records.append((
                     category, group_type, group_key, date,
                     len(prices_now), used, round(level), method,
