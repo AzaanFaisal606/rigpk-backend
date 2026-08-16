@@ -85,3 +85,52 @@ def test_normal_mode_still_persists(tmp_path, monkeypatch):
     fresh = Database(db_file)
     assert fresh.stats()["total_parts"] == 1
     fresh.close()
+
+
+def test_a_successful_with_block_does_not_strand_the_wrapped_connection():
+    """
+    The proxy's success path must still unwind the wrapped connection, not
+    just return early.
+
+    Returning early skipped the wrapped __exit__ entirely, so any state that
+    connection tracks across a with-block was never cleared. Against Turso
+    that stranded LibsqlConnection._in_transaction at True after the first
+    dry-run write, which permanently disabled Hrana stream recovery — every
+    later read that lost its stream raised instead of reconnecting, and a
+    full dry run died on the trend rebuild's first large SELECT.
+    """
+    from db.database import _NoCommitConnection
+
+    class _Tracking:
+        def __init__(self):
+            self.in_transaction = False
+            self.commits = 0
+            self.rollbacks = 0
+
+        def __enter__(self):
+            self.in_transaction = True
+            return self
+
+        def __exit__(self, *exc):
+            self.in_transaction = False
+            return False
+
+        def commit(self):
+            self.commits += 1
+
+        def rollback(self):
+            self.rollbacks += 1
+            self.in_transaction = False
+
+    inner = _Tracking()
+    proxy = _NoCommitConnection(inner)
+
+    with proxy:
+        pass
+
+    assert inner.in_transaction is False, (
+        "the wrapped connection must not stay marked in-transaction after a "
+        "clean exit"
+    )
+    assert inner.commits == 0, "a dry run must never commit"
+    assert inner.rollbacks == 1, "the suppressed work must be discarded, not left dangling"

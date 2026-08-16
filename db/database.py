@@ -468,10 +468,23 @@ class _NoCommitConnection:
         return self
 
     def __exit__(self, *exc):
-        # `with self._conn:` commits on success in sqlite3. Swallow the success
-        # path so a context-managed write is suppressed too; still roll back on
-        # error so an exception behaves normally.
+        # `with self._conn:` commits on success in sqlite3. Suppress that
+        # commit so a context-managed write is dropped too; still roll back
+        # on error so an exception behaves normally.
+        #
+        # Rolling back explicitly on the success path, rather than returning
+        # early and leaving the work dangling until close(): returning early
+        # skips the wrapped connection's own __exit__ entirely, so anything
+        # that connection tracks across a with-block never gets unwound. That
+        # stranded LibsqlConnection._in_transaction at True after the first
+        # dry-run write, which permanently disabled Hrana stream recovery for
+        # the rest of the process — every later read that lost its stream
+        # raised instead of reconnecting, and a full dry run died on the
+        # trend rebuild's first big SELECT. The rollback discards exactly the
+        # work the no-op commit was already discarding, so the dry run's
+        # observable behaviour is unchanged.
         if exc[0] is None:
+            self._wrapped.rollback()
             return False
         return self._wrapped.__exit__(*exc)
 
