@@ -64,6 +64,35 @@ _TRANSIENT_MARKERS = (
     "error trying to connect",
     "connection refused",
     "temporarily unavailable",
+    # `ValueError: Hrana: `api error: `status=400 Bad Request, body={"error":
+    # "Protocol error: failed to parse http request: invalid token"}``
+    #
+    # The Hrana endpoint's HTTP layer rejected the request before it ever
+    # became a statement, so nothing ran — which is what earns it a place in
+    # THIS tier rather than `_TRANSIENT_READ_ONLY_MARKERS`. Given how loudly
+    # the comment above warns against guessing at that distinction, it was
+    # measured rather than reasoned about: 400 sequential single-row INSERTs
+    # of distinct keys against a live Turso scratch table, one of which
+    # (n=13) failed with this error. The table then held exactly 399 rows,
+    # n=13 absent and every other key present exactly once. The server had
+    # not executed it, so replaying it cannot double-apply.
+    #
+    # Rate measured on the same connection path: 1/150 and 1/400 statements,
+    # i.e. ~0.25-0.7%, arriving at random statements with no relation to
+    # connection age (a fresh connection fails its 5th statement as readily
+    # as its 500th). Reproduced with the bare `libsql` client and no part of
+    # this adapter involved, so it is a property of the transport, not of
+    # anything here. It is also self-healing: every statement after a failure
+    # succeeds on the same connection, so retrying in place is right and
+    # reconnecting (the `_STREAM_LOST_MARKERS` treatment) is not.
+    #
+    # Why it matters at all: per-statement odds this small only become
+    # visible when a run issues enough statements. `upsert_products` used to
+    # issue ~16,700 per scrape, which at 0.5% is a certainty — that is the
+    # error that killed a full pipeline run at the 2h20m mark, and it was
+    # misread at the time as a connection degrading with age. Batching cut
+    # that to ~60 statements per run; this marker covers the rest.
+    "failed to parse http request",
 )
 
 # Failures that only prove the RESPONSE read broke — the request may already

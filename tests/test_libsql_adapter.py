@@ -656,3 +656,101 @@ def test_a_replay_that_hits_a_lost_stream_recovers_instead_of_escaping(monkeypat
 
     assert len(rows) == 1
     assert fake.executes == 3, "caller's execute, the failed replay, then the replay on a fresh stream"
+
+
+# --- the Hrana HTTP-parse 400 -------------------------------------------
+#
+# `status=400 Bad Request, body={"error":"Protocol error: failed to parse
+# http request: invalid token"}` — the endpoint's HTTP layer rejected the
+# request before it became a statement. Unlike every other marker in this
+# file, its placement was settled by measurement, not inference: 400 live
+# single-row INSERTs of distinct keys, one of which failed this way, left
+# exactly 399 rows with the failed key absent and no key duplicated. It goes
+# in the unconditionally-safe tier because the server provably never ran it.
+
+_HRANA_PARSE_ERROR = (
+    'Hrana: `api error: `status=400 Bad Request, body={"error":"Protocol '
+    'error: failed to parse http request: invalid token"}``'
+)
+
+
+class _ParseErrorOnceCursor:
+    def __init__(self):
+        self.executes = 0
+
+    def execute(self, sql, params):
+        self.executes += 1
+        if self.executes == 1:
+            raise ValueError(_HRANA_PARSE_ERROR)
+        return self
+
+    @property
+    def description(self):
+        return [("n",)]
+
+    def fetchall(self):
+        return [(1,)]
+
+
+def test_a_write_retries_on_the_http_parse_error():
+    """
+    The whole point of the tier choice: this must retry a WRITE. A full
+    scrape issues ~60 statements against Turso at a measured ~0.5% per
+    statement failure rate, so without this an upsert fails roughly one run
+    in three.
+    """
+    fake = _ParseErrorOnceCursor()
+    cur = _Cursor(fake)
+
+    cur.execute("INSERT INTO price_log (part_id, price_pkr) VALUES (?, ?)", (1, 2))
+
+    assert fake.executes == 2, "the write must be replayed, not surfaced"
+
+
+def test_http_parse_error_is_unconditionally_transient():
+    """
+    backend/deps.py gates replaying an ENTIRE marshaled call (possibly a
+    write) on `_is_transient`. This marker is one of the few that may say
+    yes there — the server never executed the statement, so a whole-call
+    replay cannot double-apply.
+    """
+    exc = ValueError(_HRANA_PARSE_ERROR)
+    assert libsql_adapter._is_transient(exc) is True
+    assert libsql_adapter._is_transient_read_only(exc) is False
+
+
+def test_http_parse_error_is_not_treated_as_a_lost_stream():
+    """
+    Reconnecting is the wrong response: the fault is per-request and the
+    same connection keeps working afterwards (measured — every statement
+    after a failure succeeded on that connection). Treating it as a lost
+    stream would throw away a healthy connection on every blip.
+    """
+    assert libsql_adapter._is_stream_lost(ValueError(_HRANA_PARSE_ERROR)) is False
+
+
+def test_commit_retries_on_the_http_parse_error():
+    class _Conn:
+        def __init__(self):
+            self.commit_calls = 0
+
+        def commit(self):
+            self.commit_calls += 1
+            if self.commit_calls == 1:
+                raise ValueError(_HRANA_PARSE_ERROR)
+
+    fake = _Conn()
+    conn = _wrap_fake_conn(fake)
+    conn.commit()
+    assert fake.commit_calls == 2
+
+
+def test_a_sql_parse_error_is_not_swept_up_by_the_marker():
+    """
+    The marker matches the HTTP request parser, not SQL parsing. A genuine
+    malformed-SQL error must still surface on the first attempt — retrying
+    it four times would only delay a deterministic failure.
+    """
+    exc = ValueError("Hrana: SQL_PARSE_ERROR: near \"SELCT\": syntax error")
+    assert libsql_adapter._is_transient(exc) is False
+    assert libsql_adapter._is_transient_read_only(exc) is False
