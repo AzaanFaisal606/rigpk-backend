@@ -754,3 +754,84 @@ def test_a_sql_parse_error_is_not_swept_up_by_the_marker():
     exc = ValueError("Hrana: SQL_PARSE_ERROR: near \"SELCT\": syntax error")
     assert libsql_adapter._is_transient(exc) is False
     assert libsql_adapter._is_transient_read_only(exc) is False
+
+
+# --- the Hrana truncated-response JSON error ----------------------------
+#
+# `cursor error: `json error: `EOF while parsing a value at line 1 column
+# 0``` — the reply body ended before any JSON arrived. Same class as the
+# chunk-size EOF above and gated the same way: the request reached the
+# server, so a write must not be replayed on it.
+
+_HRANA_JSON_EOF_ERROR = (
+    "Hrana: `cursor error: `json error: `EOF while parsing a value "
+    "at line 1 column 0```"
+)
+
+
+class _JsonEofThenRowsCursor:
+    def __init__(self):
+        self.executes = 0
+        self.fetches = 0
+
+    def execute(self, sql, params):
+        self.executes += 1
+        return self
+
+    @property
+    def description(self):
+        return [("id",)]
+
+    def fetchall(self):
+        self.fetches += 1
+        if self.fetches == 1:
+            raise ValueError(_HRANA_JSON_EOF_ERROR)
+        return [(7,)]
+
+
+def test_a_select_whose_response_body_was_empty_is_retried():
+    fake = _JsonEofThenRowsCursor()
+    cur = _Cursor(fake)
+    cur.execute("SELECT id FROM price_log")
+
+    rows = cur.fetchall()
+
+    assert [r["id"] for r in rows] == [7]
+    assert fake.executes == 2, "the SELECT is re-run to get a fresh response"
+
+
+def test_json_eof_never_replays_a_write():
+    """
+    The request reached the server, so the statement may already have run.
+    An INSERT must surface the error rather than risk double-applying.
+    """
+    class _Cur:
+        def __init__(self):
+            self.executes = 0
+
+        def execute(self, sql, params):
+            self.executes += 1
+            raise ValueError(_HRANA_JSON_EOF_ERROR)
+
+    fake = _Cur()
+    cur = _Cursor(fake)
+    with pytest.raises(ValueError, match="EOF while parsing"):
+        cur.execute("INSERT INTO price_log (part_id) VALUES (?)", (1,))
+    assert fake.executes == 1
+
+
+def test_json_eof_stays_out_of_the_unconditional_tier():
+    exc = ValueError(_HRANA_JSON_EOF_ERROR)
+    assert libsql_adapter._is_transient(exc) is False
+    assert libsql_adapter._is_transient_read_only(exc) is True
+
+
+def test_a_malformed_payload_json_error_is_not_swept_up():
+    """
+    Matching on "eof while parsing" rather than "json error" keeps a genuine
+    decode failure — one where a complete but wrong body arrived — surfacing
+    immediately instead of being retried four times.
+    """
+    exc = ValueError("Hrana: `cursor error: `json error: `invalid type: string``")
+    assert libsql_adapter._is_transient(exc) is False
+    assert libsql_adapter._is_transient_read_only(exc) is False

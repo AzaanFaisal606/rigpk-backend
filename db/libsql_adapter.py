@@ -114,6 +114,23 @@ _TRANSIENT_READ_ONLY_MARKERS = (
     # wrappers ("cursor error" appears twice above), so the outer framing
     # isn't stable.
     "unexpected eof during chunk size line",
+    # The same class of fault one layer up, observed live in
+    # `rebuild_price_trends()` immediately after a clean upsert:
+    # `ValueError: Hrana: `cursor error: `json error: `EOF while parsing a
+    # value at line 1 column 0``` — the response body ended before any JSON
+    # arrived at all (line 1, column 0), i.e. the server accepted the
+    # statement and the reply came back empty or truncated.
+    #
+    # Read-only tier, for exactly the reason the marker above is: the
+    # request reached the server, so the statement may well have run, and
+    # only pulling the answer back failed. Both sightings were large
+    # streamed SELECTs in `rebuild_price_trends()`, which is where this
+    # codebase moves the most rows in one response.
+    #
+    # Matched on "eof while parsing" rather than "json error": a genuine
+    # malformed-payload error would also say "json error" and must keep
+    # surfacing on the first attempt.
+    "eof while parsing",
     # Relocated here from `_TRANSIENT_MARKERS` (an audit finding): all three
     # are reachable AFTER the server already executed a statement — a reset
     # or a dropped pipe can arrive while the ack is in flight back to the
