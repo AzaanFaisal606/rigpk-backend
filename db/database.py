@@ -346,6 +346,38 @@ def _blocked_by(name: str, category: str) -> Optional[str]:
     return None
 
 
+# Multi-row INSERT chunk sizes for upsert_products().
+#
+# Against Turso every execute() is one Hrana request == one network round
+# trip to the region the database lives in, so the cost of a write is set by
+# how many statements it takes, not how much data they carry. The
+# one-statement-per-product version of upsert_products issued ~2 round trips
+# per product — 16,700 for a full nine-source scrape — and spent 2h20m of a
+# 2h25m run doing nothing but waiting on the wire. Batching the same work
+# into multi-row VALUES statements takes it to ~40 round trips.
+#
+# SQLite caps a statement at 32766 bound parameters (SQLITE_MAX_VARIABLE_NUMBER)
+# and Turso additionally caps the HTTP request body, at a size we have not
+# measured. These sit an order of magnitude under the parameter ceiling on
+# purpose: the entire win is in the first two orders of magnitude of round-trip
+# reduction, so crowding either limit buys seconds while risking a hard error
+# on the batch that finally exceeds it.
+_PARTS_CHUNK = 200        # 10 params/row ->  2,000 params
+_PRICE_CHUNK = 500        #  3 params/row ->  1,500 params
+_QUARANTINE_CHUNK = 200   #  7 params/row ->  1,400 params
+
+
+def _chunks(seq: list, n: int):
+    for i in range(0, len(seq), n):
+        yield seq[i:i + n]
+
+
+def _values_clause(rows: int, cols: int) -> str:
+    """`(?,?,?),(?,?,?)...` — the VALUES body for a multi-row INSERT."""
+    one = "(" + ",".join("?" * cols) + ")"
+    return ",".join([one] * rows)
+
+
 _VALID_SPEC_KEYS = frozenset({
     "brand", "socket", "vram", "ddr_type", "speed", "chipset",
     "wattage", "rating", "form_factor", "type", "aio_size",
@@ -765,12 +797,30 @@ class Database:
         newer one) will overwrite latest_price with the older price; this
         matches how the rest of the pipeline treats back-dated runs (see
         CLAUDE.md "Trends") and is not a bug.
+
+        Written as chunked multi-row INSERTs rather than one statement per
+        product: see the _PARTS_CHUNK comment for why the round-trip count,
+        not the row count, is what costs against Turso. The three phases
+        below (filter in Python, upsert parts, insert prices) exist because
+        price_log needs part ids that only the parts upsert can produce, and
+        SQLite has no way to feed one statement's RETURNING into another's
+        VALUES — so the ids must come back to Python in between.
         """
-        inserted = 0
         skipped = 0
-        seen_ids: dict[str, set[int]] = {}
         quarantined: list[tuple] = []
         cur = self._conn.cursor()
+
+        # -- phase 1: filter and de-duplicate, no DB access ----------------
+        #
+        # Keyed by (source, source_id) — the same UNIQUE the upsert conflicts
+        # on. De-duplicating here is not an optimisation, it is required:
+        # SQLite rejects a multi-row INSERT ... ON CONFLICT DO UPDATE whose
+        # own VALUES list names the same conflict target twice ("ON CONFLICT
+        # DO UPDATE command does not affect row a second time"), and one
+        # product legitimately appears under two category URLs at several
+        # retailers. Last occurrence wins, matching what the row-at-a-time
+        # version left behind after its second DO UPDATE overwrote the first.
+        staged: dict[tuple[str, str], tuple] = {}
         for p in products:
             if not p.get("category"):
                 raise ValueError(f"Product missing category: {p.get('name', '<unknown>')!r}")
@@ -797,16 +847,31 @@ class Database:
                 quarantined.append((p["source"], p["name"], p["category"], price,
                                     p.get("url"), f"bad_url:{exc}"))
                 continue
-            thumbnail = p.get("thumbnail_url")
 
             raw_specs = extract_specs(p["name"], p["category"])
             specs_json = json.dumps(raw_specs, ensure_ascii=False) if raw_specs else None
+            staged[(p["source"], source_id)] = (
+                p["source"], source_id, p["name"], p["category"], p["url"],
+                p.get("thumbnail_url"), specs_json, normalize_name(p["name"]),
+                p["scraped_at"], price,
+            )
 
-            row = cur.execute(
-                """
+        # -- phase 2: upsert parts, chunked, recovering the ids ------------
+        #
+        # RETURNING carries source and source_id back alongside the id so the
+        # result can be matched to its input by key. Matching by row order
+        # would be wrong: SQLite does not promise RETURNING emits rows in
+        # VALUES order, and a mis-ordered map silently attaches every price
+        # to the wrong product — a corruption nothing downstream can detect.
+        part_ids: dict[tuple[str, str], int] = {}
+        seen_ids: dict[str, set[int]] = {}
+        rows = list(staged.values())
+        for chunk in _chunks(rows, _PARTS_CHUNK):
+            returned = cur.execute(
+                f"""
                 INSERT INTO parts (source, source_id, name, category, url, thumbnail_url, specs,
-                                   name_norm, is_active, last_seen_at, latest_price)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                                   name_norm, last_seen_at, latest_price)
+                VALUES {_values_clause(len(chunk), 10)}
                 ON CONFLICT(source, source_id) DO UPDATE SET
                     name          = excluded.name,
                     category      = excluded.category,
@@ -818,54 +883,106 @@ class Database:
                     last_seen_at  = excluded.last_seen_at,
                     latest_price  = excluded.latest_price,
                     updated_at    = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                RETURNING id, source, source_id
+                """,
+                [v for row in chunk for v in row],
+            ).fetchall()
+            for r in returned:
+                part_ids[(r["source"], r["source_id"])] = r["id"]
+                seen_ids.setdefault(r["source"], set()).add(r["id"])
+
+        missing = [k for k in staged if k not in part_ids]
+        if missing:
+            # Every staged row conflicts or inserts, so every one must come
+            # back. A gap means RETURNING dropped rows, and continuing would
+            # write a price_log with holes and then sweep the parts whose ids
+            # never arrived. Fail the upsert instead.
+            raise RuntimeError(
+                f"parts upsert returned no id for {len(missing)} of {len(staged)} rows "
+                f"(first: {missing[0]!r})"
+            )
+
+        # -- phase 3: price rows, chunked --------------------------------
+        #
+        # ON CONFLICT(part_id, scraped_at) DO NOTHING replaces the old
+        # per-row IntegrityError catch: re-running the same scrape is
+        # expected and harmless. The conflict target is named rather than
+        # left bare so this still only swallows THAT collision — a bare DO
+        # NOTHING would also silently absorb any other constraint failure,
+        # which the old `if "UNIQUE" not in str(exc)` re-raise deliberately
+        # did not. Phase 1 guarantees no duplicate (part_id, scraped_at)
+        # within the batch itself, so a conflict here always means the row
+        # was already in the table.
+        #
+        # RETURNING id gives the true inserted count: a DO NOTHING conflict
+        # returns nothing, so len() of the result is exactly the number of
+        # new rows, which is what this method's contract promises.
+        inserted = 0
+        price_rows = [
+            (part_ids[(row[0], row[1])], row[9], row[8])   # part_id, price, scraped_at
+            for row in rows
+        ]
+        for chunk in _chunks(price_rows, _PRICE_CHUNK):
+            written = cur.execute(
+                f"""
+                INSERT INTO price_log (part_id, price_pkr, scraped_at)
+                VALUES {_values_clause(len(chunk), 3)}
+                ON CONFLICT(part_id, scraped_at) DO NOTHING
                 RETURNING id
                 """,
-                (p["source"], source_id, p["name"], p["category"], p["url"], thumbnail, specs_json,
-                 normalize_name(p["name"]), p["scraped_at"], price),
-            ).fetchone()
-            part_id = row["id"]
-            seen_ids.setdefault(p["source"], set()).add(part_id)
-
-            try:
-                cur.execute(
-                    """
-                    INSERT INTO price_log (part_id, price_pkr, scraped_at)
-                    VALUES (?, ?, ?)
-                    """,
-                    (part_id, p.get("price_pkr"), p["scraped_at"]),
-                )
-                inserted += 1
-            except sqlite3.IntegrityError as exc:
-                # UNIQUE (part_id, scraped_at): the same run re-scraped this
-                # part. Expected and harmless. Anything else is a real defect
-                # and must not be swallowed.
-                if "UNIQUE" not in str(exc).upper():
-                    raise
+                [v for row in chunk for v in row],
+            ).fetchall()
+            inserted += len(written)
 
         if quarantined:
             # Diagnostic-only: a failure here (e.g. a pre-dedup DB the migration
             # hasn't reached yet) must never abort a real scrape's upsert.
             try:
-                cur.executemany(
-                    """
-                    INSERT INTO quarantined_rows (source, name, category, price_pkr, url, rule)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(source, url) DO UPDATE SET
-                        name           = excluded.name,
-                        category       = excluded.category,
-                        price_pkr      = excluded.price_pkr,
-                        rule           = excluded.rule,
-                        times_rejected = quarantined_rows.times_rejected + 1,
-                        last_seen_at   = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                    """,
-                    quarantined,
-                )
+                self._write_quarantine(cur, quarantined)
             except Exception as e:
                 print(f"    WARNING: quarantine write failed (non-fatal): {e}")
 
         self._conn.commit()
         self._last_seen_ids = seen_ids
         return inserted
+
+    @staticmethod
+    def _write_quarantine(cur, quarantined: list[tuple]) -> None:
+        """
+        Chunked multi-row upsert of rejected rows, deduped on (source, url)
+        like the table's own unique index.
+
+        times_rejected is carried in the INSERT and summed on conflict rather
+        than hard-coded to `+ 1`, so collapsing N in-batch duplicates into one
+        row still counts N rejections — the number is the whole point of the
+        column. Rows with a NULL url keep a per-row key: SQL NULLs never
+        conflict with each other, so folding them together in Python would
+        merge rows the table itself would have kept apart.
+        """
+        counted: dict[tuple, list] = {}
+        for i, q in enumerate(quarantined):
+            key = (q[0], q[4]) if q[4] is not None else ("\x00null-url", i)
+            if key in counted:
+                counted[key][6] += 1
+            else:
+                counted[key] = [*q, 1]
+
+        for chunk in _chunks(list(counted.values()), _QUARANTINE_CHUNK):
+            cur.execute(
+                f"""
+                INSERT INTO quarantined_rows (source, name, category, price_pkr, url, rule,
+                                              times_rejected)
+                VALUES {_values_clause(len(chunk), 7)}
+                ON CONFLICT(source, url) DO UPDATE SET
+                    name           = excluded.name,
+                    category       = excluded.category,
+                    price_pkr      = excluded.price_pkr,
+                    rule           = excluded.rule,
+                    times_rejected = quarantined_rows.times_rejected + excluded.times_rejected,
+                    last_seen_at   = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                """,
+                [v for row in chunk for v in row],
+            )
 
     def list_quarantined(self, limit: int = 100) -> list[dict]:
         """Most recent quarantined rows, newest first. Diagnostic use only."""
