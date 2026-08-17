@@ -1483,37 +1483,100 @@ class Database:
             return ("spec", f"{ddr}-{speed_num}-{cap}")
         return None
 
+    # One price per (part, calendar date): if a part is scraped twice on the
+    # same day (e.g. a retry after a partial run), keep only its latest row so
+    # a single listing isn't double-counted in a date bucket.
+    _TREND_SOURCE_SQL = """
+        SELECT p.category AS category,
+               p.specs    AS specs,
+               d.scrape_date AS scrape_date,
+               d.price_pkr AS price,
+               d.part_id AS part_id
+        FROM (
+            SELECT part_id,
+                   substr(scraped_at, 1, 10) AS scrape_date,
+                   price_pkr,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY part_id, substr(scraped_at, 1, 10)
+                       ORDER BY scraped_at DESC
+                   ) AS rn
+            FROM price_log
+            WHERE price_pkr IS NOT NULL
+              AND substr(scraped_at, 1, 10) = ?
+        ) d
+        JOIN parts p ON p.id = d.part_id
+        WHERE d.rn = 1
+    """
+
+    def _read_trend_source_rows(self) -> list:
+        """
+        Read the (part, date, price) rows the trend rebuild aggregates, one
+        scrape date per query, and verify the total against a COUNT.
+
+        Read one date at a time rather than in one statement because a large
+        enough result silently comes back EMPTY from Turso — no exception, no
+        truncation warning, just zero rows. Measured against the live DB: the
+        identical query returns 60,000 rows at `LIMIT 60000` and **0** at
+        `LIMIT 67100`. The cliff is payload bytes, not row count — dropping
+        the `specs` column (~44 bytes/row average) let the full 67,100 rows
+        through unharmed.
+
+        That failure mode is why the COUNT check below is not paranoia.
+        `rebuild_price_trends` DELETEs the whole table before writing what it
+        computed, so a silently-empty read does not degrade the trends, it
+        destroys them — and reports success. A short read must stop the
+        rebuild before the DELETE, which is what raising here does.
+
+        Paging by date (rather than LIMIT/OFFSET) keeps each response an
+        order of magnitude under the cliff at current volumes — ~8.5k rows
+        per date against the ~60k ceiling — and costs nothing extra, since
+        the window function only ever dedupes within a single date anyway.
+        """
+        dates = [
+            r["d"] for r in self._conn.execute(
+                """
+                SELECT DISTINCT substr(scraped_at, 1, 10) AS d
+                FROM price_log
+                WHERE price_pkr IS NOT NULL
+                ORDER BY d
+                """
+            ).fetchall()
+        ]
+
+        rows: list = []
+        for date in dates:
+            page = self._conn.execute(self._TREND_SOURCE_SQL, (date,)).fetchall()
+            expected = self._conn.execute(
+                # Joined to `parts` for the same reason the source query is:
+                # the expected count has to match what the join can actually
+                # return, or an orphaned price_log row (no matching part)
+                # would fail this check rather than the truncation it exists
+                # to catch.
+                """
+                SELECT COUNT(DISTINCT pl.part_id) AS c
+                FROM price_log pl
+                JOIN parts p ON p.id = pl.part_id
+                WHERE pl.price_pkr IS NOT NULL
+                  AND substr(pl.scraped_at, 1, 10) = ?
+                """,
+                (date,),
+            ).fetchone()["c"]
+            if len(page) != expected:
+                raise RuntimeError(
+                    f"price-trend source read for {date} returned {len(page)} rows, "
+                    f"expected {expected} — refusing to rebuild trends from a short "
+                    f"read (a silently truncated response would wipe price_trends)"
+                )
+            rows.extend(page)
+        return rows
+
     def rebuild_price_trends(self) -> int:
         """
         Wipe and recompute the entire price_trends table from price_log.
         One row per (category, group_type, group_key, scrape_date). Idempotent.
         Returns the number of trend rows written.
         """
-        # One price per (part, calendar date): if a part is scraped twice on the
-        # same day (e.g. a retry after a partial run), keep only its latest row
-        # so a single listing isn't double-counted in a date bucket.
-        rows = self._conn.execute(
-            """
-            SELECT p.category AS category,
-                   p.specs    AS specs,
-                   d.scrape_date AS scrape_date,
-                   d.price_pkr AS price,
-                   d.part_id AS part_id
-            FROM (
-                SELECT part_id,
-                       substr(scraped_at, 1, 10) AS scrape_date,
-                       price_pkr,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY part_id, substr(scraped_at, 1, 10)
-                           ORDER BY scraped_at DESC
-                       ) AS rn
-                FROM price_log
-                WHERE price_pkr IS NOT NULL
-            ) d
-            JOIN parts p ON p.id = d.part_id
-            WHERE d.rn = 1
-            """
-        ).fetchall()
+        rows = self._read_trend_source_rows()
 
         # Bucket: (category, group_type, group_key, date) -> {part_id: price}
         buckets: dict[tuple[str, str, str, str], dict[int, int]] = {}
