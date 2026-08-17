@@ -62,3 +62,61 @@ def test_evaluate_parts_combines():
     joined = " | ".join(out)
     assert "amdhouse.pk: run failed" in joined
     assert "czone.com.pk/gpu" in joined
+
+
+# --- proportional category drop (not just fall-to-zero) ---
+#
+# Health rules must catch partial loss, not only total loss.
+#
+# The amputation that motivated this (techmatched 653 -> 254 -> 163) never
+# emptied a category — it just kept shrinking, and nothing fired.
+
+from scrapers.health import category_anomalies, source_anomalies
+
+
+def test_category_halving_is_an_anomaly():
+    out = category_anomalies(
+        {("techmatched", "gpu"): 200},
+        {("techmatched", "gpu"): 90},
+        {"techmatched"},
+    )
+    assert out and "gpu" in out[0]
+
+
+def test_small_but_total_loss_on_a_tiny_source_still_fires():
+    """A 13-row prebuilt source losing 12 rows is 92% — size must not excuse it."""
+    out = category_anomalies(
+        {("redtech", "prebuilt"): 13},
+        {("redtech", "prebuilt"): 1},
+        {"redtech"},
+        min_baseline=5,
+    )
+    assert out
+
+
+def test_normal_churn_is_not_an_anomaly():
+    out = category_anomalies(
+        {("pakbyte", "gpu"): 200},
+        {("pakbyte", "gpu"): 188},
+        {"pakbyte"},
+    )
+    assert out == []
+
+
+def test_growth_is_never_an_anomaly():
+    out = category_anomalies(
+        {("pakbyte", "gpu"): 100},
+        {("pakbyte", "gpu"): 240},
+        {"pakbyte"},
+    )
+    assert out == []
+
+
+def test_untrusted_source_is_not_double_reported():
+    """A failed source is already reported at source level; its categories are stale, not lost."""
+    out = category_anomalies(
+        {("czone", "gpu"): 200},
+        {("czone", "gpu"): 0},
+        ok_sources=set(),
+    )
+    assert out == []

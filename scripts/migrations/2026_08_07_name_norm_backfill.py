@@ -12,6 +12,7 @@ import sys
 
 from db.database import get_db
 from db.tokenize import normalize_name
+from scripts.migrations._guard import resolve_target
 
 # Each batch is ONE statement, so it costs one network round trip rather than
 # one per row. That distinction is everything against remote Turso: an
@@ -46,6 +47,11 @@ def backfill(db, table: str) -> int:
 
 
 def main() -> int:
+    # Prints the resolved target, refuses production without --yes-production,
+    # and sets ALLOW_REMOTE_MIGRATIONS once the target is confirmed. CLAUDE.md
+    # documents this script as re-runnable against the live DB, so it needs the
+    # opt-in the same way every other migration here does.
+    resolve_target()
     db = get_db()
     print(f"target: {db._target} (remote={db._remote})", flush=True)
     total = sum(backfill(db, t) for t in ("parts", "prebuilts"))

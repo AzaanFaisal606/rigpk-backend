@@ -2,7 +2,12 @@ from __future__ import annotations
 import re
 from typing import Optional
 
-_BRANDS: list[tuple[str, str]] = [
+from scrapers.socket_table import socket_for
+
+# Manufacturers — the entity that actually built/boxed the part (ASUS, MSI,
+# Gigabyte, Sapphire...). Checked first: `brand` on the market page's filter
+# is "who do I buy this from", not "whose chip is inside".
+_MAKER_BRANDS: list[tuple[str, str]] = [
     ("cooler master",   "Cooler Master"),
     ("be quiet!",       "be quiet!"),
     ("lian li",         "Lian Li"),
@@ -39,17 +44,12 @@ _BRANDS: list[tuple[str, str]] = [
     ("noctua",          "Noctua"),
     ("cougar",          "Cougar"),
     ("antec",           "Antec"),
-    ("radeon",          "AMD"),
-    ("ryzen",           "AMD"),
-    ("geforce",         "NVIDIA"),
-    ("zotac",           "ZOTAC"),
+    ("zotac",           "Zotac"),
     ("palit",           "Palit"),
     ("arktek",          "Arktek"),
     ("adata",           "ADATA"),
     ("dahua",           "Dahua"),
     ("hikvision",       "Hikvision"),
-    ("intel",           "Intel"),
-    ("nvidia",          "NVIDIA"),
     ("asus",            "ASUS"),
     ("nzxt",            "NZXT"),
     ("benq",            "BenQ"),
@@ -57,7 +57,6 @@ _BRANDS: list[tuple[str, str]] = [
     ("lenovo",          "Lenovo"),
     ("philips",         "Philips"),
     ("iiyama",          "iiyama"),
-    ("amd",             "AMD"),
     ("msi",             "MSI"),
     ("xpg",             "XPG"),
     ("xfx",             "XFX"),
@@ -65,24 +64,100 @@ _BRANDS: list[tuple[str, str]] = [
     ("aoc",             "AOC"),
     ("wd",              "WD"),
     ("lg",              "LG"),
+    ("hp",              "HP"),
+    # Budget/grey-market board partners, verified against the active
+    # catalogue (were falling through to the chip-vendor fallback below).
+    ("afox",            "AFOX"),
+    ("ninja",           "Ninja"),
+    ("ease",            "EASE"),
+    ("colorful",        "Colorful"),
+    ("maxsun",          "MAXSUN"),
+    ("darkflash",       "DarkFlash"),
+    ("leadtek",         "Leadtek"),
+    ("gunnir",          "Gunnir"),
+    ("galax",           "Galax"),
+    ("manli",           "Manli"),
+    ("inno3d",          "Inno3D"),
+    ("evga",            "EVGA"),
+    ("biostar",         "Biostar"),
+    ("yeston",          "Yeston"),
+    ("onda",            "Onda"),
+    ("vastarmor",       "Vastarmor"),
+    ("alseye",          "Alseye"),
+    ("dataland",        "Dataland"),
+    # Misspelling seen in real listings ("Saphire RX590 Nitro Plus...") —
+    # canonicalizes to the existing Sapphire value, not a second brand.
+    ("saphire",         "Sapphire"),
 ]
+
+# Chip vendors — fallback only. For CPUs there is no third-party maker, so
+# this list is where CPU brand actually resolves (AMD/Intel ARE the maker
+# there). For GPUs it only fires when no board partner was named at all.
+_CHIP_VENDOR_BRANDS: list[tuple[str, str]] = [
+    ("radeon",          "AMD"),
+    ("ryzen",           "AMD"),
+    ("geforce",         "NVIDIA"),
+    ("intel",           "Intel"),
+    ("nvidia",          "NVIDIA"),
+    ("amd",             "AMD"),
+]
+
+_ALL_BRANDS = _MAKER_BRANDS + _CHIP_VENDOR_BRANDS
+
+# Tokens matched on a strict \b word boundary rather than a plain substring:
+# short (<=3 char) codes, plus longer single words empirically shown to
+# collide with unrelated substrings in real listings — "ease" fires inside
+# "Q-Release"/"Quick Release" (ASUS motherboards), "galax" fires inside
+# "Galaxy" (Xigmatek fan kits). Every maker added after the original list is
+# boundary-matched by default: a bare substring check is unsafe for any
+# short, ordinary-looking brand word.
+_BOUNDARY_BRANDS = {
+    "afox", "ninja", "ease", "colorful", "maxsun", "darkflash", "leadtek",
+    "gunnir", "galax", "manli", "inno3d", "evga", "biostar", "yeston",
+    "onda", "vastarmor", "alseye", "dataland", "saphire",
+}
+
+# Word-boundary alone isn't enough for tokens that are also ordinary English
+# words: "Ease" is a legit board-maker name at the FRONT of a listing
+# ("Ease EM510B ... Motherboard") but also shows up mid-description on
+# unrelated products ("...300 nits, Eye Ease with Eyesafe Certification" on
+# an HP monitor -> would wrongly resolve to brand "EASE"). Retailers put the
+# maker at or near the start of the title, so these tokens only count as a
+# brand when they land there. "ninja"/"onda" are the same class (ordinary
+# words/short syllables); the rest of _BOUNDARY_BRANDS are distinctive
+# invented names with no known mid-title collisions (verified against the
+# full active catalogue) and stay plain word-boundary matches anywhere in
+# the string.
+_POSITION_RESTRICTED_BRANDS = {"ease", "ninja", "onda"}
+_BRAND_POSITION_LIMIT = 30  # chars from the start of the name
 
 _SHORT_BRAND_RE: dict[str, re.Pattern] = {
     s: re.compile(rf'\b{re.escape(s)}\b', re.IGNORECASE)
-    for s, _ in _BRANDS if len(s) <= 3
+    for s, _ in _ALL_BRANDS if len(s) <= 3 or s in _BOUNDARY_BRANDS
 }
+
+
+def _match_brand_list(lower: str, brands: list[tuple[str, str]]) -> Optional[str]:
+    for match_str, canonical in brands:
+        pattern = _SHORT_BRAND_RE.get(match_str)
+        if pattern:
+            m = pattern.search(lower)
+            if not m:
+                continue
+            if match_str in _POSITION_RESTRICTED_BRANDS and m.start() >= _BRAND_POSITION_LIMIT:
+                continue
+            return canonical
+        elif match_str in lower:
+            return canonical
+    return None
 
 
 def _extract_brand(name: str) -> Optional[str]:
     lower = name.lower()
-    for match_str, canonical in _BRANDS:
-        if len(match_str) <= 3:
-            if _SHORT_BRAND_RE[match_str].search(lower):
-                return canonical
-        else:
-            if match_str in lower:
-                return canonical
-    return None
+    maker = _match_brand_list(lower, _MAKER_BRANDS)
+    if maker:
+        return maker
+    return _match_brand_list(lower, _CHIP_VENDOR_BRANDS)
 
 
 _SOCKET_RE = re.compile(r'\b(AM[45]|LGA\s?\d{4})\b', re.IGNORECASE)
@@ -432,7 +507,7 @@ def extract_specs(name: str, category: str) -> dict:
         specs["brand"] = brand
 
     if category == "cpu":
-        s = _extract_socket(name)
+        s = _extract_socket(name) or socket_for(name)
         if s:
             specs["socket"] = s
         m = _extract_cpu_model(name)
@@ -465,6 +540,9 @@ def extract_specs(name: str, category: str) -> dict:
         cs = _extract_chipset(name)
         if cs:
             specs["chipset"] = cs
+        ff = _extract_form_factor(name)
+        if ff:
+            specs["form_factor"] = ff
 
     elif category == "psu":
         w = _extract_wattage(name)

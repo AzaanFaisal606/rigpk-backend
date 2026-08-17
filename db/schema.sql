@@ -24,8 +24,10 @@ CREATE TABLE IF NOT EXISTS parts (
     thumbnail_url TEXT,                      -- product image URL (may be NULL)
     specs         TEXT    DEFAULT NULL,      -- JSON dict e.g. {"brand":"AMD","socket":"AM5"}
     name_norm     TEXT    DEFAULT NULL,      -- lowercased, tokenised, space-padded name for search
+    latest_price  INTEGER DEFAULT NULL,      -- newest price_log price; cache, price_log is truth
     is_active     INTEGER NOT NULL DEFAULT 1, -- 0 = not seen in last successful scrape of its source
     last_seen_at  TEXT    DEFAULT NULL,       -- ISO 8601 UTC of the last scrape that saw this part
+    delisted_at   TEXT    DEFAULT NULL,      -- ISO 8601 UTC when the sweep marked it inactive
     created_at    TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at    TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     UNIQUE (source, source_id)
@@ -45,6 +47,12 @@ CREATE INDEX IF NOT EXISTS idx_parts_source   ON parts(source);
 -- Search matches `name_norm LIKE '% token%'`, which cannot use an index for the
 -- leading wildcard, but category-scoped searches still narrow the scan first.
 CREATE INDEX IF NOT EXISTS idx_parts_category_active ON parts(category, is_active);
+-- idx_parts_cat_active_price (category, is_active, latest_price) — covers the
+-- market page's list_parts() query, filter + ORDER BY in one index — is
+-- created in _migrate() instead of here, on purpose: it's not safe in this
+-- executescript(), which runs before _migrate()'s ALTERs add latest_price
+-- and is_active to a database created before this file's CREATE TABLE
+-- carried those columns.
 CREATE INDEX IF NOT EXISTS idx_price_log_part ON price_log(part_id);
 CREATE INDEX IF NOT EXISTS idx_price_log_time ON price_log(scraped_at);
 -- Serves the "latest price per part" correlated subquery in list_parts():
@@ -75,6 +83,7 @@ CREATE TABLE IF NOT EXISTS prebuilts (
     scraped_at    TEXT    NOT NULL,
     is_active     INTEGER NOT NULL DEFAULT 1, -- 0 = not seen in last successful scrape of its source
     last_seen_at  TEXT    DEFAULT NULL,       -- ISO 8601 UTC of the last scrape that saw this prebuilt
+    delisted_at   TEXT    DEFAULT NULL,      -- ISO 8601 UTC when the sweep marked it inactive
     created_at    TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at    TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     UNIQUE (source, source_id)
@@ -96,10 +105,17 @@ CREATE TABLE IF NOT EXISTS price_trends (
     scrape_date   TEXT    NOT NULL,          -- YYYY-MM-DD (one snapshot bucket)
     sample_count  INTEGER NOT NULL,          -- listings before trim
     used_count    INTEGER NOT NULL,          -- listings the center value used
-    center_price  INTEGER NOT NULL,          -- trend-line value (trimmed mean or median)
-    method        TEXT    NOT NULL,          -- 'trimmed_mean' (n>=5) | 'median' (n<5)
+    center_price  INTEGER NOT NULL,          -- chained matched-basket index, anchored in PKR
+    method        TEXT    NOT NULL,          -- 'matched_basket_median' (first date, or first date
+                                              -- after a chain break: center_price is a real median)
+                                              -- | 'matched_basket_chained' (later date: center_price
+                                              -- is the previous level times the matched-basket ratio)
     min_price     INTEGER NOT NULL,          -- band low  (5%-trimmed range; n<5 full)
     max_price     INTEGER NOT NULL,          -- band high (5%-trimmed range; n<5 full)
+    basket_size   INTEGER NOT NULL DEFAULT 0, -- parts priced on this date that were ALSO priced on
+                                              -- the previous date in the series; for the FIRST date
+                                              -- of a series (no previous date) this is just that
+                                              -- date's own listing count, same as sample_count
     computed_at   TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     UNIQUE (category, group_type, group_key, scrape_date)
 );
@@ -131,3 +147,34 @@ CREATE TABLE IF NOT EXISTS scrape_runs (
 
 CREATE INDEX IF NOT EXISTS idx_scrape_runs_source
     ON scrape_runs(source, kind, finished_at);
+
+-- Rows rejected by upsert_products' guards. Not user-facing — this exists so an
+-- over-broad blocklist term is discoverable instead of silently eating real
+-- products. `rule` names exactly which guard fired.
+--
+-- Deduped on (source, url) — the same rejected listing shows up again every
+-- weekly scrape, so a repeat rejection UPDATEs this row (bumping
+-- times_rejected, moving last_seen_at) instead of appending a fresh one
+-- forever. url is what the rejected payload always carries at the point the
+-- guards fire; source_id isn't derived until a row passes them. The unique
+-- index that backs the dedup (and the ON CONFLICT below) is created in
+-- _migrate() rather than here, since CREATE TABLE IF NOT EXISTS never runs
+-- again on a DB that already has this table pre-dedup.
+CREATE TABLE IF NOT EXISTS quarantined_rows (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    source         TEXT NOT NULL,
+    name           TEXT NOT NULL,
+    category       TEXT NOT NULL,
+    price_pkr      INTEGER,
+    url            TEXT,
+    rule           TEXT NOT NULL,          -- "min_price:gpu:4000" | "blocklist:global:combo" | "blocklist:monitor:keyboard"
+    times_rejected INTEGER NOT NULL DEFAULT 1,
+    first_seen_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    last_seen_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+-- idx_quarantine_time (on last_seen_at) and the (source, url) unique index
+-- are created in _migrate() instead of here — an existing DB's table
+-- predates the last_seen_at column, and this file's CREATE TABLE IF NOT
+-- EXISTS never re-runs to add it, so an index on it here would fail on
+-- every such DB before _migrate() gets a chance to add the column.

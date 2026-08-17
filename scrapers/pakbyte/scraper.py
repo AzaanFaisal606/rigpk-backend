@@ -16,16 +16,12 @@ Usage:
 """
 
 import html as _html
-import os
 import re
-import sys
-import time
 
-from scrapers.base_scraper import BaseScraper
+from scrapers.listing_scraper import ListingScraper, run_listing_cli
 
 SOURCE = "pakbyte.pk"
 BASE = "https://www.pakbyte.pk"
-PAGE_DELAY = 1.2
 
 # (category_slug_on_site, our_category_key)
 CATEGORIES: list[tuple[str, str]] = [
@@ -42,112 +38,68 @@ CATEGORIES: list[tuple[str, str]] = [
 ]
 
 
-class PakByteScraper(BaseScraper):
+class PakByteScraper(ListingScraper):
+    """
+    url should be the base collection URL, e.g.:
+    https://www.pakbyte.pk/collections/graphic-cards
+    Pagination appends ?page=N.
+    """
 
-    def scrape(self, url: str) -> list[dict]:
-        """
-        url should be the base collection URL, e.g.:
-        https://www.pakbyte.pk/collections/graphic-cards
-        Pagination appends ?page=N.
-        """
-        all_products: list[dict] = []
-        seen_urls: set[str] = set()
-        total: int | None = None
-        page = 1
-        consecutive_errors = 0
+    SOURCE = SOURCE
 
-        while True:
-            page_url = url if page == 1 else f"{url}?page={page}"
+    def extract_total(self, html: str) -> int | None:
+        # PakByte renders "277 products" inside .collection__products-count-total
+        m = re.search(
+            r'collection__products-count-total[^>]*>\s*([\d,]+)\s+products',
+            html,
+        )
+        if m:
+            return int(m.group(1).replace(",", ""))
+        # Fallback: any "N products" string
+        m2 = re.search(r'of\s+([\d,]+)\s+products', html)
+        if m2:
+            return int(m2.group(1).replace(",", ""))
+        return None
 
-            print(f"    page {page}: {page_url}")
-            try:
-                html = self.fetch(page_url)
-                consecutive_errors = 0
-            except RuntimeError as e:
-                consecutive_errors += 1
-                print(f"    page {page} failed: {e}")
-                if consecutive_errors >= 3:
-                    print(f"    stopping after {consecutive_errors} consecutive errors")
-                    break
-                page += 1
-                time.sleep(PAGE_DELAY)
-                continue
+    def card_blocks(self, html: str) -> list[str]:
+        return re.split(r'class="product-item product-item--vertical', html)[1:]
 
-            if page == 1:
-                total = self._extract_total(html)
-                if total is not None:
-                    print(f"    total reported: {total}")
+    def parse_card(self, block: str) -> dict | None:
+        # Skip out-of-stock items (Shopify themes vary; check common markers)
+        if "inventory--out" in block or "sold-out" in block:
+            return None
 
-            products = self._parse_page(html)
+        # URL — first /products/<slug> href in block
+        url_m = re.search(r'href="(/products/[^"?#]+)"', block)
+        if not url_m:
+            return None
+        slug = url_m.group(1)
+        url = BASE + slug
 
-            if not products:
-                print(f"    no products on page {page} — done.")
-                break
+        # Name from .product-item__title anchor text
+        name_m = re.search(
+            r'class="product-item__title[^"]*"[^>]*>([^<]+)</a>',
+            block,
+        )
+        if not name_m:
+            return None
+        name = _html.unescape(name_m.group(1)).strip()
 
-            new = [p for p in products if p["url"] not in seen_urls]
-            for p in new:
-                seen_urls.add(p["url"])
+        # Price — Shopify renders e.g. "Rs.234,990.00" inside .price span
+        price_pkr = self._parse_price_block(block)
 
-            print(f"    {len(new)} new (page total: {len(products)}, collected: {len(all_products) + len(new)})")
-            all_products.extend(new)
+        # Thumbnail — primary image src (protocol-relative, possibly ?width=100)
+        thumbnail = self._parse_thumbnail(block)
 
-            if not new:
-                break
-            if total is not None and len(all_products) >= total:
-                print(f"    collected all {total} — done.")
-                break
-
-            page += 1
-            time.sleep(PAGE_DELAY)
-
-        return all_products
-
-    def _parse_page(self, html: str) -> list[dict]:
-        scraped_at = self.now()
-
-        blocks = re.split(r'class="product-item product-item--vertical', html)[1:]
-        if not blocks:
-            return []
-
-        results = []
-        for block in blocks:
-            # Skip out-of-stock items (Shopify themes vary; check common markers)
-            if "inventory--out" in block or "sold-out" in block:
-                continue
-
-            # URL — first /products/<slug> href in block
-            url_m = re.search(r'href="(/products/[^"?#]+)"', block)
-            if not url_m:
-                continue
-            slug = url_m.group(1)
-            url = BASE + slug
-
-            # Name from .product-item__title anchor text
-            name_m = re.search(
-                r'class="product-item__title[^"]*"[^>]*>([^<]+)</a>',
-                block,
-            )
-            if not name_m:
-                continue
-            name = _html.unescape(name_m.group(1)).strip()
-
-            # Price — Shopify renders e.g. "Rs.234,990.00" inside .price span
-            price_pkr = self._parse_price_block(block)
-
-            # Thumbnail — primary image src (protocol-relative, possibly ?width=100)
-            thumbnail = self._parse_thumbnail(block)
-
-            results.append({
-                "name": name,
-                "price_pkr": price_pkr,
-                "url": url,
-                "category": "",
-                "source": SOURCE,
-                "scraped_at": scraped_at,
-                "thumbnail_url": thumbnail,
-            })
-
-        return results
+        return {
+            "name": name,
+            "price_pkr": price_pkr,
+            "url": url,
+            "category": "",
+            "source": SOURCE,
+            "scraped_at": self.now(),
+            "thumbnail_url": thumbnail,
+        }
 
     @staticmethod
     def _parse_price_block(block: str) -> int | None:
@@ -218,58 +170,14 @@ class PakByteScraper(BaseScraper):
         src = src.rstrip("?&")
         return src
 
-    @staticmethod
-    def _extract_total(html: str) -> int | None:
-        # PakByte renders "277 products" inside .collection__products-count-total
-        m = re.search(
-            r'collection__products-count-total[^>]*>\s*([\d,]+)\s+products',
-            html,
-        )
-        if m:
-            return int(m.group(1).replace(",", ""))
-        # Fallback: any "N products" string
-        m2 = re.search(r'of\s+([\d,]+)\s+products', html)
-        if m2:
-            return int(m2.group(1).replace(",", ""))
-        return None
-
 
 def main():
     """Standalone smoke test — does NOT write to DB."""
-    scraper = PakByteScraper()
-    all_results: list[dict] = []
-
-    only_gpu = "--all" not in sys.argv
-    cats = [c for c in CATEGORIES if c[1] == "gpu"] if only_gpu else CATEGORIES
-
-    for slug, category in cats:
-        url = f"{BASE}/collections/{slug}"
-        print(f"\n[{category.upper()}] {url}")
-        products = scraper.scrape(url)
-        for p in products:
-            p["category"] = category
-        print(f"  => {len(products)} products")
-        all_results.extend(products)
-
-    if not all_results:
-        print("No products scraped.")
-        sys.exit(1)
-
-    from collections import Counter
-    counts = Counter(p["category"] for p in all_results)
-    print(f"\nTotal: {len(all_results)} products")
-    for cat, n in sorted(counts.items()):
-        print(f"  {cat:15s} {n}")
-
-    print("\n--- sample products ---")
-    for p in all_results[:3]:
-        print(f"  name:  {p['name'][:80]}")
-        print(f"  price: {p['price_pkr']}")
-        print(f"  url:   {p['url']}")
-        print(f"  thumb: {(p['thumbnail_url'] or '')[:80]}")
-        print()
-
-    print("(no DB write — standalone smoke test)")
+    run_listing_cli(
+        PakByteScraper, CATEGORIES,
+        lambda slug: f"{BASE}/collections/{slug}",
+        write_db=False, default_filter="gpu",
+    )
 
 
 if __name__ == "__main__":

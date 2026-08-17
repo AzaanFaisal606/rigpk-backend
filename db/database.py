@@ -35,7 +35,7 @@ import secrets
 import string
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 import json
 from scrapers.spec_extractor import extract_specs
 from db.tokenize import MAX_SEARCH_TOKENS, normalize_name, search_tokens  # noqa: F401
@@ -57,16 +57,113 @@ _DEFAULT_DB = Path(os.getenv("DB_PATH", str(Path(__file__).parent.parent / "data
 # Local SQLite keeps applying on every open — it is cheap and offline.
 _REMOTE_SCHEMA_APPLIED: set[str] = set()
 
+# Opt-in for running schema/migrations against a remote (Turso) target. See
+# _remote_migration_mode() below.
+_ALLOW_REMOTE_MIGRATIONS_ENV = "ALLOW_REMOTE_MIGRATIONS"
+
+
+def _remote_migration_mode(allow: bool | None) -> str:
+    """
+    Decide what opening a REMOTE target does about schema/migrations.
+
+    Database() used to run _apply_schema()/_migrate() unconditionally on
+    every construction, remote or local. That meant any ad hoc script,
+    notebook, or REPL session that called Database() with no explicit
+    target silently applied schema/column changes to production Turso —
+    the exact mechanism behind production's unplanned drift (latest_price,
+    delisted_at, idx_parts_cat_active_price all landed outside any intended
+    migration window).
+
+    Three outcomes, because there are genuinely three kinds of caller:
+
+    "run"     — allow=True, or ALLOW_REMOTE_MIGRATIONS=1. The caller owns the
+                schema: migration scripts (via scripts/migrations/_guard.py,
+                which sets the env var only after confirming the target) and
+                the scrape orchestrators.
+    "skip"    — allow=False. The caller has explicitly declared it does not
+                own the schema and must not touch it: the API server, the
+                Discord notifier, ad hoc read paths. It connects normally
+                and never runs DDL.
+    "refuse"  — allow is None and the env var is unset. Nobody has said
+                anything, so this is the ad hoc REPL/notebook case the drift
+                came from. Raise loudly.
+
+    "skip" is not the same as the silent skip that would be wrong here.
+    A caller passing False has stated it doesn't manage the schema, and a
+    reader that cannot migrate cannot drift the schema; refusing to start
+    would only take the API down for a schema it was never going to change.
+    """
+    if allow is True:
+        return "run"
+    if allow is False:
+        return "skip"
+    return "run" if os.getenv(_ALLOW_REMOTE_MIGRATIONS_ENV) == "1" else "refuse"
+
+
+def _refuse_remote_migration(target: str) -> None:
+    raise RuntimeError(
+        f"Refusing to run schema/migrations against remote database "
+        f"{target!r} without explicit opt-in — this would apply schema "
+        "changes to a live remote target. Pass allow_remote_migrations=True "
+        f"to Database()/get_db(), or set {_ALLOW_REMOTE_MIGRATIONS_ENV}=1, to "
+        "migrate it; pass allow_remote_migrations=False if this caller only "
+        "reads and writes rows and does not manage the schema."
+    )
+
+
+def _strip_sql_line_comments(script: str) -> str:
+    """
+    Remove `--` line comments from a SQL script.
+
+    Not a general SQL tokenizer: it treats `--` as a comment marker
+    unconditionally, with no awareness of quoted string literals. That is
+    safe for schema.sql specifically — every string literal in that file
+    (strftime format/arg strings, short enum tags like 'parts') was checked
+    by hand and none contains `--`. If schema.sql ever grows a string literal
+    containing `--`, this needs real quote-tracking; until then the simple
+    per-line strip is correct and keeps the splitter easy to audit.
+    """
+    return "\n".join(line[: line.find("--")] if "--" in line else line
+                      for line in script.splitlines())
+
+
+def _split_sql_statements(script: str) -> list[str]:
+    """
+    Split a SQL script into individual statements suitable for one
+    self._conn.execute() call each.
+
+    Strips `--` line comments first (schema.sql's comments themselves
+    contain semicolons and apostrophes — e.g. "it's not safe in this
+    executescript()," and "'model' | 'spec'" — so a naive split(";") on the
+    raw text mangles statement boundaries) and drops empty statements left
+    behind by comment-only lines.
+    """
+    stripped = _strip_sql_line_comments(script)
+    return [s.strip() for s in stripped.split(";") if s.strip()]
+
 
 def _slug(url: str) -> str:
-    """Derive a stable, short identifier from a product URL."""
-    url = re.sub(r"https?://[^/]+/", "", url).rstrip("/")
-    url = re.sub(r"[^\w-]", "-", url)
-    url = re.sub(r"-{2,}", "-", url)
-    return url[:200]
+    """
+    Stable per-product id derived from its URL.
+
+    Raises rather than returning a constant when the URL carries no product
+    path: parts is keyed on (source, source_id), so a constant id makes every
+    product in a run overwrite the same row — a silent catalogue wipe that
+    reports as a successful scrape.
+    """
+    m = re.match(r"https?://[^/]+/(.+)", url or "")
+    if not m:
+        raise ValueError(f"cannot derive a product id from URL: {url!r}")
+    slug = m.group(1).rstrip("/")
+    slug = re.sub(r"[^\w-]", "-", slug)
+    slug = re.sub(r"-{2,}", "-", slug)
+    slug = slug[:200]
+    if not slug or slug in {"", "/", "product", "index"}:
+        raise ValueError(f"cannot derive a product id from URL: {url!r}")
+    return slug
 
 
-def _median(values: list[int]) -> float:
+def _median(values: Sequence[float]) -> float:
     """Median of a non-empty list."""
     s = sorted(values)
     n = len(s)
@@ -101,6 +198,33 @@ def _trimmed_band(values: list[int], frac: float = 0.05) -> tuple[int, int]:
     k = max(1, math.ceil(len(s) * frac))
     kept = s[k: len(s) - k] or s  # safety: never empty
     return kept[0], kept[-1]
+
+
+def _ratio_index(ratios: list[float], frac: float = 0.05) -> float:
+    """
+    The period-over-period price relative for a matched basket: a trimmed
+    geometric mean (a Jevons elementary index), not a median.
+
+    The median was the original choice and it was too blunt for baskets this
+    small. `_median` of a list of ratios returns EXACTLY 1.0 whenever half or
+    more of the basket held its price — which, for retailers that reprice a
+    couple of SKUs at a time, is most weeks. Measured over the live
+    catalogue: median-of-ratios left 38 of 101 multi-point series perfectly
+    flat with a median total movement of 0.93%; the trimmed geometric mean
+    leaves 27 flat at 2.07%. The 13 series that differ are ones where a real
+    subset repriced and the median discarded it, so the chart claimed
+    "unchanged" about a group that had moved.
+
+    Geometric, not arithmetic: price relatives compound, so a +10% followed
+    by a -10% must return to the start. The same trim as `_trimmed_band`
+    (n>=5 only) guards the tail without pretending it can help a 3-item
+    basket, where there is no non-extreme element to fall back on.
+    """
+    s = sorted(ratios)
+    if len(s) >= 5:
+        k = max(1, math.ceil(len(s) * frac))
+        s = s[k: len(s) - k] or s
+    return math.exp(sum(math.log(r) for r in s) / len(s))
 
 
 # Terms that — regardless of category — flag an item as non-PC-part junk.
@@ -160,6 +284,23 @@ _CATEGORY_BLOCKLIST: dict[str, tuple[str, ...]] = {
         "case with",       # "Case with 300W Power Supply" combos
         "chassis with",    # "Chassis with 300W Power Supply" combos
     ),
+    "monitor": (
+        "keyboard",        # mechanical keyboards listed under monitors
+        "light bar",       # RGB light bars
+        "lightbar",
+        "mouse pad",
+        # NOTE: "webcam" deliberately excluded — live data has real monitors
+        # with a built-in Windows Hello webcam in the product name (e.g.
+        # "Philips 27E1N5600HE ... with Windows Hello Webcam"); the term
+        # would quarantine genuine inventory, not junk.
+    ),
+    "hdd": (
+        "docking station",
+        "portable ssd",    # portable/external SSDs are not HDDs
+        "external ssd",
+        "enclosure",
+        "caddy",
+    ),
 }
 
 
@@ -174,24 +315,67 @@ _MIN_PRICE: dict[str, int] = {
     "psu":         5000,
     "case":        3000,
     "cooling":      500,
+    "hdd":         1500,
+    "monitor":     5000,
 }
 
 # How many of the most recent scrape dates a trend series shows. Scrape dates
 # are irregular, so this is "the last N scrapes", not a time window. At ~300px
 # of sparkline the points and their hover targets get unusable past a handful.
 # Temporary ceiling until the trends page grows a proper range filter.
-_TREND_MAX_DATES = 5
+#
+# Raised 5 -> 10. At 5 the page was mostly dead-flat lines and the window was
+# the biggest single reason: measured on the live catalogue, 63 of 93 visible
+# multi-point series (68%) were perfectly flat inside the last 5 buckets, vs
+# 27 of 101 (27%) over full history. The movement is real, it is just older
+# than five weeks — the recent tail happens to be quiet. 10 covers every
+# bucket currently held (cpu/gpu 10, ram 8) and still leaves ~32px between
+# points on a 300px sparkline, so the hover targets stay usable.
+_TREND_MAX_DATES = 10
 
 
-def _is_blocked(name: str, category: str) -> bool:
+def _blocked_by(name: str, category: str) -> Optional[str]:
+    """Return the rule id that rejects `name`, or None if it passes."""
     lower = name.lower()
     for term in _GLOBAL_BLOCKLIST:
         if term in lower:
-            return True
+            return f"blocklist:global:{term}"
     for term in _CATEGORY_BLOCKLIST.get(category, ()):
         if term in lower:
-            return True
-    return False
+            return f"blocklist:{category}:{term}"
+    return None
+
+
+# Multi-row INSERT chunk sizes for upsert_products().
+#
+# Against Turso every execute() is one Hrana request == one network round
+# trip to the region the database lives in, so the cost of a write is set by
+# how many statements it takes, not how much data they carry. The
+# one-statement-per-product version of upsert_products issued ~2 round trips
+# per product — 16,700 for a full nine-source scrape — and spent 2h20m of a
+# 2h25m run doing nothing but waiting on the wire. Batching the same work
+# into multi-row VALUES statements takes it to ~40 round trips.
+#
+# SQLite caps a statement at 32766 bound parameters (SQLITE_MAX_VARIABLE_NUMBER)
+# and Turso additionally caps the HTTP request body, at a size we have not
+# measured. These sit an order of magnitude under the parameter ceiling on
+# purpose: the entire win is in the first two orders of magnitude of round-trip
+# reduction, so crowding either limit buys seconds while risking a hard error
+# on the batch that finally exceeds it.
+_PARTS_CHUNK = 200        # 10 params/row ->  2,000 params
+_PRICE_CHUNK = 500        #  3 params/row ->  1,500 params
+_QUARANTINE_CHUNK = 200   #  7 params/row ->  1,400 params
+
+
+def _chunks(seq: list, n: int):
+    for i in range(0, len(seq), n):
+        yield seq[i:i + n]
+
+
+def _values_clause(rows: int, cols: int) -> str:
+    """`(?,?,?),(?,?,?)...` — the VALUES body for a multi-row INSERT."""
+    one = "(" + ",".join("?" * cols) + ")"
+    return ",".join([one] * rows)
 
 
 _VALID_SPEC_KEYS = frozenset({
@@ -199,6 +383,58 @@ _VALID_SPEC_KEYS = frozenset({
     "wattage", "rating", "form_factor", "type", "aio_size",
     "fan_size", "interface", "capacity", "model",
 })
+
+# M29: `get_filter_options` used to hand the frontend raw exact spec values
+# ("16GB", "32GB", ...) which its own UI then grouped into range-looking
+# dropdown labels — but a click still filtered on one exact value, so picking
+# a "16-32GB" grouping silently dropped everything except whichever single
+# value the UI happened to send. `list_parts` below is the fix: it accepts a
+# "lo-hiUNIT" bucket value and applies a real BETWEEN predicate.
+# `_emit_bucket_label` (below) produces that label shape but, as of fix
+# round 2, is not wired into `get_filter_options`'s response — FilterBar.tsx
+# renders any key it's given as a real dropdown, so shipping a label with no
+# SPEC_LABELS entry and no getParts() allow-list entry would ship a dead
+# control. `_parse_bucket` is the only thing that reads the label shape, so
+# a change to one format still requires a change to the other whenever
+# Phase 4 wires the emit side back up.
+_BUCKETED_SPEC_KEYS = frozenset({"capacity"})
+_BUCKET_VALUE_RE = re.compile(r'^(\d+(?:\.\d+)?)(GB|TB)$', re.IGNORECASE)
+_BUCKET_LABEL_RE = re.compile(r'^(\d+(?:\.\d+)?)-(\d+(?:\.\d+)?)(GB|TB)$', re.IGNORECASE)
+
+
+def _parse_bucket(value: str) -> Optional[tuple[float, float]]:
+    """"16-32GB" -> (16, 32). None if `value` isn't a range label (a plain
+    "16GB" falls through to exact-match filtering, unchanged)."""
+    m = _BUCKET_LABEL_RE.match(value)
+    if not m:
+        return None
+    lo, hi = float(m.group(1)), float(m.group(2))
+    return (lo, hi) if lo <= hi else None
+
+
+def _emit_bucket_label(values: list[str]) -> Optional[str]:
+    """
+    Collapse a category's distinct spec values into one "{lo}-{hi}{unit}"
+    range label, e.g. ["16GB", "32GB"] -> "16-32GB". Returns None (caller
+    falls back to the raw list) when the values aren't all the same
+    "<number><GB|TB>" shape and unit — mixed units (some SSD capacities are
+    GB, others TB) can't be compared as one range without a unit-aware
+    predicate, which `list_parts`'s CAST/REPLACE doesn't do.
+    """
+    matches = [_BUCKET_VALUE_RE.match(v) for v in values]
+    if not values or any(m is None for m in matches):
+        return None
+    parsed = [m for m in matches if m is not None]
+    units = {m.group(2).upper() for m in parsed}
+    if len(units) != 1:
+        return None
+    nums = [float(m.group(1)) for m in parsed]
+    unit = units.pop()
+    lo, hi = min(nums), max(nums)
+    if lo == hi:
+        return None  # only one distinct value — exact match already works
+    fmt = lambda n: str(int(n)) if n == int(n) else str(n)
+    return f"{fmt(lo)}-{fmt(hi)}{unit}"
 
 
 def _like_escape(term: str) -> str:
@@ -216,7 +452,7 @@ _CATEGORY_SPEC_KEYS: dict[str, list[str]] = {
     "cpu":         ["brand", "socket", "model"],
     "gpu":         ["brand", "vram", "model"],
     "ram":         ["brand", "ddr_type", "speed", "capacity"],
-    "motherboard": ["brand", "socket", "chipset"],
+    "motherboard": ["brand", "socket", "chipset", "form_factor"],
     "psu":         ["brand", "wattage", "rating"],
     "case":        ["brand", "form_factor"],
     "cooling":     ["brand", "type", "aio_size", "fan_size"],
@@ -226,8 +462,75 @@ _CATEGORY_SPEC_KEYS: dict[str, list[str]] = {
 }
 
 
+class _NoCommitConnection:
+    """
+    Wraps a DB connection so commit() is a no-op and everything else passes
+    through. Used by the SCRAPE_NO_DB_WRITE dry run: the scrape executes fully
+    (fetch, parse, counts, logs, anomaly detection) but nothing persists —
+    uncommitted work rolls back on close().
+
+    A proxy rather than attribute assignment because sqlite3.Connection.commit
+    is read-only; assigning over it worked on libSQL and crashed on SQLite.
+    """
+
+    def __init__(self, conn):
+        self._wrapped = conn
+
+    def commit(self, *_args, **_kwargs):
+        return None
+
+    def __getattr__(self, name):
+        return getattr(self._wrapped, name)
+
+    def __setattr__(self, name, value):
+        if name == "_wrapped":
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._wrapped, name, value)
+
+    def __enter__(self):
+        # Must return self, not self._wrapped: the latter hands a bare
+        # `with self._conn as c:` the real connection, and c.commit() would
+        # bypass the no-op wrapper entirely — a refactor from the bare
+        # `with self._conn:` form (safe today, since __exit__ below already
+        # swallows the implicit success-commit) to the `as c:` form would
+        # silently make SCRAPE_NO_DB_WRITE inert. Returning self keeps every
+        # write inside the with-block going through this proxy's commit().
+        self._wrapped.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        # `with self._conn:` commits on success in sqlite3. Suppress that
+        # commit so a context-managed write is dropped too; still roll back
+        # on error so an exception behaves normally.
+        #
+        # Rolling back explicitly on the success path, rather than returning
+        # early and leaving the work dangling until close(): returning early
+        # skips the wrapped connection's own __exit__ entirely, so anything
+        # that connection tracks across a with-block never gets unwound. That
+        # stranded LibsqlConnection._in_transaction at True after the first
+        # dry-run write, which permanently disabled Hrana stream recovery for
+        # the rest of the process — every later read that lost its stream
+        # raised instead of reconnecting, and a full dry run died on the
+        # trend rebuild's first big SELECT. The rollback discards exactly the
+        # work the no-op commit was already discarding, so the dry run's
+        # observable behaviour is unchanged.
+        if exc[0] is None:
+            self._wrapped.rollback()
+            return False
+        return self._wrapped.__exit__(*exc)
+
+
 class Database:
-    def __init__(self, path: str | Path | None = None):
+    def __init__(
+        self,
+        path: str | Path | None = None,
+        *,
+        allow_remote_migrations: bool | None = None,
+    ):
+        # "run" / "skip" / "refuse" — see _remote_migration_mode(). Only
+        # consulted when the resolved target is remote.
+        self._remote_migration_mode = _remote_migration_mode(allow_remote_migrations)
         url = os.getenv("TURSO_DATABASE_URL")
         if url:
             # Remote Turso (libSQL). `path` is ignored in this mode.
@@ -243,6 +546,14 @@ class Database:
             self._target = str(self._path)
             self._conn = sqlite3.connect(str(self._path))
             self._conn.row_factory = sqlite3.Row
+
+        if self._remote and os.getenv("PYTEST_CURRENT_TEST"):
+            raise RuntimeError(
+                "Refusing to open the remote Turso DB from a test process. "
+                "tests/conftest.py strips TURSO_* — if you see this, an import "
+                "re-set them."
+            )
+
         self._apply_schema()
 
         # ── TEMP DRY-RUN SWITCH — remove when scrapers are fixed & verified ──
@@ -255,14 +566,88 @@ class Database:
         # Reverting = delete this block + the SCRAPE_NO_DB_WRITE env in scrape.yml.
         # See CLAUDE.md "## TEMP — Dry-run switch".
         if os.getenv("SCRAPE_NO_DB_WRITE") == "1":
-            self._conn.commit = lambda *a, **k: None
+            self._conn = _NoCommitConnection(self._conn)
+
+    def _transact(self, work, *, attempts: int = 3):
+        """
+        Run `work()` inside a transaction, redoing the ENTIRE block if the
+        transaction was lost to a transient transport fault.
+
+        `db/libsql_adapter.py` deliberately refuses to replay a single
+        statement that failed inside a `with conn:` — the transaction died
+        with it, so re-running that one statement on a fresh stream would
+        apply it outside the unit of work its caller wrote. For
+        `rebuild_price_trends` that means re-inserting every trend row on
+        top of the ones the lost DELETE never removed. The adapter's comment
+        names redoing the whole unit of work as the correct response and
+        leaves it to the caller; this is the caller's half.
+
+        ONLY for blocks that reach the same end state when redone in full.
+        Every caller today either replaces its table's contents wholesale or
+        recomputes what it writes from the table's current contents, so a
+        redo repeats the same decision rather than compounding it.
+        `record_scrape_run` is deliberately NOT routed through here: it
+        appends a row, so redoing it after a commit whose acknowledgement was
+        merely lost would append that row twice.
+
+        Local SQLite never raises any of these, so this is a plain
+        `with self._conn:` there.
+        """
+        last: Optional[Exception] = None
+        for attempt in range(attempts):
+            try:
+                with self._conn:
+                    return work()
+            except ValueError as exc:
+                if not self._remote:
+                    raise
+                from db import libsql_adapter  # local import: libsql optional offline
+                # Every tier qualifies here, including the read-only one:
+                # its ambiguity is "the statement may already have run",
+                # which only matters when replaying a statement in
+                # isolation. Redoing an idempotent block is unaffected by
+                # whether the lost attempt landed.
+                if not (
+                    libsql_adapter._is_stream_lost(exc)
+                    or libsql_adapter._is_transient(exc)
+                    or libsql_adapter._is_transient_read_only(exc)
+                ):
+                    raise
+                last = exc
+                if attempt == attempts - 1:
+                    raise
+        raise last if last is not None else RuntimeError("_transact exhausted without an error")
 
     def _apply_schema(self):
         # Remote DB: apply schema + migrations once per process (see module note).
         if self._remote and self._target in _REMOTE_SCHEMA_APPLIED:
             return
+        if self._remote:
+            if self._remote_migration_mode == "refuse":
+                _refuse_remote_migration(self._target)
+            if self._remote_migration_mode == "skip":
+                # The caller declared it does not own the schema. Connect
+                # without running a single DDL statement — and do NOT mark
+                # the target as applied, so a later opt-in caller in the
+                # same process still migrates.
+                return
         with open(_SCHEMA, encoding="utf-8") as f:
-            self._conn.executescript(f.read())
+            script = f.read()
+        for stmt in _split_sql_statements(script):
+            if self._remote and stmt.upper().startswith("PRAGMA"):
+                # libSQL rejects PRAGMA outright (SQL_PARSE_ERROR). Under the old
+                # executescript() call that error was swallowed and silently
+                # abandoned every statement after it — the entire schema (every
+                # CREATE TABLE/INDEX) went missing on Turso with no error raised.
+                # Skipping PRAGMAs explicitly, statement by statement, is what
+                # lets the rest of the schema actually apply remotely.
+                continue
+            try:
+                self._conn.execute(stmt)
+            except Exception as e:
+                raise RuntimeError(
+                    f"schema.sql statement failed: {stmt[:80]!r}: {e}"
+                ) from e
         self._migrate()
         self._conn.commit()
         if self._remote:
@@ -291,6 +676,37 @@ class Database:
                 self._conn.execute(
                     f"ALTER TABLE {table} ADD COLUMN name_norm TEXT DEFAULT NULL"
                 )
+            if "delisted_at" not in cols:
+                self._conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN delisted_at TEXT DEFAULT NULL"
+                )
+        parts_cols = {
+            r["name"]
+            for r in self._conn.execute("PRAGMA table_info(parts)").fetchall()
+        }
+        if "latest_price" not in parts_cols:
+            self._conn.execute(
+                "ALTER TABLE parts ADD COLUMN latest_price INTEGER DEFAULT NULL"
+            )
+        # Backfill, not just add: list_parts() gates on
+        # `latest_price IS NOT NULL`, so a DB that gains the column above
+        # (or any row that otherwise ended up with a NULL latest_price)
+        # would serve an empty catalogue with HTTP 200 until someone
+        # remembered to run the standalone backfill script by hand.
+        # NULL-only so this can never fight that script or overwrite a
+        # fresher cached value — cheap to run every open when there are no
+        # NULLs (the WHERE makes it match zero rows and do no work).
+        self._conn.execute(
+            """
+            UPDATE parts SET latest_price = (
+                SELECT price_pkr FROM price_log
+                WHERE part_id = parts.id AND price_pkr IS NOT NULL
+                ORDER BY scraped_at DESC, id DESC
+                LIMIT 1
+            )
+            WHERE latest_price IS NULL
+            """
+        )
         run_cols = {
             r["name"]
             for r in self._conn.execute("PRAGMA table_info(scrape_runs)").fetchall()
@@ -306,6 +722,114 @@ class Database:
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_prebuilts_active ON prebuilts(is_active)"
         )
+        # Serves the market page's hot query: filter by category + active,
+        # order by price. Covers the ORDER BY so the sort resolves from the
+        # index (SQLite can walk an ASC index backwards for DESC, so this one
+        # index serves both sort directions — no separate DESC variant).
+        # Created here rather than in schema.sql: schema.sql's CREATE TABLE IF
+        # NOT EXISTS never re-adds columns to a pre-existing table, and this
+        # index references category/is_active/latest_price, all of which are
+        # ALTERed onto older DBs above. An index in schema.sql referencing
+        # them would run inside the same executescript() as the CREATE TABLE,
+        # before those ALTERs ever execute, and fail on such a DB.
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_parts_cat_active_price "
+            "ON parts(category, is_active, latest_price)"
+        )
+        trend_cols = {
+            r["name"]
+            for r in self._conn.execute("PRAGMA table_info(price_trends)").fetchall()
+        }
+        if "basket_size" not in trend_cols:
+            self._conn.execute(
+                "ALTER TABLE price_trends ADD COLUMN basket_size INTEGER NOT NULL DEFAULT 0"
+            )
+        # One-time cleanup: an earlier revision of deactivate_unseen_* created
+        # this as a shared scratch table, which is unsafe under overlapping
+        # sweeps (cron + manual dispatch + heal rerun hitting the same DB).
+        # Drop it if a prior run of that code left it behind.
+        self._conn.execute("DROP TABLE IF EXISTS _sweep_seen_ids")
+        self._migrate_quarantine_dedup()
+
+        # Populates sqlite_stat1 so the planner picks the composite index
+        # instead of guessing. Cheap on this data size; skip when the stats
+        # table already exists so it is not re-run on every connection.
+        # Local sqlite3 only: Hrana (libSQL's remote protocol) rejects ANALYZE
+        # outright ("SQL not allowed statement: ANALYZE") — running it
+        # unconditionally would break every remote Database() construction.
+        # Turso's query planner keeps its own statistics server-side, so
+        # skipping this there costs nothing.
+        if not self._remote:
+            has_stats = self._conn.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name='sqlite_stat1'"
+            ).fetchone()[0]
+            if not has_stats:
+                self._conn.execute("ANALYZE")
+
+    def _migrate_quarantine_dedup(self):
+        """
+        Older DBs may have created quarantined_rows before it was deduped on
+        (source, url) — add the missing columns, collapse any rows that
+        already violate the new key, then create the unique index. Runs
+        every time via _migrate(); each step is a no-op once applied. Doing
+        this here (not in schema.sql) matters: schema.sql's CREATE TABLE IF
+        NOT EXISTS never fires again on a DB that already has the table, and
+        creating the unique index before deduping would raise on any
+        pre-existing duplicate (source, url) pair.
+        """
+        q_cols = {
+            r["name"]
+            for r in self._conn.execute("PRAGMA table_info(quarantined_rows)").fetchall()
+        }
+        if not q_cols:
+            return  # table doesn't exist yet (shouldn't happen post schema.sql)
+        had_legacy_ts = "quarantined_at" in q_cols
+        if "times_rejected" not in q_cols:
+            self._conn.execute(
+                "ALTER TABLE quarantined_rows ADD COLUMN times_rejected INTEGER NOT NULL DEFAULT 1"
+            )
+        for col in ("first_seen_at", "last_seen_at"):
+            if col not in q_cols:
+                self._conn.execute(f"ALTER TABLE quarantined_rows ADD COLUMN {col} TEXT")
+                if had_legacy_ts:
+                    self._conn.execute(
+                        f"UPDATE quarantined_rows SET {col} = quarantined_at WHERE {col} IS NULL"
+                    )
+                else:
+                    self._conn.execute(
+                        f"""UPDATE quarantined_rows SET {col} = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                            WHERE {col} IS NULL"""
+                    )
+
+        # Collapse any rows sharing (source, url) from before the dedup existed,
+        # so the unique index below doesn't fail on pre-existing duplicates.
+        dup_groups = self._conn.execute(
+            "SELECT source, url FROM quarantined_rows GROUP BY source, url HAVING COUNT(*) > 1"
+        ).fetchall()
+        for g in dup_groups:
+            rows = self._conn.execute(
+                "SELECT * FROM quarantined_rows WHERE source IS ? AND url IS ? ORDER BY id",
+                (g["source"], g["url"]),
+            ).fetchall()
+            keep_id = rows[0]["id"]
+            total = sum((r["times_rejected"] or 1) for r in rows)
+            first = min(r["first_seen_at"] for r in rows if r["first_seen_at"])
+            last = max(r["last_seen_at"] for r in rows if r["last_seen_at"])
+            self._conn.execute(
+                "UPDATE quarantined_rows SET times_rejected = ?, first_seen_at = ?, last_seen_at = ? WHERE id = ?",
+                (total, first, last, keep_id),
+            )
+            self._conn.executemany(
+                "DELETE FROM quarantined_rows WHERE id = ?",
+                [(r["id"],) for r in rows[1:]],
+            )
+
+        self._conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_quarantine_dedup ON quarantined_rows(source, url)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_quarantine_time ON quarantined_rows(last_seen_at)"
+        )
 
     # ------------------------------------------------------------------
     # Write
@@ -315,11 +839,38 @@ class Database:
         """
         Upsert a list of scraped products and log their prices.
         Returns the number of price_log rows inserted.
+
+        Sets parts.latest_price to this call's price_pkr on both the INSERT
+        and ON CONFLICT DO UPDATE paths — it is a cache of the newest
+        price_log row, kept in sync here rather than derived at read time.
+        A back-dated re-scrape (an older scraped_at run applied after a
+        newer one) will overwrite latest_price with the older price; this
+        matches how the rest of the pipeline treats back-dated runs (see
+        CLAUDE.md "Trends") and is not a bug.
+
+        Written as chunked multi-row INSERTs rather than one statement per
+        product: see the _PARTS_CHUNK comment for why the round-trip count,
+        not the row count, is what costs against Turso. The three phases
+        below (filter in Python, upsert parts, insert prices) exist because
+        price_log needs part ids that only the parts upsert can produce, and
+        SQLite has no way to feed one statement's RETURNING into another's
+        VALUES — so the ids must come back to Python in between.
         """
-        inserted = 0
         skipped = 0
-        seen_ids: dict[str, set[int]] = {}
+        quarantined: list[tuple] = []
         cur = self._conn.cursor()
+
+        # -- phase 1: filter and de-duplicate, no DB access ----------------
+        #
+        # Keyed by (source, source_id) — the same UNIQUE the upsert conflicts
+        # on. De-duplicating here is not an optimisation, it is required:
+        # SQLite rejects a multi-row INSERT ... ON CONFLICT DO UPDATE whose
+        # own VALUES list names the same conflict target twice ("ON CONFLICT
+        # DO UPDATE command does not affect row a second time"), and one
+        # product legitimately appears under two category URLs at several
+        # retailers. Last occurrence wins, matching what the row-at-a-time
+        # version left behind after its second DO UPDATE overwrote the first.
+        staged: dict[tuple[str, str], tuple] = {}
         for p in products:
             if not p.get("category"):
                 raise ValueError(f"Product missing category: {p.get('name', '<unknown>')!r}")
@@ -330,21 +881,47 @@ class Database:
             min_price = _MIN_PRICE.get(p["category"])
             if min_price is not None and price < min_price:
                 skipped += 1
+                quarantined.append((p["source"], p["name"], p["category"], price,
+                                    p.get("url"), f"min_price:{p['category']}:{min_price}"))
                 continue
-            if _is_blocked(p["name"], p["category"]):
+            rule = _blocked_by(p["name"], p["category"])
+            if rule:
                 skipped += 1
+                quarantined.append((p["source"], p["name"], p["category"], price,
+                                    p.get("url"), rule))
                 continue
-            source_id = _slug(p["url"])
-            thumbnail = p.get("thumbnail_url")
+            try:
+                source_id = _slug(p["url"])
+            except ValueError as exc:
+                skipped += 1
+                quarantined.append((p["source"], p["name"], p["category"], price,
+                                    p.get("url"), f"bad_url:{exc}"))
+                continue
 
             raw_specs = extract_specs(p["name"], p["category"])
             specs_json = json.dumps(raw_specs, ensure_ascii=False) if raw_specs else None
+            staged[(p["source"], source_id)] = (
+                p["source"], source_id, p["name"], p["category"], p["url"],
+                p.get("thumbnail_url"), specs_json, normalize_name(p["name"]),
+                p["scraped_at"], price,
+            )
 
-            row = cur.execute(
-                """
+        # -- phase 2: upsert parts, chunked, recovering the ids ------------
+        #
+        # RETURNING carries source and source_id back alongside the id so the
+        # result can be matched to its input by key. Matching by row order
+        # would be wrong: SQLite does not promise RETURNING emits rows in
+        # VALUES order, and a mis-ordered map silently attaches every price
+        # to the wrong product — a corruption nothing downstream can detect.
+        part_ids: dict[tuple[str, str], int] = {}
+        seen_ids: dict[str, set[int]] = {}
+        rows = list(staged.values())
+        for chunk in _chunks(rows, _PARTS_CHUNK):
+            returned = cur.execute(
+                f"""
                 INSERT INTO parts (source, source_id, name, category, url, thumbnail_url, specs,
-                                   name_norm, is_active, last_seen_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+                                   name_norm, last_seen_at, latest_price)
+                VALUES {_values_clause(len(chunk), 10)}
                 ON CONFLICT(source, source_id) DO UPDATE SET
                     name          = excluded.name,
                     category      = excluded.category,
@@ -352,31 +929,117 @@ class Database:
                     specs         = excluded.specs,
                     name_norm     = excluded.name_norm,
                     is_active     = 1,
+                    delisted_at   = NULL,
                     last_seen_at  = excluded.last_seen_at,
+                    latest_price  = excluded.latest_price,
                     updated_at    = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                RETURNING id, source, source_id
+                """,
+                [v for row in chunk for v in row],
+            ).fetchall()
+            for r in returned:
+                part_ids[(r["source"], r["source_id"])] = r["id"]
+                seen_ids.setdefault(r["source"], set()).add(r["id"])
+
+        missing = [k for k in staged if k not in part_ids]
+        if missing:
+            # Every staged row conflicts or inserts, so every one must come
+            # back. A gap means RETURNING dropped rows, and continuing would
+            # write a price_log with holes and then sweep the parts whose ids
+            # never arrived. Fail the upsert instead.
+            raise RuntimeError(
+                f"parts upsert returned no id for {len(missing)} of {len(staged)} rows "
+                f"(first: {missing[0]!r})"
+            )
+
+        # -- phase 3: price rows, chunked --------------------------------
+        #
+        # ON CONFLICT(part_id, scraped_at) DO NOTHING replaces the old
+        # per-row IntegrityError catch: re-running the same scrape is
+        # expected and harmless. The conflict target is named rather than
+        # left bare so this still only swallows THAT collision — a bare DO
+        # NOTHING would also silently absorb any other constraint failure,
+        # which the old `if "UNIQUE" not in str(exc)` re-raise deliberately
+        # did not. Phase 1 guarantees no duplicate (part_id, scraped_at)
+        # within the batch itself, so a conflict here always means the row
+        # was already in the table.
+        #
+        # RETURNING id gives the true inserted count: a DO NOTHING conflict
+        # returns nothing, so len() of the result is exactly the number of
+        # new rows, which is what this method's contract promises.
+        inserted = 0
+        price_rows = [
+            (part_ids[(row[0], row[1])], row[9], row[8])   # part_id, price, scraped_at
+            for row in rows
+        ]
+        for chunk in _chunks(price_rows, _PRICE_CHUNK):
+            written = cur.execute(
+                f"""
+                INSERT INTO price_log (part_id, price_pkr, scraped_at)
+                VALUES {_values_clause(len(chunk), 3)}
+                ON CONFLICT(part_id, scraped_at) DO NOTHING
                 RETURNING id
                 """,
-                (p["source"], source_id, p["name"], p["category"], p["url"], thumbnail, specs_json,
-                 normalize_name(p["name"]), p["scraped_at"]),
-            ).fetchone()
-            part_id = row["id"]
-            seen_ids.setdefault(p["source"], set()).add(part_id)
+                [v for row in chunk for v in row],
+            ).fetchall()
+            inserted += len(written)
 
+        if quarantined:
+            # Diagnostic-only: a failure here (e.g. a pre-dedup DB the migration
+            # hasn't reached yet) must never abort a real scrape's upsert.
             try:
-                cur.execute(
-                    """
-                    INSERT INTO price_log (part_id, price_pkr, scraped_at)
-                    VALUES (?, ?, ?)
-                    """,
-                    (part_id, p.get("price_pkr"), p["scraped_at"]),
-                )
-                inserted += 1
-            except sqlite3.IntegrityError:
-                pass
+                self._write_quarantine(cur, quarantined)
+            except Exception as e:
+                print(f"    WARNING: quarantine write failed (non-fatal): {e}")
 
         self._conn.commit()
         self._last_seen_ids = seen_ids
         return inserted
+
+    @staticmethod
+    def _write_quarantine(cur, quarantined: list[tuple]) -> None:
+        """
+        Chunked multi-row upsert of rejected rows, deduped on (source, url)
+        like the table's own unique index.
+
+        times_rejected is carried in the INSERT and summed on conflict rather
+        than hard-coded to `+ 1`, so collapsing N in-batch duplicates into one
+        row still counts N rejections — the number is the whole point of the
+        column. Rows with a NULL url keep a per-row key: SQL NULLs never
+        conflict with each other, so folding them together in Python would
+        merge rows the table itself would have kept apart.
+        """
+        counted: dict[tuple, list] = {}
+        for i, q in enumerate(quarantined):
+            key = (q[0], q[4]) if q[4] is not None else ("\x00null-url", i)
+            if key in counted:
+                counted[key][6] += 1
+            else:
+                counted[key] = [*q, 1]
+
+        for chunk in _chunks(list(counted.values()), _QUARANTINE_CHUNK):
+            cur.execute(
+                f"""
+                INSERT INTO quarantined_rows (source, name, category, price_pkr, url, rule,
+                                              times_rejected)
+                VALUES {_values_clause(len(chunk), 7)}
+                ON CONFLICT(source, url) DO UPDATE SET
+                    name           = excluded.name,
+                    category       = excluded.category,
+                    price_pkr      = excluded.price_pkr,
+                    rule           = excluded.rule,
+                    times_rejected = quarantined_rows.times_rejected + excluded.times_rejected,
+                    last_seen_at   = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                """,
+                [v for row in chunk for v in row],
+            )
+
+    def list_quarantined(self, limit: int = 100) -> list[dict]:
+        """Most recent quarantined rows, newest first. Diagnostic use only."""
+        rows = self._conn.execute(
+            "SELECT * FROM quarantined_rows ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     def deactivate_unseen_parts(self, source: str) -> int:
         """
@@ -390,21 +1053,47 @@ class Database:
         its entire catalogue.
 
         Returns the number of parts newly marked inactive.
+
+        No scratch table: read this source's currently-active ids, subtract
+        the seen-id set in Python, and UPDATE the (usually much smaller)
+        to-deactivate set in chunks of <=900 ids. Avoids both the
+        999-variable ceiling on a single IN(...) and any shared/global
+        table name that could collide between overlapping sweeps (weekly
+        cron, manual dispatch, self-heal rerun all hit the same remote DB).
         """
         seen = getattr(self, "_last_seen_ids", {}).get(source, set())
         if not seen:
             return 0
-        placeholders = ",".join("?" * len(seen))
-        with self._conn:
-            cur = self._conn.execute(
-                f"""
-                UPDATE parts SET is_active = 0,
-                                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                WHERE source = ? AND is_active = 1 AND id NOT IN ({placeholders})
-                """,
-                [source, *seen],
-            )
-        return cur.rowcount
+
+        # Safe to redo whole (see _transact): the SELECT is inside the block,
+        # so a retry recomputes `to_deactivate` from the table as it stands
+        # and re-issues an UPDATE already guarded by `is_active = 1`.
+        def _sweep():
+            active_rows = self._conn.execute(
+                "SELECT id FROM parts WHERE source = ? AND is_active = 1",
+                (source,),
+            ).fetchall()
+            to_deactivate = [r["id"] for r in active_rows if r["id"] not in seen]
+            if not to_deactivate:
+                return 0
+            total = 0
+            for i in range(0, len(to_deactivate), 900):
+                chunk = to_deactivate[i : i + 900]
+                placeholders = ",".join("?" * len(chunk))
+                cur = self._conn.execute(
+                    f"""
+                    UPDATE parts SET is_active = 0,
+                                     delisted_at = COALESCE(delisted_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                                     updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    WHERE is_active = 1
+                      AND id IN ({placeholders})
+                    """,
+                    chunk,
+                )
+                total += cur.rowcount
+            return total
+
+        return self._transact(_sweep)
 
     # ------------------------------------------------------------------
     # Scrape run log
@@ -464,10 +1153,15 @@ class Database:
         A source with no recorded runs at all is reported as not stale: we have
         no evidence either way, and flagging it would be a guess.
         """
+        # Was two round trips (latest-run lookup, then a separate
+        # last-success-per-source lookup); last_success_at is now a
+        # correlated subquery on the same statement, so this is one.
         latest = self._conn.execute(
             """
             SELECT source, ok, products, finished_at, error,
-                   before_active, after_active, swept
+                   before_active, after_active, swept,
+                   (SELECT MAX(finished_at) FROM scrape_runs s2
+                    WHERE s2.source = r.source AND s2.kind = r.kind AND s2.ok = 1) AS last_success_at
             FROM scrape_runs r
             WHERE kind = ?
               AND id = (SELECT MAX(id) FROM scrape_runs s
@@ -475,20 +1169,12 @@ class Database:
             """,
             (kind,),
         ).fetchall()
-        successes = self._conn.execute(
-            """
-            SELECT source, MAX(finished_at) AS at
-            FROM scrape_runs WHERE kind = ? AND ok = 1 GROUP BY source
-            """,
-            (kind,),
-        ).fetchall()
-        last_ok = {r["source"]: r["at"] for r in successes}
 
         return {
             r["source"]: {
                 "stale": not r["ok"],
                 "last_run_at": r["finished_at"],
-                "last_success_at": last_ok.get(r["source"]),
+                "last_success_at": r["last_success_at"],
                 "last_products": r["products"],
                 "before_active": r["before_active"],
                 "after_active": r["after_active"],
@@ -503,7 +1189,14 @@ class Database:
         Create a shared build and return its 6-char alphanumeric code.
 
         Args:
-            build: dict of {slot: part_id} (e.g. {"cpu": 42, "gpu": 17})
+            build: dict of {slot: {"id": <int>, "qty": <int>,
+                "price_at_share": <int|None>}} (e.g.
+                {"gpu": {"id": 17, "qty": 1, "price_at_share": 900000}}).
+                Stored verbatim as JSON -- this method does no shape
+                validation or normalization, that's the caller's job
+                (see backend/routers/builds.py). resolve_shared_build()
+                also accepts the older bare-int-per-slot shape written by
+                codes created before qty/price-snapshot support existed.
 
         Returns:
             6-char alphanumeric code
@@ -537,20 +1230,22 @@ class Database:
         the payload at 4-35 KB gzipped instead of 176 KB for the whole
         catalogue. Source names are interned; price is included so the client
         can sort and paginate without a round trip.
+
+        Reads parts.latest_price and applies the same `latest_price IS NOT
+        NULL` predicate as list_parts() — the client matches, sorts and
+        price-filters against this index, then /api/parts?ids=... (list_parts)
+        re-fetches exactly those ids. Two different price sources here used to
+        let the two disagree (a part visible in search but absent from the
+        grid, or a price filter selecting on one number while the grid showed
+        another), pinned for up to an hour by this endpoint's ETag cache.
         """
         rows = self._conn.execute(
             """
-            SELECT p.id, p.name, p.source, pl.price_pkr
+            SELECT p.id, p.name, p.source, p.latest_price
             FROM parts p
-            JOIN price_log pl ON pl.id = (
-                SELECT id FROM price_log
-                WHERE part_id = p.id
-                ORDER BY scraped_at DESC
-                LIMIT 1
-            )
             WHERE p.category = ?
               AND p.is_active = 1
-              AND pl.price_pkr IS NOT NULL
+              AND p.latest_price IS NOT NULL
             ORDER BY p.id
             """,
             (category,),
@@ -581,13 +1276,16 @@ class Database:
         limit: int = 50,
         offset: int = 0,
         ids: Optional[list[int]] = None,
+        include_specs: bool = False,
     ) -> tuple[list[dict], int]:
         """
         Return (items, total) for the market listing page.
         Items have the latest price per part. NULL-price rows excluded.
         specs_filter: e.g. {"brand": "AMD", "socket": "AM5"}
+        include_specs: the market grid never reads `specs` (only /build's
+        picker does), so it's left out of the SELECT by default.
         """
-        conditions: list[str] = ["pl.price_pkr IS NOT NULL", "p.is_active = 1"]
+        conditions: list[str] = ["p.latest_price IS NOT NULL", "p.is_active = 1"]
         params: list = []
 
         if category:
@@ -597,10 +1295,10 @@ class Database:
             conditions.append("p.source = ?")
             params.append(source)
         if min_price is not None:
-            conditions.append("pl.price_pkr >= ?")
+            conditions.append("p.latest_price >= ?")
             params.append(min_price)
         if max_price is not None:
-            conditions.append("pl.price_pkr <= ?")
+            conditions.append("p.latest_price <= ?")
             params.append(max_price)
         if q:
             # Match the precomputed normalised name. The leading space in both
@@ -611,7 +1309,17 @@ class Database:
                 params.append(f"% {_like_escape(token)}%")
         if specs_filter:
             for key, value in specs_filter.items():
-                if key in _VALID_SPEC_KEYS:
+                if key not in _VALID_SPEC_KEYS:
+                    continue
+                bounds = _parse_bucket(value) if key in _BUCKETED_SPEC_KEYS else None
+                if bounds:
+                    lo, hi = bounds
+                    conditions.append(
+                        "CAST(REPLACE(REPLACE(json_extract(p.specs, ?), 'GB', ''), 'TB', '') AS REAL) "
+                        "BETWEEN ? AND ?"
+                    )
+                    params.extend([f"$.{key}", lo, hi])
+                else:
                     conditions.append("json_extract(p.specs, ?) = ?")
                     params.extend([f"$.{key}", value])
 
@@ -637,20 +1345,14 @@ class Database:
             page_params: list = []
         else:
             order = (
-                "ORDER BY pl.price_pkr ASC" if sort == "price_asc"
-                else "ORDER BY pl.price_pkr DESC"
+                "ORDER BY p.latest_price ASC, p.id ASC" if sort == "price_asc"
+                else "ORDER BY p.latest_price DESC, p.id ASC"
             )
             page = "LIMIT ? OFFSET ?"
             page_params = [limit, offset]
 
         base_query = f"""
             FROM parts p
-            JOIN price_log pl ON pl.id = (
-                SELECT id FROM price_log
-                WHERE part_id = p.id
-                ORDER BY scraped_at DESC
-                LIMIT 1
-            )
             {where}
         """
 
@@ -658,10 +1360,11 @@ class Database:
             f"SELECT COUNT(*) {base_query}", params
         ).fetchone()[0]
 
+        specs_col = "p.specs," if include_specs else ""
         rows = self._conn.execute(
             f"""
             SELECT p.id, p.source, p.name, p.category, p.url, p.thumbnail_url,
-                   p.specs, pl.price_pkr
+                   {specs_col} p.last_seen_at, p.latest_price AS price_pkr
             {base_query}
             {order}
             {page}
@@ -687,14 +1390,32 @@ class Database:
                 FROM parts
                 WHERE category = ?
                   AND is_active = 1
+                  AND latest_price IS NOT NULL
                   AND json_extract(specs, ?) IS NOT NULL
                 ORDER BY val
                 """,
                 (json_path, category, json_path),
             ).fetchall()
             values = [r[0] for r in rows if r[0]]
-            if values:
-                result[key] = values
+            if not values:
+                continue
+            # The raw value list is the shape the deployed frontend's
+            # FilterBar.bucketValues() already groups client-side — never
+            # replace it.
+            result[key] = values
+            # Fix round 2: do NOT also emit "<key>_range" here.
+            # FilterBar.tsx builds its spec dropdowns generically from
+            # Object.entries(filterOptions) — any non-empty key renders as a
+            # real dropdown, snake_case label and all, with no SPEC_LABELS
+            # entry for "capacity_range" and no allow-list entry in
+            # getParts() to carry its value anywhere — so on the live RAM
+            # market page this was a dead, mislabeled control with no
+            # effect, not an inert additive field. The range predicate
+            # itself (_parse_bucket / _BUCKETED_SPEC_KEYS, used by
+            # list_parts above) is unaffected and still works if called
+            # directly with a "lo-hiUNIT" value. Phase 4 must add the
+            # SPEC_LABELS entry and the getParts() allow-list entry in the
+            # same change that starts emitting this key again.
         return result
 
     def get_price_history(self, source_id: str, source: str) -> list[dict]:
@@ -715,13 +1436,11 @@ class Database:
     # Price trends (precomputed aggregate per model/spec per scrape date)
     # ------------------------------------------------------------------
 
-    # Minimum listings in a bucket to use a trimmed mean; below this we fall
-    # back to a plain median (too few points to trim meaningfully).
-    _TREND_MIN_TRIM = 5
-    _TREND_TRIM_FRAC = 0.10
+    _TREND_MIN_BASKET = 3   # fewer matched parts than this is noise, not a measurement
     # Band (min/max) trim: drop the most extreme 5% each end so mispriced
-    # outlier listings don't blow out the displayed range. Center uses the
-    # 10% trim above; the band is wider (5%) to still show a real spread.
+    # outlier listings don't blow out the displayed range. center_price itself
+    # is the matched-basket median/chained level (see rebuild_price_trends);
+    # this trim is only for the displayed min/max spread.
     _TREND_BAND_FRAC = 0.05
 
     # Standard RAM speeds we track (one-off/overclock speeds with few listings
@@ -764,78 +1483,218 @@ class Database:
             return ("spec", f"{ddr}-{speed_num}-{cap}")
         return None
 
+    # One price per (part, calendar date): if a part is scraped twice on the
+    # same day (e.g. a retry after a partial run), keep only its latest row so
+    # a single listing isn't double-counted in a date bucket.
+    _TREND_SOURCE_SQL = """
+        SELECT p.category AS category,
+               p.specs    AS specs,
+               d.scrape_date AS scrape_date,
+               d.price_pkr AS price,
+               d.part_id AS part_id
+        FROM (
+            SELECT part_id,
+                   substr(scraped_at, 1, 10) AS scrape_date,
+                   price_pkr,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY part_id, substr(scraped_at, 1, 10)
+                       ORDER BY scraped_at DESC
+                   ) AS rn
+            FROM price_log
+            WHERE price_pkr IS NOT NULL
+              AND substr(scraped_at, 1, 10) = ?
+        ) d
+        JOIN parts p ON p.id = d.part_id
+        WHERE d.rn = 1
+    """
+
+    def _read_trend_source_rows(self) -> list:
+        """
+        Read the (part, date, price) rows the trend rebuild aggregates, one
+        scrape date per query, and verify the total against a COUNT.
+
+        Read one date at a time rather than in one statement because a large
+        enough result silently comes back EMPTY from Turso — no exception, no
+        truncation warning, just zero rows. Measured against the live DB: the
+        identical query returns 60,000 rows at `LIMIT 60000` and **0** at
+        `LIMIT 67100`. The cliff is payload bytes, not row count — dropping
+        the `specs` column (~44 bytes/row average) let the full 67,100 rows
+        through unharmed.
+
+        That failure mode is why the COUNT check below is not paranoia.
+        `rebuild_price_trends` DELETEs the whole table before writing what it
+        computed, so a silently-empty read does not degrade the trends, it
+        destroys them — and reports success. A short read must stop the
+        rebuild before the DELETE, which is what raising here does.
+
+        Paging by date (rather than LIMIT/OFFSET) keeps each response an
+        order of magnitude under the cliff at current volumes — ~8.5k rows
+        per date against the ~60k ceiling — and costs nothing extra, since
+        the window function only ever dedupes within a single date anyway.
+        """
+        dates = [
+            r["d"] for r in self._conn.execute(
+                """
+                SELECT DISTINCT substr(scraped_at, 1, 10) AS d
+                FROM price_log
+                WHERE price_pkr IS NOT NULL
+                ORDER BY d
+                """
+            ).fetchall()
+        ]
+
+        rows: list = []
+        for date in dates:
+            page = self._conn.execute(self._TREND_SOURCE_SQL, (date,)).fetchall()
+            expected = self._conn.execute(
+                # Joined to `parts` for the same reason the source query is:
+                # the expected count has to match what the join can actually
+                # return, or an orphaned price_log row (no matching part)
+                # would fail this check rather than the truncation it exists
+                # to catch.
+                """
+                SELECT COUNT(DISTINCT pl.part_id) AS c
+                FROM price_log pl
+                JOIN parts p ON p.id = pl.part_id
+                WHERE pl.price_pkr IS NOT NULL
+                  AND substr(pl.scraped_at, 1, 10) = ?
+                """,
+                (date,),
+            ).fetchone()["c"]
+            if len(page) != expected:
+                raise RuntimeError(
+                    f"price-trend source read for {date} returned {len(page)} rows, "
+                    f"expected {expected} — refusing to rebuild trends from a short "
+                    f"read (a silently truncated response would wipe price_trends)"
+                )
+            rows.extend(page)
+        return rows
+
     def rebuild_price_trends(self) -> int:
         """
         Wipe and recompute the entire price_trends table from price_log.
         One row per (category, group_type, group_key, scrape_date). Idempotent.
         Returns the number of trend rows written.
         """
-        # One price per (part, calendar date): if a part is scraped twice on the
-        # same day (e.g. a retry after a partial run), keep only its latest row
-        # so a single listing isn't double-counted in a date bucket.
-        rows = self._conn.execute(
-            """
-            SELECT p.category AS category,
-                   p.specs    AS specs,
-                   d.scrape_date AS scrape_date,
-                   d.price_pkr AS price
-            FROM (
-                SELECT part_id,
-                       substr(scraped_at, 1, 10) AS scrape_date,
-                       price_pkr,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY part_id, substr(scraped_at, 1, 10)
-                           ORDER BY scraped_at DESC
-                       ) AS rn
-                FROM price_log
-                WHERE price_pkr IS NOT NULL
-            ) d
-            JOIN parts p ON p.id = d.part_id
-            WHERE d.rn = 1
-            """
-        ).fetchall()
+        rows = self._read_trend_source_rows()
 
-        # Bucket: (category, group_type, group_key, date) -> [prices]
-        buckets: dict[tuple[str, str, str, str], list[int]] = {}
+        # Bucket: (category, group_type, group_key, date) -> {part_id: price}
+        buckets: dict[tuple[str, str, str, str], dict[int, int]] = {}
+        specs_cache: dict[int, Optional[dict]] = {}
         for r in rows:
-            try:
-                specs = json.loads(r["specs"]) if r["specs"] else None
-            except (json.JSONDecodeError, TypeError):
-                specs = None
-            grp = self._trend_group(r["category"], specs)
+            pid = r["part_id"]
+            if pid not in specs_cache:
+                # One json.loads per part, not per price-log row. A part with N
+                # snapshots previously re-parsed identical specs JSON N times.
+                try:
+                    specs_cache[pid] = json.loads(r["specs"]) if r["specs"] else None
+                except (json.JSONDecodeError, TypeError):
+                    specs_cache[pid] = None
+            grp = self._trend_group(r["category"], specs_cache[pid])
             if grp is None:
                 continue
             group_type, group_key = grp
             key = (r["category"], group_type, group_key, r["scrape_date"])
-            buckets.setdefault(key, []).append(int(r["price"]))
+            buckets.setdefault(key, {})[pid] = int(r["price"])
+
+        # Regroup by series so consecutive dates can be compared.
+        series: dict[tuple[str, str, str], dict[str, dict[int, int]]] = {}
+        for (category, group_type, group_key, date), prices in buckets.items():
+            series.setdefault((category, group_type, group_key), {})[date] = prices
 
         records = []
-        for (category, group_type, group_key, date), prices in buckets.items():
-            n = len(prices)
-            if n >= self._TREND_MIN_TRIM:
-                center, used = _trimmed_mean(prices, self._TREND_TRIM_FRAC)
-                method = "trimmed_mean"
-            else:
-                # median uses 1 value (odd n) or the middle 2 (even n)
-                center, used = _median(prices), (1 if n % 2 else 2)
-                method = "median"
-            band_lo, band_hi = _trimmed_band(prices, self._TREND_BAND_FRAC)
-            records.append((
-                category, group_type, group_key, date,
-                n, used, round(center), method, band_lo, band_hi,
-            ))
+        for (category, group_type, group_key), by_date in series.items():
+            dates = sorted(by_date)
+            level: Optional[float] = None
+            anchored = False
+            for i, date in enumerate(dates):
+                prices_now = by_date[date]
+                if not anchored:
+                    # Anchor the chain at the first date whose OWN basket
+                    # meets _TREND_MIN_BASKET. The anchor sets the level for
+                    # every later point in the chain, so a too-small anchor
+                    # (e.g. basket_size=1) undercuts the churn-neutrality the
+                    # matched-basket rewrite was built for just as much as a
+                    # too-small mid-series point does (handled below) — G7.
+                    # A too-small date is skipped, not the whole series
+                    # dropped: the group may simply not have enough listings
+                    # yet and gain them on a later date.
+                    if len(prices_now) < self._TREND_MIN_BASKET:
+                        continue
+                    basket = prices_now
+                    matched = list(basket.values())
+                    level = _median(matched)
+                    basket_size = len(matched)
+                    method = "matched_basket_median"
+                    anchored = True
+                else:
+                    prev = by_date[dates[i - 1]]
+                    shared = set(prev) & set(prices_now)
+                    basket_size = len(shared)
+                    if basket_size < self._TREND_MIN_BASKET:
+                        # Not a measurement. Break the chain rather than publish
+                        # a number driven by which products happened to appear.
+                        level = None
+                        continue
+                    basket = {p: prices_now[p] for p in shared}
+                    if level is None:
+                        # Chain was broken earlier — re-anchor on real prices.
+                        level = _median(list(basket.values()))
+                        method = "matched_basket_median"
+                    else:
+                        ratio = _ratio_index([prices_now[p] / prev[p] for p in shared],
+                                             self._TREND_BAND_FRAC)
+                        level = level * ratio
+                        method = "matched_basket_chained"
 
-        with self._conn:  # transaction
+                matched_prices = list(basket.values())
+                used = len(matched_prices)
+                raw_lo, raw_hi = _trimmed_band(matched_prices, self._TREND_BAND_FRAC)
+                # Re-express the band at the chained level.
+                #
+                # `level` is an INDEX — anchored weeks ago and moved only by
+                # matched price relatives — while raw_lo/raw_hi are absolute
+                # prices from this date's basket. Storing the two side by side
+                # meant they answered different questions, and they drifted
+                # apart: on the live catalogue 94 of 727 points (12.9%, across
+                # 23 series) had center_price falling OUTSIDE its own
+                # [min_price, max_price]. That is not a display glitch, it is
+                # two incompatible quantities in adjacent columns — and it
+                # rendered as a chart whose line ran along the frame edge, or
+                # vanished entirely, above or below its band.
+                #
+                # Scaling by the basket's own median makes the band a relative
+                # dispersion carried to wherever the index sits, so the center
+                # is inside it by construction. On an anchor date `level` IS
+                # that median, so this is the identity there.
+                raw_center = _median(matched_prices)
+                scale = (level / raw_center) if raw_center else 1.0
+                band_lo = round(raw_lo * scale)
+                band_hi = round(raw_hi * scale)
+                records.append((
+                    category, group_type, group_key, date,
+                    len(prices_now), used, round(level), method,
+                    band_lo, band_hi, basket_size,
+                ))
+
+        # Replace-wholesale, so redoing the block reaches the same end state
+        # no matter how far the lost attempt got (see _transact). This is the
+        # exact block the adapter's stream-lost comment cites as the reason a
+        # single statement inside a transaction must never be replayed alone.
+        def _write():
             self._conn.execute("DELETE FROM price_trends")
             self._conn.executemany(
                 """
                 INSERT INTO price_trends
                     (category, group_type, group_key, scrape_date,
-                     sample_count, used_count, center_price, method, min_price, max_price)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     sample_count, used_count, center_price, method,
+                     min_price, max_price, basket_size)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 records,
             )
+
+        self._transact(_write)
         return len(records)
 
     @staticmethod
@@ -922,16 +1781,18 @@ class Database:
         Add a `thumbnail_url` to each model group: pick one current listing's
         non-null thumbnail whose extracted specs.model matches the group_key.
         Cheapest matching listing wins (most representative of the segment).
+        Scoped to active listings only, via parts.latest_price rather than a
+        full price_log scan — a delisted row's thumbnail must not win.
         """
         rows = self._conn.execute(
             """
             SELECT json_extract(p.specs, '$.model') AS model,
-                   p.thumbnail_url AS thumbnail_url,
-                   MIN(pl.price_pkr)               AS _min
+                   p.thumbnail_url                  AS thumbnail_url,
+                   MIN(p.latest_price)              AS _min
             FROM parts p
-            JOIN price_log pl ON pl.part_id = p.id
             WHERE p.category = ?
-              AND pl.price_pkr IS NOT NULL
+              AND p.is_active = 1
+              AND p.latest_price IS NOT NULL
               AND p.thumbnail_url IS NOT NULL
               AND json_extract(p.specs, '$.model') IS NOT NULL
             GROUP BY json_extract(p.specs, '$.model')
@@ -963,32 +1824,59 @@ class Database:
     def resolve_shared_build(self, code: str) -> Optional[dict]:
         """
         Resolve a shared build code to a dict of {slot: full_part_dict}.
-        Skips slots where the part no longer exists in DB.
+
+        Handles both the current per-slot shape ({"id": <int>, "qty": <int>,
+        "price_at_share": <int|None>}) and the legacy bare-int-per-slot shape
+        ({"slot": <part_id>}) written by codes created before qty/price
+        snapshot support -- a bare int is treated as qty=1 with no snapshot.
+
+        A part that's since been delisted, or lost its price, is still
+        returned (not skipped) -- a build silently missing a component is
+        more confusing than one that shows the component as unavailable.
+        Callers get is_active/delisted_at/price_at_share alongside the
+        current price_pkr (which may be NULL) to decide how to render it.
 
         Args:
             code: 6-char alphanumeric code
 
         Returns:
             dict of {slot: part_dict} or None if code not found.
-            part_dict includes: id, source, name, category, url, thumbnail_url, specs, price_pkr
+            part_dict includes: id, source, name, category, url, thumbnail_url,
+            specs, price_pkr, is_active, delisted_at, price_at_share, qty
         """
-        slot_ids = self.get_shared_build(code)
-        if slot_ids is None:
+        slot_data = self.get_shared_build(code)
+        if slot_data is None:
             return None
 
-        # Collect all valid part_ids
-        id_to_slot: dict[int, str] = {part_id: slot for slot, part_id in slot_ids.items() if part_id is not None}
+        # Normalize both shapes into (part_id, qty, price_at_share) per slot.
+        id_to_slot: dict[int, str] = {}
+        slot_meta: dict[str, dict] = {}
+        for slot, val in slot_data.items():
+            if val is None:
+                continue
+            if isinstance(val, dict):
+                part_id = val.get("id")
+                qty = val.get("qty", 1)
+                price_at_share = val.get("price_at_share")
+            else:
+                # Legacy shape: bare part_id.
+                part_id = val
+                qty = 1
+                price_at_share = None
+            if part_id is None:
+                continue
+            id_to_slot[part_id] = slot
+            slot_meta[slot] = {"qty": qty, "price_at_share": price_at_share}
+
         if not id_to_slot:
             return {}
 
         placeholders = ",".join("?" * len(id_to_slot))
         rows = self._conn.execute(
             f"""
-            SELECT p.id, p.source, p.name, p.category, p.url, p.thumbnail_url, p.specs, pl.price_pkr
+            SELECT p.id, p.source, p.name, p.category, p.url, p.thumbnail_url, p.specs,
+                   p.latest_price AS price_pkr, p.is_active, p.delisted_at
             FROM parts p
-            JOIN price_log pl ON pl.id = (
-                SELECT id FROM price_log WHERE part_id = p.id ORDER BY scraped_at DESC LIMIT 1
-            )
             WHERE p.id IN ({placeholders})
             """,
             list(id_to_slot.keys()),
@@ -998,8 +1886,43 @@ class Database:
         for row in rows:
             d = dict(row)
             slot = id_to_slot[d["id"]]
+            meta = slot_meta[slot]
+            d["is_active"] = bool(d["is_active"])
+            d["qty"] = meta["qty"]
+            d["price_at_share"] = meta["price_at_share"]
             result[slot] = d
         return result
+
+    def resolve_part_status(self, part_ids: list[int]) -> dict[int, dict]:
+        """
+        Answer "is this part still listed?" for a set of parts in one query.
+
+        Shared builds use this to flag a part that has gone away since the link
+        was created. A favourites/watch-list feature needs the same answer, so
+        this is deliberately generic — it takes ids and returns facts, with no
+        knowledge of what is asking.
+
+        Unknown ids are simply absent from the result.
+        """
+        if not part_ids:
+            return {}
+        placeholders = ",".join("?" * len(part_ids))
+        rows = self._conn.execute(
+            f"""
+            SELECT id, is_active, last_seen_at, delisted_at, latest_price
+            FROM parts WHERE id IN ({placeholders})
+            """,
+            list(part_ids),
+        ).fetchall()
+        return {
+            r["id"]: {
+                "is_active": bool(r["is_active"]),
+                "last_seen_at": r["last_seen_at"],
+                "delisted_at": r["delisted_at"],
+                "latest_price": r["latest_price"],
+            }
+            for r in rows
+        }
 
     # ------------------------------------------------------------------
     # Prebuilts
@@ -1016,7 +1939,15 @@ class Database:
         seen_ids: dict[str, set[int]] = {}
         cur = self._conn.cursor()
         for p in prebuilts:
-            source_id = _slug(p["url"])
+            try:
+                source_id = _slug(p["url"])
+            except ValueError as exc:
+                # Same rule as upsert_products: one malformed URL in a batch
+                # of ~100 prebuilts must not abort the whole source's write
+                # (and, since run_prebuilts.py calls this uncaught, every
+                # source scraped after it in the same run).
+                print(f"  SKIP prebuilt {p.get('name', '<unknown>')!r}: {exc}")
+                continue
             components_json = json.dumps(p["components"], ensure_ascii=False) if p.get("components") else None
             row = cur.execute(
                 """
@@ -1031,6 +1962,7 @@ class Database:
                     name_norm     = excluded.name_norm,
                     scraped_at    = excluded.scraped_at,
                     is_active     = 1,
+                    delisted_at   = NULL,
                     last_seen_at  = excluded.last_seen_at,
                     updated_at    = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
                 RETURNING id
@@ -1050,22 +1982,41 @@ class Database:
     def deactivate_unseen_prebuilts(self, source: str) -> int:
         """
         Prebuilt equivalent of deactivate_unseen_parts(). Same gating rule:
-        only call after a scrape that actually returned products.
+        only call after a scrape that actually returned products. Same
+        no-scratch-table treatment for the same reason — see the docstring
+        on deactivate_unseen_parts().
         """
         seen = getattr(self, "_last_seen_prebuilt_ids", {}).get(source, set())
         if not seen:
             return 0
-        placeholders = ",".join("?" * len(seen))
-        with self._conn:
-            cur = self._conn.execute(
-                f"""
-                UPDATE prebuilts SET is_active = 0,
-                                     updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                WHERE source = ? AND is_active = 1 AND id NOT IN ({placeholders})
-                """,
-                [source, *seen],
-            )
-        return cur.rowcount
+
+        # Safe to redo whole, for the same reason as deactivate_unseen_parts.
+        def _sweep():
+            active_rows = self._conn.execute(
+                "SELECT id FROM prebuilts WHERE source = ? AND is_active = 1",
+                (source,),
+            ).fetchall()
+            to_deactivate = [r["id"] for r in active_rows if r["id"] not in seen]
+            if not to_deactivate:
+                return 0
+            total = 0
+            for i in range(0, len(to_deactivate), 900):
+                chunk = to_deactivate[i : i + 900]
+                placeholders = ",".join("?" * len(chunk))
+                cur = self._conn.execute(
+                    f"""
+                    UPDATE prebuilts SET is_active = 0,
+                                         delisted_at = COALESCE(delisted_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                                         updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    WHERE is_active = 1
+                      AND id IN ({placeholders})
+                    """,
+                    chunk,
+                )
+                total += cur.rowcount
+            return total
+
+        return self._transact(_sweep)
 
     def list_prebuilts(
         self,
@@ -1113,7 +2064,7 @@ class Database:
                 conditions.append("LOWER(json_extract(components, '$.gpu')) LIKE '%arc%'")
 
         where = "WHERE " + " AND ".join(conditions)
-        order = "ORDER BY price_pkr ASC" if sort == "price_asc" else "ORDER BY price_pkr DESC"
+        order = "ORDER BY price_pkr ASC, id ASC" if sort == "price_asc" else "ORDER BY price_pkr DESC, id ASC"
 
         total = self._conn.execute(
             f"SELECT COUNT(*) FROM prebuilts {where}", params
@@ -1170,22 +2121,44 @@ class Database:
         return {(r["source"], r["category"]): r["n"] for r in rows}
 
     def stats(self) -> dict:
-        """Quick summary — useful for CLI output."""
-        parts_total = self._conn.execute(
-            "SELECT COUNT(*) FROM parts WHERE is_active = 1"
-        ).fetchone()[0]
-        by_source = self._conn.execute(
-            "SELECT source, COUNT(*) as n FROM parts WHERE is_active = 1 GROUP BY source"
+        """
+        Quick summary — useful for CLI output, and the landing page's per-source
+        cards + STALE ribbon via GET /api/stats.
+
+        Used to be six round trips (parts total, by-source, by-category,
+        price_log total, then source_health's own two). The active-parts
+        counts and the price_log total are pulled together with UNION ALL —
+        a single grouped result the by_source/by_category dicts are pivoted
+        from in Python — and source_health is down to one query itself, so
+        this is two round trips total.
+        """
+        rows = self._conn.execute(
+            """
+            SELECT 'part' AS kind, source, category, COUNT(*) AS n
+            FROM parts WHERE is_active = 1
+            GROUP BY source, category
+            UNION ALL
+            SELECT 'price_log', NULL, NULL, COUNT(*) FROM price_log
+            """
         ).fetchall()
-        by_cat = self._conn.execute(
-            "SELECT category, COUNT(*) as n FROM parts WHERE is_active = 1 GROUP BY category ORDER BY category"
-        ).fetchall()
-        price_rows = self._conn.execute("SELECT COUNT(*) FROM price_log").fetchone()[0]
+
+        parts_total = 0
+        price_rows = 0
+        by_source: dict[str, int] = {}
+        by_category: dict[str, int] = {}
+        for r in rows:
+            if r["kind"] == "part":
+                by_source[r["source"]] = by_source.get(r["source"], 0) + r["n"]
+                by_category[r["category"]] = by_category.get(r["category"], 0) + r["n"]
+                parts_total += r["n"]
+            else:
+                price_rows = r["n"]
+
         return {
             "total_parts": parts_total,
             "total_price_rows": price_rows,
-            "by_source": {r["source"]: r["n"] for r in by_source},
-            "by_category": {r["category"]: r["n"] for r in by_cat},
+            "by_source": by_source,
+            "by_category": dict(sorted(by_category.items())),
             "sources": self.source_health("parts"),
         }
 
@@ -1199,14 +2172,22 @@ class Database:
         self.close()
 
 
-def get_db(path: str | Path = _DEFAULT_DB) -> Database:
+def get_db(
+    path: str | Path = _DEFAULT_DB,
+    *,
+    allow_remote_migrations: bool | None = None,
+) -> Database:
     """
     Open (or create) the PPC database.
 
     When TURSO_DATABASE_URL is set the connection is remote (Turso/libSQL) and
     `path` is ignored; otherwise it is the local SQLite file at `path`.
+
+    allow_remote_migrations: True to migrate a remote target, False to connect
+    without touching its schema, None (default) to refuse a remote target
+    outright unless ALLOW_REMOTE_MIGRATIONS=1. See _remote_migration_mode().
     """
-    return Database(path)
+    return Database(path, allow_remote_migrations=allow_remote_migrations)
 
 
 def backup_db(path: str | Path = _DEFAULT_DB, keep: int = 10) -> Optional[Path]:
@@ -1237,7 +2218,13 @@ def backup_db(path: str | Path = _DEFAULT_DB, keep: int = 10) -> Optional[Path]:
     finally:
         con.close()
 
-    snaps = sorted(src.parent.glob(f"{src.name}.bak.*"))
+    # Only prune snapshots this function created: <name>.bak.YYYYMMDD_HHMMSS.
+    # A looser glob previously matched hand-named snapshots (pre-migration
+    # backups) and rotated them away, while missing the undated <name>.bak.
+    snaps = sorted(
+        p for p in src.parent.glob(f"{src.name}.bak.*")
+        if re.fullmatch(r"\d{8}_\d{6}", p.name[len(src.name) + 5:])
+    )
     for old in snaps[:-keep] if keep > 0 else []:
         try:
             old.unlink()

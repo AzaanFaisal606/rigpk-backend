@@ -37,7 +37,9 @@ class BasePrebuiltScraper(BaseScraper):
         root = Path(__file__).parent.parent.parent
         path = db_path or str(root / "data" / "ppc.db")
         from db.database import get_db
-        with get_db(path) as db:
+        # Rows only. run_prebuilts.py owns the schema and has already opened
+        # with allow_remote_migrations=True by the time this runs under it.
+        with get_db(path, allow_remote_migrations=False) as db:
             n = db.upsert_prebuilts(prebuilts)
             stats = db.prebuilt_stats()
         print(f"DB: {n} prebuilts upserted — total {stats['total']} across {stats['by_source']}")

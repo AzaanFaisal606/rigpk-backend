@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 
 from scrapers import health
 from scrapers.base_scraper import blocked_hosts, reset_host_state
+from scrapers.exceptions import ScrapeIncomplete
 from scrapers.prebuilts.zestro.scraper import ZestroScraper, SOURCE as ZESTRO_SOURCE
 from scrapers.prebuilts.redtech.scraper import RedTechScraper, SOURCE as REDTECH_SOURCE
 from scrapers.prebuilts.techmatched.scraper import TechMatchedScraper, SOURCE as TM_SOURCE
@@ -60,6 +61,13 @@ def main():
             scraper = cls()
             results = scraper.scrape_all()
             print(f"  => {len(results)} prebuilts scraped")
+        except ScrapeIncomplete as e:
+            # Same rule as run_all.py: the scraper still collected some
+            # prebuilts before choking — keep them for upsert below, but
+            # `error` being set forces `ok = False` so the sweep is skipped.
+            results = getattr(e, "partial_results", None) or []
+            error = f"{type(e).__name__}: {e}"
+            print(f"  INCOMPLETE: {error} — keeping {len(results)} prebuilt(s) collected before the fault")
         except Exception as e:
             error = f"{type(e).__name__}: {e}"
             print(f"  ERROR scraping {name}: {error}")
@@ -79,7 +87,7 @@ def main():
             print(f"  SKIP sweep for {name} — keeping existing rows (marked stale)")
 
         n = swept = 0
-        with get_db(db_path) as db:
+        with get_db(db_path, allow_remote_migrations=True) as db:
             # Active count for this source before/after — the scrape report's
             # before → after columns. before captured pre-upsert.
             before_n = db.prebuilt_stats()["by_source"].get(source, 0)
@@ -97,7 +105,13 @@ def main():
                 before_active=before_n, after_active=after_n, error=error,
             )
 
-        anomalies += health.source_anomalies(source, before_n, after_n, ok, error)
+        # Prebuilt sources are far smaller than part sources (redtech has only 13
+        # rows total) — the part-scraper's floor of 20 would exempt them from
+        # ever being flagged, so use the lower prebuilt-specific floor instead.
+        anomalies += health.source_anomalies(
+            source, before_n, after_n, ok, error,
+            floor=health.MIN_PREBUILT_SOURCE_BASELINE,
+        )
 
         total_scraped += len(results)
         total_written += n
@@ -106,7 +120,7 @@ def main():
         print("\nNo prebuilts scraped.")
         sys.exit(1)
 
-    with get_db(db_path) as db:
+    with get_db(db_path, allow_remote_migrations=True) as db:
         stats = db.prebuilt_stats()
 
     print(f"\n=== DONE ===")

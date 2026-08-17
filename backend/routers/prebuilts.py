@@ -1,11 +1,11 @@
 from __future__ import annotations
 import json
 from typing import Optional, Any
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
 from pydantic import BaseModel
 
-from db.database import get_db
-from backend.config import DB_PATH
+from db.database import Database
+from backend.deps import get_database
 
 router = APIRouter(prefix="/api/prebuilts")
 
@@ -61,19 +61,19 @@ def list_prebuilts(
     sort:       Optional[str] = Query(None, pattern="^price_(asc|desc)$"),   # "price_asc" | "price_desc"
     limit:      int           = Query(50, ge=1, le=200),
     offset:     int           = Query(0, ge=0),
+    db:         Database      = Depends(get_database),
 ):
-    with get_db(DB_PATH) as db:
-        items, total = db.list_prebuilts(
-            source=source,
-            min_price=min_price,
-            max_price=max_price,
-            q=q,
-            cpu_brand=cpu_brand,
-            gpu_brand=gpu_brand,
-            sort=sort or "price_asc",
-            limit=limit,
-            offset=offset,
-        )
+    items, total = db.list_prebuilts(
+        source=source,
+        min_price=min_price,
+        max_price=max_price,
+        q=q,
+        cpu_brand=cpu_brand,
+        gpu_brand=gpu_brand,
+        sort=sort or "price_asc",
+        limit=limit,
+        offset=offset,
+    )
     return PrebuiltsResponse(
         items=[_row_to_item(r) for r in items],
         total=total,
@@ -81,9 +81,8 @@ def list_prebuilts(
 
 
 @router.get("/{item_id}", response_model=PrebuiltItem)
-def get_prebuilt(item_id: int):
-    with get_db(DB_PATH) as db:
-        row = db.get_prebuilt(item_id)
+def get_prebuilt(item_id: int, db: Database = Depends(get_database)):
+    row = db.get_prebuilt(item_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Prebuilt not found")
     return _row_to_item(row)

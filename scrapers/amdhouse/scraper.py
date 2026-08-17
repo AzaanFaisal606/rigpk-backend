@@ -11,16 +11,16 @@ Usage:
     python -m scrapers.amdhouse.scraper
 """
 
-import os
+import html as _html
 import re
-import sys
 import time
 
-from scrapers.base_scraper import BaseScraper
+from scrapers.base_scraper import is_http_404
+from scrapers.exceptions import ScrapeIncomplete
+from scrapers.listing_scraper import ListingScraper, run_and_persist
 
 SOURCE = "amdhouse.pk"
 BASE = "https://amdhouse.pk"
-PAGE_DELAY = 1.2
 
 # amdhouse splits its catalogue into flat sibling categories rather than a
 # parent/child tree — "intel-motherboards" is not under "motherboards", and the
@@ -47,155 +47,147 @@ CATEGORIES: list[tuple[str, str]] = [
 ]
 
 
-class AmdHouseScraper(BaseScraper):
+class AmdHouseScraper(ListingScraper):
 
-    def scrape(self, url: str) -> list[dict]:
-        all_products: list[dict] = []
-        seen_urls: set[str] = set()
-        page = 1
+    SOURCE = SOURCE
 
-        while True:
-            page_url = f"{url}?paged={page}" if page > 1 else url
-            print(f"    page {page}: {page_url}")
-            try:
-                html = self.fetch(page_url)
-            except Exception as e:
-                print(f"    page {page} fetch failed ({e}) — stopping.")
-                break
-            products = self._parse_page(html)
+    # On a discounted card WooCommerce renders the original inside
+    # <del>...<bdi>...</bdi></del> and the price you actually pay inside a
+    # separate <ins>...<bdi>...</bdi></ins>. Sale price wins; regular price
+    # is the fallback for undiscounted cards, which have no <ins>/<del> at all.
+    _SALE_PRICE_RE = re.compile(
+        r'<ins[^>]*>.*?woocommerce-Price-amount[^>]*><bdi>.*?</span>([\d,]+)</bdi>',
+        re.DOTALL,
+    )
+    _PRICE_RE = re.compile(
+        r'woocommerce-Price-amount[^>]*><bdi>.*?</span>([\d,]+)</bdi>', re.DOTALL
+    )
 
-            if not products:
-                print(f"    no products on page {page} — done.")
-                break
+    @staticmethod
+    def _to_int(raw: str) -> int:
+        return int(raw.replace(",", ""))
 
-            new = [p for p in products if p["url"] not in seen_urls]
-            for p in new:
-                seen_urls.add(p["url"])
+    def next_page_url(self, url: str, page: int) -> str:
+        return f"{url}?paged={page}" if page > 1 else url
 
-            print(f"    {len(new)} new (page total: {len(products)}, collected: {len(all_products) + len(new)})")
-            all_products.extend(new)
+    def _extract_price(self, block: str) -> int | None:
+        """Sale price wins over the crossed-out regular price."""
+        for pattern in (self._SALE_PRICE_RE, self._PRICE_RE):
+            m = pattern.search(block)
+            if m:
+                return self._to_int(m.group(1))
+        return None
 
-            if not new:
-                break
+    def card_blocks(self, html: str) -> list[str]:
+        # Product blocks — split on product div class. Bound the final block
+        # at the theme's own "<footer id=\"footer\"" marker instead of
+        # end-of-document: unbounded, the last card's block swallows the
+        # entire page tail (widgets, footer copy), and any "out-of-stock"
+        # text anywhere in it would falsely mark that last card sold out.
+        matches = list(re.finditer(r'<div[^>]+class="[^"]*product-small\s', html))
+        blocks = []
+        for i, m in enumerate(matches):
+            start = m.start()
+            if i + 1 < len(matches):
+                end = matches[i + 1].start()
+            else:
+                footer_idx = html.find('<footer id="footer"', start)
+                end = footer_idx if footer_idx != -1 else len(html)
+            blocks.append(html[start:end])
+        # First chunk(s) without a title are the outer wrapper div, not a card
+        return [b for b in blocks if 'woocommerce-loop-product__title' in b]
 
-            page += 1
-            time.sleep(PAGE_DELAY)
+    def parse_card(self, block: str) -> dict | None:
+        # Skip out-of-stock — Flatsome marks the card class "out-of-stock"
+        # (hyphenated) and emits a <div class="out-of-stock-label">.
+        if "out-of-stock" in block:
+            return None
 
-        return all_products
+        # Name
+        name_m = re.search(
+            r'woocommerce-loop-product__title[^>]*><a[^>]+>([^<]+)', block
+        )
+        if not name_m:
+            return None
+        name = _html.unescape(name_m.group(1)).strip()
 
-    def _parse_page(self, html: str) -> list[dict]:
-        scraped_at = self.now()
+        # URL
+        url_m = re.search(
+            r'woocommerce-LoopProduct-link[^"]*"\s+href="([^"]+)"', block
+        )
+        # also try title anchor href
+        if not url_m:
+            url_m = re.search(r'href="(https://amdhouse\.pk/product/[^"]+)"', block)
+        product_url = url_m.group(1) if url_m else ""
 
-        # Product blocks — split on product div class
-        blocks = re.split(r'(?=<div[^>]+class="[^"]*product-small\s)', html)
-        # First chunk is page header, skip it
-        blocks = [b for b in blocks if 'woocommerce-loop-product__title' in b]
+        # Price: sale price wins over the crossed-out regular price
+        price_pkr = self._extract_price(block)
 
-        if not blocks:
-            return []
+        # Thumbnail
+        thumb_m = re.search(
+            r'<img[^>]+src="(https://amdhouse\.pk/wp-content/uploads/[^"]+)"', block
+        )
+        thumbnail = thumb_m.group(1) if thumb_m else None
 
-        results = []
-        for block in blocks:
-            # Skip out-of-stock — Flatsome marks the card class "out-of-stock"
-            # (hyphenated) and emits a <div class="out-of-stock-label">.
-            if "out-of-stock" in block:
-                continue
-
-            # Name
-            name_m = re.search(
-                r'woocommerce-loop-product__title[^>]*><a[^>]+>([^<]+)', block
-            )
-            if not name_m:
-                continue
-            name = name_m.group(1).strip()
-
-            # URL
-            url_m = re.search(
-                r'woocommerce-LoopProduct-link[^"]*"\s+href="([^"]+)"', block
-            )
-            # also try title anchor href
-            if not url_m:
-                url_m = re.search(r'href="(https://amdhouse\.pk/product/[^"]+)"', block)
-            product_url = url_m.group(1) if url_m else ""
-
-            # Price: <bdi><span>&#8360;</span>79,000</bdi>
-            price_m = re.search(
-                r'woocommerce-Price-amount[^>]*><bdi>.*?</span>([\d,]+)</bdi>', block, re.DOTALL
-            )
-            price_pkr = int(price_m.group(1).replace(",", "")) if price_m else None
-
-            # Thumbnail
-            thumb_m = re.search(
-                r'<img[^>]+src="(https://amdhouse\.pk/wp-content/uploads/[^"]+)"', block
-            )
-            thumbnail = thumb_m.group(1) if thumb_m else None
-
-            results.append({
-                "name": name,
-                "price_pkr": price_pkr,
-                "url": product_url,
-                "category": "",
-                "source": SOURCE,
-                "scraped_at": scraped_at,
-                "thumbnail_url": thumbnail,
-            })
-
-        return results
+        return {
+            "name": name,
+            "price_pkr": price_pkr,
+            "url": product_url,
+            "category": "",
+            "source": SOURCE,
+            "scraped_at": self.now(),
+            "thumbnail_url": thumbnail,
+        }
 
 
 def _find_valid_categories() -> list[tuple[str, str]]:
-    """Filter CATEGORIES to only slugs that return products (404-safe)."""
-    import urllib.request
+    """
+    Filter CATEGORIES to only slugs that return products.
+
+    A slug 404ing means the category was retired — safe to skip (H9's original,
+    correct case). Any other probe failure (timeout, 5xx, HostBlocked, DNS) is
+    NOT the same thing and must not be read as "category doesn't exist": that
+    misreading is what silently shrank the scraped category list on a transient
+    blip. Non-404 failures are collected and raised as ScrapeIncomplete once
+    every slug has been probed, carrying whatever categories DID resolve on
+    `.valid_categories` so the caller can still scrape those.
+    """
     scraper = AmdHouseScraper()
-    valid = []
+    valid: list[tuple[str, str]] = []
+    probe_errors: list[str] = []
     for slug, cat in CATEGORIES:
         url = f"{BASE}/product-category/{slug}/"
         try:
             html = scraper.fetch(url)
-            if 'woocommerce-loop-product__title' in html:
-                valid.append((url, cat))
-                print(f"  [ok] {slug} -> {cat}")
-            else:
-                print(f"  [empty] {slug}")
         except Exception as e:
-            print(f"  [skip] {slug}: {e}")
+            if is_http_404(e):
+                print(f"  [skip] {slug}: 404 — category retired")
+            else:
+                print(f"  [probe failed] {slug}: {e}")
+                probe_errors.append(f"{slug}: {e}")
+            time.sleep(0.5)
+            continue
+        if 'woocommerce-loop-product__title' in html:
+            valid.append((url, cat))
+            print(f"  [ok] {slug} -> {cat}")
+        else:
+            print(f"  [empty] {slug}")
         time.sleep(0.5)
+
+    if probe_errors:
+        exc = ScrapeIncomplete(
+            "amdhouse: category probe failed for " + "; ".join(probe_errors)
+        )
+        exc.valid_categories = valid
+        raise exc
+
     return valid
 
 
 def main():
-    scraper = AmdHouseScraper()
-    all_results: list[dict] = []
-
     print("Checking available categories...")
     valid = _find_valid_categories()
-
-    for url, category in valid:
-        print(f"\n[{category.upper()}] {url}")
-        products = scraper.scrape(url)
-        for p in products:
-            p["category"] = category
-        print(f"  => {len(products)} products")
-        all_results.extend(products)
-
-    if not all_results:
-        print("No products scraped.")
-        sys.exit(1)
-
-    from collections import Counter
-    counts = Counter(p["category"] for p in all_results)
-    print(f"\nTotal: {len(all_results)} products")
-    for cat, n in sorted(counts.items()):
-        print(f"  {cat:15s} {n}")
-
-    sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..")))
-    from db.database import get_db
-    db_path = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "data", "ppc.db"))
-    with get_db(db_path) as db:
-        inserted = db.upsert_products(all_results)
-        print(f"\nDB: {inserted} price rows written")
-        s = db.stats()
-        print(f"DB stats: {s['total_parts']} parts, {s['total_price_rows']} price rows")
+    run_and_persist(AmdHouseScraper(), valid, write_db=True)
 
 
 if __name__ == "__main__":

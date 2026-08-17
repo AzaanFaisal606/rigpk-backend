@@ -1,10 +1,11 @@
 """Unit tests for price-trend aggregation helpers and rebuild_price_trends."""
 import tempfile
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
 
-from db.database import _median, _trimmed_mean, get_db
+from db.database import _TREND_MAX_DATES, _median, _trimmed_mean, get_db
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -76,7 +77,11 @@ def test_rebuild_groups_gpu_models(db):
     series = db.get_price_trends("gpu", "RTX 4070")
     assert len(series) == 1
     row = series[0]
-    assert row["method"] == "trimmed_mean"
+    # Matched-basket chaining: the first date of a series has no predecessor
+    # to match against, so its own listings ARE the basket, and center_price
+    # is a real median of them -> "matched_basket_median" regardless of n
+    # (there is no separate trimmed-mean center calculation any more).
+    assert row["method"] == "matched_basket_median"
     assert row["sample_count"] == 6
     # band is 5%-trimmed (ceil(6*.05)=1 dropped each end): 200000 and 205000 shed
     assert row["min_price"] == 201000
@@ -106,7 +111,10 @@ def test_rebuild_small_bucket_uses_median(db):
         _seed(db, f"MSI RTX 5070 v{i}", "gpu", {"2026-01-01": p})
     db.rebuild_price_trends()
     row = db.get_price_trends("gpu", "RTX 5070")[0]
-    assert row["method"] == "median"
+    # First date of the series -> basket == the raw listings, center_price is
+    # a real median of them -> "matched_basket_median". Value is unchanged
+    # from the old median fallback.
+    assert row["method"] == "matched_basket_median"
     assert row["center_price"] == 110000  # median of 3, robust to the 300k outlier
     assert row["min_price"] == 100000 and row["max_price"] == 300000
 
@@ -151,13 +159,19 @@ def test_rebuild_idempotent(db):
     assert cnt == first
 
 def test_rebuild_multiple_dates_make_series(db):
+    # Matched-basket rewrite: on 2026-03-01 only part "a" is still listed (the
+    # 5 "b" parts dropped out after 02-01), so the shared basket between
+    # 02-01 and 03-01 has size 1 — below _TREND_MIN_BASKET (3). That is not a
+    # measurement (one product's price change isn't a market move), so the
+    # point is dropped rather than published on a 1-part basket. Only the two
+    # dates with a real matched basket (all 6 parts, both times) survive.
     _seed(db, "MSI RTX 4070 a", "gpu", {"2026-01-01": 210000, "2026-02-01": 205000, "2026-03-01": 200000})
     for i in range(5):
         _seed(db, f"MSI RTX 4070 b{i}", "gpu", {"2026-01-01": 210000, "2026-02-01": 205000})
     db.rebuild_price_trends()
     series = db.get_price_trends("gpu", "RTX 4070")
     dates = [r["scrape_date"] for r in series]
-    assert dates == ["2026-01-01", "2026-02-01", "2026-03-01"]
+    assert dates == ["2026-01-01", "2026-02-01"]
 
 def test_list_trend_groups_latest(db):
     _seed(db, "MSI RTX 4070 a", "gpu", {"2026-01-01": 220000, "2026-02-01": 200000})
@@ -227,33 +241,47 @@ def test_get_price_trends_ram_default_group_type(db):
 
 
 def test_median_even_used_count(db):
-    """Even-length median bucket reports used_count=2, not the full n."""
-    for i, p in enumerate([100000, 110000, 120000, 130000]):  # n=4 (even, <5 -> median)
+    """used_count == n, the whole matched basket (no odd/even median-arity)."""
+    for i, p in enumerate([100000, 110000, 120000, 130000]):  # n=4
         _seed(db, f"MSI RTX 5080 v{i}", "gpu", {"2026-01-01": p})
     db.rebuild_price_trends()
     row = db.get_price_trends("gpu", "RTX 5080")[0]
-    assert row["method"] == "median"
+    # Matched-basket method: used_count is simply the size of the matched
+    # basket that fed center_price (no more "1 odd / 2 even" median-arity
+    # convention — that was specific to the raw-sample median fallback the
+    # old method used).
+    assert row["method"] == "matched_basket_median"
     assert row["sample_count"] == 4
-    assert row["used_count"] == 2
+    assert row["used_count"] == 4
 
 
 # --- recent-scrapes window -------------------------------------------------
 
-_EIGHT_DATES = [f"2026-0{m}-01" for m in range(1, 9)]
+# Derived from the constant rather than hardcoded, so tuning the display
+# window is a one-line change instead of a test rewrite. Always three dates
+# more than the window, so there is always something for the cut to remove.
+_WINDOW = _TREND_MAX_DATES
+_MANY_DATES = [
+    (date(2026, 1, 5) + timedelta(weeks=i)).isoformat()
+    for i in range(_WINDOW + 3)
+]
+# The dates that fall OUTSIDE the window — seeding only these means a group
+# contributes no visible points at all.
+_OUTSIDE_DATES = _MANY_DATES[:-_WINDOW]
 
 
 def _seed_many_dates(db, n_parts=6):
-    """n_parts RTX 4070 listings priced across 8 scrape dates."""
+    """n_parts RTX 4070 listings priced across more dates than the window."""
     for i in range(n_parts):
         _seed(db, f"MSI RTX 4070 {i}", "gpu",
-              {d: 200000 + 1000 * j for j, d in enumerate(_EIGHT_DATES)})
+              {d: 200000 + 1000 * j for j, d in enumerate(_MANY_DATES)})
 
 
 def test_series_limited_to_last_five_scrapes(db):
     _seed_many_dates(db)
     db.rebuild_price_trends()
     dates = [r["scrape_date"] for r in db.get_price_trends("gpu", "RTX 4070")]
-    assert dates == _EIGHT_DATES[-5:]
+    assert dates == _MANY_DATES[-_WINDOW:]
 
 
 def test_series_window_is_opt_out(db):
@@ -261,14 +289,14 @@ def test_series_window_is_opt_out(db):
     _seed_many_dates(db)
     db.rebuild_price_trends()
     dates = [r["scrape_date"] for r in db.get_price_trends("gpu", "RTX 4070", max_dates=None)]
-    assert dates == _EIGHT_DATES
+    assert dates == _MANY_DATES
 
 
 def test_series_window_respects_explicit_size(db):
     _seed_many_dates(db)
     db.rebuild_price_trends()
     dates = [r["scrape_date"] for r in db.get_price_trends("gpu", "RTX 4070", max_dates=2)]
-    assert dates == _EIGHT_DATES[-2:]
+    assert dates == _MANY_DATES[-2:]
 
 
 def test_fewer_scrapes_than_window_returns_all(db):
@@ -287,7 +315,7 @@ def test_window_is_per_category_so_groups_share_an_axis(db):
     """
     _seed_many_dates(db)  # RTX 4070 across all 8 dates
     for i in range(6):    # RTX 4060 only in the first three
-        _seed(db, f"MSI RTX 4060 {i}", "gpu", dict.fromkeys(_EIGHT_DATES[:3], 90000))
+        _seed(db, f"MSI RTX 4060 {i}", "gpu", dict.fromkeys(_OUTSIDE_DATES, 90000))
     db.rebuild_price_trends()
 
     rows = db.get_price_trends("gpu")
@@ -295,7 +323,7 @@ def test_window_is_per_category_so_groups_share_an_axis(db):
     for r in rows:
         by_group.setdefault(r["group_key"], []).append(r["scrape_date"])
 
-    assert by_group["RTX 4070"] == _EIGHT_DATES[-5:]
+    assert by_group["RTX 4070"] == _MANY_DATES[-_WINDOW:]
     # Every one of the 4060's dates falls outside the window, so it contributes
     # no points at all rather than back-filling with older ones.
     assert "RTX 4060" not in by_group

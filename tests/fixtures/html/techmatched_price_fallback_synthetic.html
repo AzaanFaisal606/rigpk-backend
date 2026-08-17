@@ -1,0 +1,33 @@
+<!--
+Synthetic fixture — hand-built, not a saved retailer page.
+
+Reproduces M5 (docs/audit/scrapers.md): techmatched's card can embed a
+"related products" JSON blob (own recommendation widget) inside its own <li>,
+ahead of its real visible price markup. The old bare fallback regex
+`"price"\s*:\s*(\d+)` matched the FIRST "price" key in the block — the
+recommended product's price, not the card's own — because it wasn't scoped to
+anything. This file has two cards: the first is a plain sanity case, the
+second carries a decoy "price" before its true woocommerce-Price-amount
+markup so the two are distinguishable in the test.
+-->
+<html>
+<body>
+<ul class="products columns-4">
+<li class="product type-product post-1001 status-publish instock product_cat-graphics-card-in-pakistan has-post-thumbnail purchasable product-type-simple">
+	<h2 class="woocommerce-loop-product__title"><a href="https://techmatched.pk/product/plain-card-gpu/">Buy Plain Card GPU in Pakistan | TechMatched</a></h2>
+	<a class="woocommerce-LoopProduct-link" href="https://techmatched.pk/product/plain-card-gpu/">image</a>
+	<span class="price"><span class="woocommerce-Price-amount amount"><span class="woocommerce-Price-currencySymbol">Rs</span>200000</span></span>
+</li>
+<li class="product type-product post-1002 status-publish instock product_cat-graphics-card-in-pakistan has-post-thumbnail purchasable product-type-simple">
+	<h2 class="woocommerce-loop-product__title"><a href="https://techmatched.pk/product/decoy-card-gpu/">Buy Decoy Card GPU in Pakistan | TechMatched</a></h2>
+	<a class="woocommerce-LoopProduct-link" href="https://techmatched.pk/product/decoy-card-gpu/">image</a>
+	<script>
+	// "You may also like" widget bundled inside this card, listing a
+	// DIFFERENT product's price ahead of this card's own price markup.
+	var relatedWidget = {"related_product_id": 999, "name": "Some Other GPU", "price": 999999};
+	</script>
+	<span class="price"><span class="woocommerce-Price-amount amount"><span class="woocommerce-Price-currencySymbol">Rs</span>444999</span></span>
+</li>
+</ul>
+</body>
+</html>

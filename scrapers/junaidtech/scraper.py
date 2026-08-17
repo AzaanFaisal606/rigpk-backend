@@ -17,9 +17,9 @@ import os
 import re
 import sys
 import time
-import urllib.request
 
 from scrapers.base_scraper import BaseScraper
+from scrapers.exceptions import ScrapeIncomplete
 
 SOURCE = "junaidtech.pk"
 BASE   = "https://www.junaidtech.pk"
@@ -55,10 +55,16 @@ class JunaidTechScraper(BaseScraper):
         """
         print(f"    Fetching SSR page for Bearer token...")
         html = self.fetch(url)
-        token, extracted_id = self._extract_auth(html)
-        category_id = known_category_id or extracted_id
-        if not token or not category_id:
-            raise RuntimeError("Could not extract auth token or category ID from SSR page")
+        token = self._extract_token(html)
+        category_id = known_category_id or self._extract_category_id(html)
+        if not token:
+            # Don't raise here: the token might genuinely not be needed (or
+            # extraction might just be brittle against a page-format change)
+            # and the API call itself is the real test. What must not happen
+            # is treating this as fatal *and then* also letting a failed call
+            # be swallowed below as a clean empty result — see the except
+            # branch, which is where the real H7 fix lives.
+            print("    WARNING: no Bearer token extracted from SSR page — attempting request anyway.")
 
         all_products: list[dict] = []
         seen_ids: set[str] = set()
@@ -69,7 +75,21 @@ class JunaidTechScraper(BaseScraper):
             try:
                 batch, total = self._api_fetch(token, category_id, start_row, PAGE_SIZE, category)
             except Exception as e:
-                print(f"    API error at row {start_row}: {e} — stopping.")
+                if not all_products:
+                    # Nothing collected yet and the first page failed. An
+                    # empty return here is indistinguishable, to the caller,
+                    # from "this retailer has 0 products" and would feed the
+                    # freshness sweep — deactivating ~1,841 active products.
+                    # Fail loudly instead.
+                    if not token:
+                        raise ScrapeIncomplete(
+                            "junaidtech: could not extract API bearer token "
+                            f"(first page request also failed: {e})"
+                        ) from e
+                    raise ScrapeIncomplete(
+                        f"junaidtech: pagination failed before any products were collected: {e}"
+                    ) from e
+                print(f"    API error at row {start_row}: {e} — stopping, keeping {len(all_products)} collected so far.")
                 break
 
             if not batch:
@@ -91,7 +111,7 @@ class JunaidTechScraper(BaseScraper):
 
         return all_products
 
-    def _api_fetch(self, token: str, category_id: str, start_row: int, results: int, category: str = "") -> tuple[list[dict], int]:
+    def _api_fetch(self, token: str | None, category_id: str | None, start_row: int, results: int, category: str = "") -> tuple[list[dict], int]:
         scraped_at = self.now()
         s3 = "https://static.webx.pk/files"
 
@@ -102,19 +122,18 @@ class JunaidTechScraper(BaseScraper):
             "stockStatus": "1",  # server-side filter: "1"=instock only (excludes sold-out)
         }).encode()
 
-        req = urllib.request.Request(
-            API,
-            data=body,
-            headers={
-                "User-Agent": self.USER_AGENT,
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {token}",
-                "Referer": f"{BASE}/",
-            },
-        )
-        with urllib.request.urlopen(req, timeout=20) as r:
-            d = json.loads(r.read())
+        # Routed through the shared fetch() — same retry/pacing/circuit-breaker
+        # contract every other request path gets, instead of a bare urlopen()
+        # that bypassed all of it (H3).
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "Referer": f"{BASE}/",
+        }
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        raw = self.fetch(API, headers=headers, data=body)
+        d = json.loads(raw)
 
         data = d.get("data", {})
         total = int(data.get("totalRecords", 0))
@@ -163,35 +182,48 @@ class JunaidTechScraper(BaseScraper):
         return products, total
 
     @staticmethod
-    def _extract_auth(html: str) -> tuple[str | None, str | None]:
-        """Extract Bearer token and pc-components category ID from __NUXT_DATA__."""
+    def _parse_nuxt_data(html: str) -> list | None:
+        """Pull and decode the __NUXT_DATA__ payload array, or None if absent/malformed."""
         data_tag = re.search(
             r'<script[^>]+id="__NUXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL
         )
         if not data_tag:
-            return None, None
+            return None
+        try:
+            return json.loads(data_tag.group(1))
+        except (json.JSONDecodeError, ValueError):
+            return None
 
-        arr = json.loads(data_tag.group(1))
-
+    @classmethod
+    def _extract_token(cls, html: str) -> str | None:
+        """Extract the Bearer access token from the embedded __NUXT_DATA__ payload."""
+        arr = cls._parse_nuxt_data(html)
+        if arr is None:
+            return None
         # Token is in arr[4] -> tokens -> accessToken (all references by index)
         try:
             store_obj = arr[4]           # {status, message, data, tokens}
             tokens_idx = store_obj["tokens"]
             token_obj = arr[tokens_idx]  # {accessToken, refreshToken}
-            access_token = arr[token_obj["accessToken"]]
+            return arr[token_obj["accessToken"]]
         except Exception:
-            access_token = None
+            return None
 
-        # Category ID: the url-type key holds {item_id, slug, ...}
+    @classmethod
+    def _extract_category_id(cls, html: str) -> str | None:
+        """Extract the pc-components category ID from __NUXT_DATA__, with a regex fallback."""
+        arr = cls._parse_nuxt_data(html)
         category_id = None
-        try:
-            state_obj = arr[3]  # top-level state dict
-            url_type_idx = state_obj.get("url-type-/pc-components")
-            if url_type_idx is not None:
-                url_type = arr[url_type_idx]
-                category_id = str(arr[url_type["item_id"]] if isinstance(url_type["item_id"], int) else url_type["item_id"])
-        except Exception:
-            pass
+        if arr is not None:
+            # Category ID: the url-type key holds {item_id, slug, ...}
+            try:
+                state_obj = arr[3]  # top-level state dict
+                url_type_idx = state_obj.get("url-type-/pc-components")
+                if url_type_idx is not None:
+                    url_type = arr[url_type_idx]
+                    category_id = str(arr[url_type["item_id"]] if isinstance(url_type["item_id"], int) else url_type["item_id"])
+            except Exception:
+                pass
 
         # Fallback: scan for item_id matching known pattern
         if not category_id:
@@ -199,7 +231,8 @@ class JunaidTechScraper(BaseScraper):
             if m:
                 category_id = m.group(1)
 
-        return access_token, category_id
+        return category_id
+
 
 def main():
     scraper = JunaidTechScraper()
@@ -225,7 +258,8 @@ def main():
     sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..")))
     from db.database import get_db
     db_path = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "data", "ppc.db"))
-    with get_db(db_path) as db:
+    # Standalone smoke test — writes rows, never schema.
+    with get_db(db_path, allow_remote_migrations=False) as db:
         inserted = db.upsert_products(all_results)
         print(f"\nDB: {inserted} price rows written")
         s = db.stats()

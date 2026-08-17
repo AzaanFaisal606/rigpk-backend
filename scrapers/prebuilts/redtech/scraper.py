@@ -16,6 +16,8 @@ import re
 import sys
 import time
 
+from scrapers.base_scraper import is_http_404 as _is_404
+from scrapers.exceptions import ScrapeIncomplete
 from scrapers.prebuilts.base_prebuilt_scraper import BasePrebuiltScraper
 
 SOURCE  = "redtech.pk"
@@ -63,20 +65,53 @@ _LABEL_MAP = {
 
 class RedTechScraper(BasePrebuiltScraper):
 
+    MAX_PAGES = 50                   # redtech's whole prebuilt catalogue is ~13 products, one page; 50 is insurance
+    MAX_CONSECUTIVE_FAILURES = 3
+
     def scrape_all(self) -> list[dict]:
         all_links: list[str] = []
         seen_links: set[str] = set()
+        incomplete_errors: list[str] = []
 
         for cat_url in CAT_URLS:
             page = 1
-            while True:
+            failures = 0
+            while page <= self.MAX_PAGES:
                 url = cat_url if page == 1 else f"{cat_url}page/{page}/"
                 print(f"  [redtech] page {page}: {url}")
                 try:
                     html = self.fetch(url)
-                except RuntimeError as e:
-                    print(f"  [redtech] fetch error: {e}")
-                    break
+                    failures = 0
+                except Exception as e:
+                    if _is_404(e):
+                        # redtech answers the page after the last one with a
+                        # plain 404 instead of just omitting a "next" link —
+                        # that's the site telling us pagination ended, not a
+                        # failure. Keep everything collected so far and don't
+                        # count it toward the failure budget below.
+                        print(f"  [redtech] page {page} 404 — end of pagination, "
+                              f"{len(all_links)} link(s) collected from {cat_url}.")
+                        break
+                    failures += 1
+                    print(f"  [redtech] fetch error: {e} — failure {failures}/{self.MAX_CONSECUTIVE_FAILURES}")
+                    if failures >= self.MAX_CONSECUTIVE_FAILURES:
+                        # Genuine, repeated failures (timeouts/5xx/resets — not
+                        # 404s, handled above). Give up on this category URL but
+                        # don't discard the partial harvest from pages 1..page-1:
+                        # a caller that gets [] can't tell "nothing to scrape"
+                        # from "we choked partway through". Keep going (there may
+                        # be other CAT_URLS) and raise ScrapeIncomplete once all
+                        # of them are done, with whatever got collected attached
+                        # — see the raise at the end of this method.
+                        msg = (f"{failures} consecutive fetch failures at page {page} of "
+                               f"{cat_url} — giving up on this category URL, keeping "
+                               f"{len(all_links)} link(s) collected from pages 1..{page - 1}")
+                        print(f"  [redtech] WARNING: {msg}")
+                        incomplete_errors.append(msg)
+                        break
+                    page += 1
+                    time.sleep(self.PAGE_DELAY)
+                    continue
 
                 links = self._extract_product_links(html)
                 if not links:
@@ -84,6 +119,9 @@ class RedTechScraper(BasePrebuiltScraper):
                     break
 
                 new = [l for l in links if l not in seen_links]
+                if not new:
+                    print(f"  [redtech] page {page} returned only already-seen products — done.")
+                    break
                 for l in new:
                     seen_links.add(l)
                 all_links.extend(new)
@@ -93,6 +131,11 @@ class RedTechScraper(BasePrebuiltScraper):
                     break
                 page += 1
                 time.sleep(self.PAGE_DELAY)
+            else:
+                # A page cap this generous getting hit at all means the site is
+                # serving "new" content forever (or is broken) — trust nothing
+                # collected so far rather than deliver a harvest of unknown shape.
+                raise ScrapeIncomplete(f"redtech: hit MAX_PAGES={self.MAX_PAGES} without finishing")
 
         print(f"  [redtech] {len(all_links)} unique product URLs found")
 
@@ -107,6 +150,11 @@ class RedTechScraper(BasePrebuiltScraper):
             except Exception as e:
                 print(f"    ERROR: {e}")
             time.sleep(self.PAGE_DELAY)
+
+        if incomplete_errors:
+            exc = ScrapeIncomplete("redtech: " + "; ".join(incomplete_errors))
+            exc.partial_results = results
+            raise exc
 
         return results
 

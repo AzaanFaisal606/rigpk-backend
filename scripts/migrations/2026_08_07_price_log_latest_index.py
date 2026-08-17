@@ -9,6 +9,7 @@ statement works. Idempotent (IF NOT EXISTS) and verified by read-back.
 import sys
 
 from db.database import get_db
+from scripts.migrations._guard import resolve_target
 
 DDL = (
     "CREATE INDEX IF NOT EXISTS idx_price_log_latest "
@@ -17,6 +18,10 @@ DDL = (
 
 
 def main() -> int:
+    # This script exists to issue DDL against remote Turso, so it needs both
+    # halves of the guard: the production confirmation, and the
+    # ALLOW_REMOTE_MIGRATIONS opt-in resolve_target() grants once confirmed.
+    resolve_target()
     db = get_db()
     print(f"target: {db._target} (remote={db._remote})")
     before = {r[0] for r in db._conn.execute(
