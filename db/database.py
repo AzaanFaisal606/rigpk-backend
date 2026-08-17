@@ -568,6 +568,56 @@ class Database:
         if os.getenv("SCRAPE_NO_DB_WRITE") == "1":
             self._conn = _NoCommitConnection(self._conn)
 
+    def _transact(self, work, *, attempts: int = 3):
+        """
+        Run `work()` inside a transaction, redoing the ENTIRE block if the
+        transaction was lost to a transient transport fault.
+
+        `db/libsql_adapter.py` deliberately refuses to replay a single
+        statement that failed inside a `with conn:` — the transaction died
+        with it, so re-running that one statement on a fresh stream would
+        apply it outside the unit of work its caller wrote. For
+        `rebuild_price_trends` that means re-inserting every trend row on
+        top of the ones the lost DELETE never removed. The adapter's comment
+        names redoing the whole unit of work as the correct response and
+        leaves it to the caller; this is the caller's half.
+
+        ONLY for blocks that reach the same end state when redone in full.
+        Every caller today either replaces its table's contents wholesale or
+        recomputes what it writes from the table's current contents, so a
+        redo repeats the same decision rather than compounding it.
+        `record_scrape_run` is deliberately NOT routed through here: it
+        appends a row, so redoing it after a commit whose acknowledgement was
+        merely lost would append that row twice.
+
+        Local SQLite never raises any of these, so this is a plain
+        `with self._conn:` there.
+        """
+        last: Optional[Exception] = None
+        for attempt in range(attempts):
+            try:
+                with self._conn:
+                    return work()
+            except ValueError as exc:
+                if not self._remote:
+                    raise
+                from db import libsql_adapter  # local import: libsql optional offline
+                # Every tier qualifies here, including the read-only one:
+                # its ambiguity is "the statement may already have run",
+                # which only matters when replaying a statement in
+                # isolation. Redoing an idempotent block is unaffected by
+                # whether the lost attempt landed.
+                if not (
+                    libsql_adapter._is_stream_lost(exc)
+                    or libsql_adapter._is_transient(exc)
+                    or libsql_adapter._is_transient_read_only(exc)
+                ):
+                    raise
+                last = exc
+                if attempt == attempts - 1:
+                    raise
+        raise last if last is not None else RuntimeError("_transact exhausted without an error")
+
     def _apply_schema(self):
         # Remote DB: apply schema + migrations once per process (see module note).
         if self._remote and self._target in _REMOTE_SCHEMA_APPLIED:
@@ -1014,7 +1064,11 @@ class Database:
         seen = getattr(self, "_last_seen_ids", {}).get(source, set())
         if not seen:
             return 0
-        with self._conn:
+
+        # Safe to redo whole (see _transact): the SELECT is inside the block,
+        # so a retry recomputes `to_deactivate` from the table as it stands
+        # and re-issues an UPDATE already guarded by `is_active = 1`.
+        def _sweep():
             active_rows = self._conn.execute(
                 "SELECT id FROM parts WHERE source = ? AND is_active = 1",
                 (source,),
@@ -1037,7 +1091,9 @@ class Database:
                     chunk,
                 )
                 total += cur.rowcount
-        return total
+            return total
+
+        return self._transact(_sweep)
 
     # ------------------------------------------------------------------
     # Scrape run log
@@ -1558,7 +1614,11 @@ class Database:
                     band_lo, band_hi, basket_size,
                 ))
 
-        with self._conn:  # transaction
+        # Replace-wholesale, so redoing the block reaches the same end state
+        # no matter how far the lost attempt got (see _transact). This is the
+        # exact block the adapter's stream-lost comment cites as the reason a
+        # single statement inside a transaction must never be replayed alone.
+        def _write():
             self._conn.execute("DELETE FROM price_trends")
             self._conn.executemany(
                 """
@@ -1570,6 +1630,8 @@ class Database:
                 """,
                 records,
             )
+
+        self._transact(_write)
         return len(records)
 
     @staticmethod
@@ -1864,7 +1926,9 @@ class Database:
         seen = getattr(self, "_last_seen_prebuilt_ids", {}).get(source, set())
         if not seen:
             return 0
-        with self._conn:
+
+        # Safe to redo whole, for the same reason as deactivate_unseen_parts.
+        def _sweep():
             active_rows = self._conn.execute(
                 "SELECT id FROM prebuilts WHERE source = ? AND is_active = 1",
                 (source,),
@@ -1887,7 +1951,9 @@ class Database:
                     chunk,
                 )
                 total += cur.rowcount
-        return total
+            return total
+
+        return self._transact(_sweep)
 
     def list_prebuilts(
         self,
