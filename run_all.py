@@ -569,6 +569,9 @@ def main():
             print(f"DB: marked stale — {', '.join(stale)}")
 
         trend_rows = db.rebuild_price_trends()
+        # The only moment price_log actually changes size. /api/stats reads
+        # this stored number instead of counting the table on every request.
+        db.refresh_price_log_count()
         s = db.stats()
         print(f"\nDB: {inserted} new price rows written to {DB_PATH}")
         print(f"DB: {deactivated} parts marked inactive this run")

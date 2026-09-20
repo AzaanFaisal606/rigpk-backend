@@ -51,7 +51,24 @@ class _CountingConn:
 
 
 def test_stats_issues_few_queries(client):
+    """
+    Steady-state query count for a cache miss.
+
+    Three round trips: the grouped active-parts scan, the single-row read of
+    the stored price_log count, and source_health. The price_log total used to
+    ride along in the parts statement as COUNT(*) — one fewer round trip, but
+    it read every row of the largest table on every request, which is what
+    actually costs money on a row-read-billed database.
+
+    The first /api/stats call below is the one-time backfill (app_meta has
+    never been written on a freshly seeded DB, so price_log_count() counts for
+    real and stores the result); the measured call is the one after it.
+    """
+    from backend.routers.parts import reset_stats_cache
+
     client.get("/api/parts?category=gpu&limit=1")  # force the lazy connect
+    client.get("/api/stats")                       # warm app_meta
+    reset_stats_cache()
 
     inst = client.app.dependency_overrides[get_database]()
     real_db = inst._owner_db()
@@ -60,4 +77,27 @@ def test_stats_issues_few_queries(client):
 
     client.get("/api/stats")
 
-    assert len(calls) <= 2, f"{len(calls)} queries: {[str(c)[:60] for c in calls]}"
+    assert len(calls) <= 3, f"{len(calls)} queries: {[str(c)[:60] for c in calls]}"
+    assert not any("COUNT(*) FROM price_log" in str(c) for c in calls), (
+        "price_log must not be counted live — /api/stats is public and this "
+        "reads every row in the table"
+    )
+
+
+def test_stats_repeat_request_hits_no_database(client):
+    """
+    The endpoint is parameterless and its answer changes once a week, so a
+    second request inside the TTL must not touch the database at all. This is
+    the fix for the keep-warm cron that spent ~341M Turso row reads a month.
+    """
+    client.get("/api/parts?category=gpu&limit=1")  # force the lazy connect
+    client.get("/api/stats")                       # populates the cache
+
+    inst = client.app.dependency_overrides[get_database]()
+    real_db = inst._owner_db()
+    calls: list = []
+    real_db._conn = _CountingConn(real_db._conn, calls)
+
+    client.get("/api/stats")
+
+    assert calls == [], f"cached /api/stats still queried: {[str(c)[:60] for c in calls]}"

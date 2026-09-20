@@ -19,3 +19,18 @@ import pytest
 def _force_local_sqlite(monkeypatch):
     monkeypatch.delenv("TURSO_DATABASE_URL", raising=False)
     monkeypatch.delenv("TURSO_AUTH_TOKEN", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _clear_stats_cache():
+    """
+    /api/stats keeps one process-wide snapshot with a TTL (see
+    backend/routers/parts.py). That is right in production and wrong in a test
+    run, where each test seeds its own database into the same process — without
+    this, the first test to hit /api/stats answers for all of them.
+    """
+    from backend.routers.parts import reset_stats_cache
+
+    reset_stats_cache()
+    yield
+    reset_stats_cache()

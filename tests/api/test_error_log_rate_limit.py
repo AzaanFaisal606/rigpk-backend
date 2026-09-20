@@ -1,7 +1,9 @@
 """
-G3: /api/stats is public and .github/workflows/keepwarm.yml pings it every
-10 minutes on top of real traffic. `_safe_error()` used to `logger.error` the
-full, pre-redaction error text on every single call — so while a source
+G3: /api/stats is public, and keepwarm.yml used to ping it every 10 minutes
+on top of real traffic (that schedule is off now, and the endpoint caches its
+response for an hour, but the rate limit still matters for real traffic).
+`_safe_error()` used to `logger.error` the full, pre-redaction error text on
+every single call — so while a source
 stayed broken, get_stats() re-emitted that full detail on every request
 (~1000 lines/week of exactly the content the classifier exists to keep off
 the public response). It must now log a given source's error text at most
@@ -11,6 +13,7 @@ import logging
 
 import pytest
 
+from backend.routers.parts import reset_stats_cache
 from db.database import Database
 
 
@@ -73,6 +76,11 @@ def test_different_error_still_logs(client, seeded_db, caplog):
             seeded_db, "czone",
             "HostBlocked: czone.com.pk returned 429 on 5 consecutive fetches",
         )
+        # /api/stats caches its whole response for an hour, so this second
+        # request would otherwise be served from that snapshot and never reach
+        # the classifier this test is about. Drop it so the new error text
+        # actually gets looked at.
+        reset_stats_cache()
         r2 = client.get("/api/stats")
         assert r2.status_code == 200
 

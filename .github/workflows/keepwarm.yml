@@ -8,9 +8,18 @@ name: Keep API warm
 #
 # A ping every 10 minutes keeps the dyno up. This is deliberately not gated on
 # DEBUG_MODE — it performs no writes and reads no secrets.
+#
+# SCHEDULE DISABLED (2026-09-20). It performs no writes, but /api/stats is not
+# free to serve: it used to count every row of price_log on each call, so
+# 144 pings a day cost roughly 341 million Turso row reads a month — about
+# two thirds of the 500M free allowance, spent entirely on keeping a dyno
+# awake for nobody. /api/stats is cheap now (cached count + in-process TTL
+# cache), but at 76 visits a quarter a cold start on the rare real request is
+# a better trade than 4,320 synthetic ones. Re-enable the cron below if
+# traffic ever justifies it.
 on:
-  schedule:
-    - cron: "*/10 * * * *"
+  # schedule:
+  #   - cron: "*/10 * * * *"
   workflow_dispatch:
 
 permissions: {}

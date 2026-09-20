@@ -124,8 +124,10 @@ _HTTP_STATUS_PHRASE_RE = re.compile(r"^Fetch failed — site returned HTTP [45]\
 # ---------------------------------------------------------------------------
 # Per-source rate limit on the full-detail log line below.
 #
-# /api/stats is public and .github/workflows/keepwarm.yml pings it every 10
-# minutes (144x/day) on top of real traffic. While a source stays broken,
+# /api/stats is public, and keepwarm.yml used to ping it every 10 minutes
+# (144x/day) on top of real traffic — that schedule is disabled now, and the
+# endpoint is cached above, but the reasoning still holds for real traffic.
+# While a source stays broken,
 # get_stats() calls _safe_error() once per source per request, and it used to
 # unconditionally log the untruncated error every single call — ~1000 lines a
 # week of exactly the content this classifier exists to keep out of the
@@ -214,11 +216,47 @@ def _safe_error(error: str | None, *, source: str | None = None) -> str | None:
     return _SAFE_ERROR_FALLBACK[:_SAFE_ERROR_MAX_LEN]
 
 
+# ---------------------------------------------------------------------------
+# /api/stats is public, has no parameters, and its answer only changes once a
+# week when the scrape runs — yet every hit used to reach the database. Under
+# Turso's row-read billing that is the most expensive kind of endpoint to leave
+# uncached: identical work, charged every time, for a number nobody is watching
+# change. One process-wide snapshot with a TTL collapses a day of requests into
+# a handful of queries.
+#
+# Deliberately a plain module global rather than functools.lru_cache: the value
+# has to expire on time, and the `db` dependency is not a hashable cache key.
+# Worst case under concurrency is two workers computing it at once, which is
+# harmless.
+# ---------------------------------------------------------------------------
+_STATS_TTL_SECONDS = 3600
+_stats_cache: tuple[dict, float] | None = None
+
+
+def reset_stats_cache() -> None:
+    """
+    Drop the cached snapshot. Exists for the tests: the cache is process-wide
+    by design, so without this one test's seeded database would answer the
+    next test's request.
+    """
+    global _stats_cache
+    _stats_cache = None
+
+
 @router.get("/stats", response_model=StatsResponse)
 def get_stats(db: Database = Depends(get_database)):
+    global _stats_cache
+
+    now = time.monotonic()
+    if _stats_cache is not None:
+        cached, cached_at = _stats_cache
+        if (now - cached_at) < _STATS_TTL_SECONDS:
+            return cached
+
     data = db.stats()
     for source_name, health in data["sources"].items():
         health["last_error"] = _safe_error(health.get("last_error"), source=source_name)
+    _stats_cache = (data, now)
     return data
 
 

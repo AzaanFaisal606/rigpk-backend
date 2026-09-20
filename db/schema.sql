@@ -60,6 +60,17 @@ CREATE INDEX IF NOT EXISTS idx_price_log_time ON price_log(scraped_at);
 -- Covering, so the subquery resolves from the index alone.
 CREATE INDEX IF NOT EXISTS idx_price_log_latest ON price_log(part_id, scraped_at DESC, id);
 
+-- Small key/value store for counters that are expensive to compute but cheap
+-- to remember. Exists because of Turso's row-read billing: a live
+-- `SELECT COUNT(*) FROM price_log` reads every one of the ~68k rows, and
+-- /api/stats served that on every request. The count is written once per
+-- scrape by refresh_price_log_count() and read back as a single row.
+CREATE TABLE IF NOT EXISTS app_meta (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
 CREATE TABLE IF NOT EXISTS shared_builds (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   code       TEXT NOT NULL UNIQUE,

@@ -33,7 +33,7 @@ import re
 import sqlite3
 import secrets
 import string
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, Sequence
 import json
@@ -140,6 +140,18 @@ def _split_sql_statements(script: str) -> list[str]:
     """
     stripped = _strip_sql_line_comments(script)
     return [s.strip() for s in stripped.split(";") if s.strip()]
+
+
+def _next_day(date: str) -> str:
+    """
+    The YYYY-MM-DD after `date`, used as the exclusive upper bound of a
+    one-day range scan over scraped_at. Returning the next calendar day (not
+    `date + 'T~'` or similar) keeps the bound a plain date string that sorts
+    correctly against any ISO timestamp on that day.
+    """
+    return (
+        datetime.strptime(date, "%Y-%m-%d") + timedelta(days=1)
+    ).strftime("%Y-%m-%d")
 
 
 def _slug(url: str) -> str:
@@ -749,6 +761,19 @@ class Database:
         # sweeps (cron + manual dispatch + heal rerun hitting the same DB).
         # Drop it if a prior run of that code left it behind.
         self._conn.execute("DROP TABLE IF EXISTS _sweep_seen_ids")
+        # app_meta is in schema.sql, but schema.sql only runs where migrations
+        # are allowed and a pre-existing DB never re-runs CREATE TABLE for a
+        # table it already lacks in the same breath as the rest — keep it here
+        # too so a DB that predates the table gains it on the next guarded open.
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS app_meta (
+                key        TEXT PRIMARY KEY,
+                value      TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+            )
+            """
+        )
         self._migrate_quarantine_dedup()
 
         # Populates sqlite_stat1 so the planner picks the composite index
@@ -1497,12 +1522,21 @@ class Database:
                    substr(scraped_at, 1, 10) AS scrape_date,
                    price_pkr,
                    ROW_NUMBER() OVER (
-                       PARTITION BY part_id, substr(scraped_at, 1, 10)
+                       PARTITION BY part_id
                        ORDER BY scraped_at DESC
                    ) AS rn
             FROM price_log
             WHERE price_pkr IS NOT NULL
-              AND substr(scraped_at, 1, 10) = ?
+              -- Half-open range on the raw column, NOT substr(scraped_at,1,10)
+              -- = ?. A function wrapped around the column makes the predicate
+              -- unsargable, so idx_price_log_time can't be used and every one
+              -- of the ~68k rows is read — once for this query and again for
+              -- the COUNT below, for each of ~30 dates. Comparing the column
+              -- directly lets the index seek straight to the date's slice.
+              -- Safe because scraped_at is always ISO 8601
+              -- (YYYY-MM-DDTHH:MM:SS.sssZ), so lexical order is chronological.
+              AND scraped_at >= ?
+              AND scraped_at <  ?
         ) d
         JOIN parts p ON p.id = d.part_id
         WHERE d.rn = 1
@@ -1545,7 +1579,9 @@ class Database:
 
         rows: list = []
         for date in dates:
-            page = self._conn.execute(self._TREND_SOURCE_SQL, (date,)).fetchall()
+            page = self._conn.execute(
+                self._TREND_SOURCE_SQL, (date, _next_day(date))
+            ).fetchall()
             expected = self._conn.execute(
                 # Joined to `parts` for the same reason the source query is:
                 # the expected count has to match what the join can actually
@@ -1557,9 +1593,10 @@ class Database:
                 FROM price_log pl
                 JOIN parts p ON p.id = pl.part_id
                 WHERE pl.price_pkr IS NOT NULL
-                  AND substr(pl.scraped_at, 1, 10) = ?
+                  AND pl.scraped_at >= ?
+                  AND pl.scraped_at <  ?
                 """,
-                (date,),
+                (date, _next_day(date)),
             ).fetchone()["c"]
             if len(page) != expected:
                 raise RuntimeError(
@@ -2120,39 +2157,101 @@ class Database:
         ).fetchall()
         return {(r["source"], r["category"]): r["n"] for r in rows}
 
+    # ------------------------------------------------------------------
+    # app_meta — remembered counters
+    #
+    # Turso bills row reads, and `SELECT COUNT(*) FROM price_log` reads all
+    # ~68k rows every single time. /api/stats served exactly that on every
+    # request, which is how a keep-warm ping every ten minutes turned into
+    # ~341M row reads a month and exhausted the free allowance. The count is
+    # recomputed once per scrape and read back as one row afterwards.
+    # ------------------------------------------------------------------
+
+    _PRICE_LOG_COUNT_KEY = "price_log_rows"
+
+    def _get_meta(self, key: str) -> Optional[str]:
+        row = self._conn.execute(
+            "SELECT value FROM app_meta WHERE key = ?", (key,)
+        ).fetchone()
+        return row["value"] if row else None
+
+    def _set_meta(self, key: str, value: str) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO app_meta (key, value, updated_at)
+            VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = excluded.updated_at
+            """,
+            (key, value),
+        )
+        self._conn.commit()
+
+    def refresh_price_log_count(self) -> int:
+        """
+        Recompute and store the price_log row count. Called once at the end of
+        a scrape — the only moment the number actually changes.
+        """
+        n = self._conn.execute("SELECT COUNT(*) AS c FROM price_log").fetchone()["c"]
+        self._set_meta(self._PRICE_LOG_COUNT_KEY, str(n))
+        return n
+
+    def price_log_count(self) -> int:
+        """
+        The stored price_log row count — one row read.
+
+        Falls back to a real COUNT(*) exactly once if the value has never been
+        written (a fresh DB, or one that predates app_meta), and stores the
+        result so the expensive path never runs twice. A DB that cannot be
+        written to still answers correctly, just at full cost.
+        """
+        stored = self._get_meta(self._PRICE_LOG_COUNT_KEY)
+        if stored is not None:
+            try:
+                return int(stored)
+            except ValueError:
+                pass  # corrupt value — fall through and recompute
+        try:
+            return self.refresh_price_log_count()
+        except Exception:
+            return self._conn.execute(
+                "SELECT COUNT(*) AS c FROM price_log"
+            ).fetchone()["c"]
+
     def stats(self) -> dict:
         """
         Quick summary — useful for CLI output, and the landing page's per-source
         cards + STALE ribbon via GET /api/stats.
 
-        Used to be six round trips (parts total, by-source, by-category,
-        price_log total, then source_health's own two). The active-parts
-        counts and the price_log total are pulled together with UNION ALL —
-        a single grouped result the by_source/by_category dicts are pivoted
-        from in Python — and source_health is down to one query itself, so
-        this is two round trips total.
+        Three round trips, all cheap: one grouped scan of the active parts
+        (pivoted into by_source/by_category in Python), one single-row read of
+        the stored price_log count, and source_health's single query.
+
+        The price_log total used to ride along as `COUNT(*) FROM price_log` in
+        a UNION ALL with the parts scan. One statement, yes — but it read
+        every row of the biggest table in the database on every single request
+        to a public, uncached-at-the-time endpoint. Under Turso's row-read
+        billing that one column was the most expensive thing the API did.
         """
         rows = self._conn.execute(
             """
-            SELECT 'part' AS kind, source, category, COUNT(*) AS n
+            SELECT source, category, COUNT(*) AS n
             FROM parts WHERE is_active = 1
             GROUP BY source, category
-            UNION ALL
-            SELECT 'price_log', NULL, NULL, COUNT(*) FROM price_log
             """
         ).fetchall()
 
         parts_total = 0
-        price_rows = 0
         by_source: dict[str, int] = {}
         by_category: dict[str, int] = {}
         for r in rows:
-            if r["kind"] == "part":
-                by_source[r["source"]] = by_source.get(r["source"], 0) + r["n"]
-                by_category[r["category"]] = by_category.get(r["category"], 0) + r["n"]
-                parts_total += r["n"]
-            else:
-                price_rows = r["n"]
+            by_source[r["source"]] = by_source.get(r["source"], 0) + r["n"]
+            by_category[r["category"]] = by_category.get(r["category"], 0) + r["n"]
+            parts_total += r["n"]
+
+        # Read back, never counted live — see price_log_count().
+        price_rows = self.price_log_count()
 
         return {
             "total_parts": parts_total,
