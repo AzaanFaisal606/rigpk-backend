@@ -10,12 +10,12 @@ and serves a REST API consumed by the Next.js frontend.
 
 - Scrapes 9 Pakistani retailers for GPU, CPU, RAM, SSD, HDD, PSU, case, motherboard, cooling and
   monitor parts
-- Tracks ~10,200 parts (~7,900 currently active/in-stock) with full price history
-- Tracks ~115 active prebuilt PCs from 3 retailers
+- Tracks ~11,000 parts (~8,000 currently active/in-stock) with full price history
+- Tracks ~250 prebuilt PCs from 3 retailers
 - Filters out sold-out items at scrape time — server-side where the platform supports it,
   otherwise per-product during parsing
 - Runs weekly via GitHub Actions: scrapes → writes the database → posts a Discord summary → opens
-  an automated fix PR if a source or category breaks (see `docs/automation.md`)
+  an automated fix PR if a source or category breaks
 - Exposes a REST API for filtering, in-browser search, build sharing/compatibility, price trends,
   and prebuilt browsing
 
@@ -28,7 +28,7 @@ and serves a REST API consumed by the Next.js frontend.
 | Database | SQLite locally (WAL mode); hosted **Turso** (libSQL) in production and CI — same code path, selected by whether `TURSO_DATABASE_URL` is set |
 | Scraping | `urllib` + regex — no Playwright, no Selenium, no `requests` |
 | Tests | pytest (backend), Vitest (frontend) |
-| Automation | GitHub Actions — weekly scrape cron, self-heal, keep-warm ping |
+| Automation | GitHub Actions — weekly scrape cron, self-heal fix PRs, heal rerun |
 
 ## Retailers Scraped
 
@@ -38,7 +38,7 @@ and serves a REST API consumed by the Next.js frontend.
 | junaidtech.pk | webx.pk Nuxt SSR — Bearer token from `__NUXT_DATA__`, POST JSON API, server-side stock filter |
 | zahcomputers.pk | WooCommerce / Woodmart theme |
 | techarc.pk | WooCommerce / Woodmart — flat permalinks (no `/product-category/`) |
-| czone.com.pk | webx.pk Nuxt SSR — JSON-LD CollectionPage, 10 categories |
+| czone.com.pk | ASP.NET server-rendered listings, 10 categories |
 | amdhouse.pk | WooCommerce / Flatsome |
 | techmatched.pk | WooCommerce / Woostify |
 | rbtechngames.com | WooCommerce / Flatsome |
@@ -46,8 +46,9 @@ and serves a REST API consumed by the Next.js frontend.
 
 Prebuilts scraped from: zestrogaming.com, redtech.pk, techmatched.pk
 
-Full architecture, the shared `fetch()` retry/circuit-breaker contract, and per-site parsing
-detail live in `docs/scrapers-reference.md`.
+Every scraper shares one `fetch()` (`scrapers/base_scraper.py`): an honest named bot User-Agent,
+jittered per-host pacing, retry by failure kind, and a per-host circuit breaker. Listing
+pagination is shared too (`scrapers/listing_scraper.py`).
 
 ## Database Design
 
@@ -64,7 +65,7 @@ Also: `shared_builds` (shareable PC build links), `prebuilts` (complete prebuilt
 `price_trends` (precomputed per-category/per-model aggregate price history), `scrape_runs` (one
 row per source per scrape run — drives the STALE ribbon and Discord report), and
 `quarantined_rows` (rows a data-quality guard rejected, kept so an over-broad rule is
-discoverable instead of silently eating real products).
+discoverable instead of silently eating real products), and `app_meta` (stored counters).
 
 Specs (socket, VRAM, DDR type, wattage, etc.) are extracted automatically at upsert time via a
 regex-based `spec_extractor` — no manual tagging needed.
@@ -81,7 +82,8 @@ regex-based `spec_extractor` — no manual tagging needed.
 | GET | `/api/builds/share/{code}` | Resolve a shared build |
 | GET | `/api/prebuilts` | Browse prebuilt PCs with filters |
 | GET | `/api/prebuilts/{id}` | Single prebuilt detail |
-| GET | `/api/trends/groups` | Precomputed price trend series by category/model |
+| GET | `/api/trends/groups` | Precomputed price trend groups for a category |
+| GET | `/api/trends` | One trend series (`category`, `group_key`) |
 
 ## Running Locally
 
@@ -126,9 +128,9 @@ backend/
     parts.py            # /api/parts, /api/parts/filters, /api/search-index, /api/stats
     builds.py            # /api/builds/share
     prebuilts.py          # /api/prebuilts
-    trends.py              # /api/trends/groups
+    trends.py              # /api/trends, /api/trends/groups
 db/
-  schema.sql            # DDL for all seven tables
+  schema.sql            # DDL for all eight tables
   tokenize.py            # the search tokenizer (mirrored in frontend/lib/search-tokenize.ts)
   libsql_adapter.py        # Turso/libSQL -> sqlite3 shim
   database.py               # all DB access; picks sqlite3 vs libsql from TURSO_DATABASE_URL
@@ -142,8 +144,8 @@ scrapers/               # 9 part retailers
 scripts/
   check_db_integrity.py  # operational integrity check, safe against production
   migrations/              # one-shot migration scripts — see scripts/README.md
-tests/                  # 57 files, 569 pytest tests (+ tests/api/, tests/scrapers/)
-.github/workflows/      # scrape.yml, heal.yml, rerun.yml, keepwarm.yml — see docs/automation.md
+tests/                  # 622 pytest tests (+ tests/api/, tests/scrapers/)
+.github/workflows/      # scrape.yml (weekly), heal.yml, rerun.yml, keepwarm.yml (manual only)
 run_all.py              # parts scraper orchestrator
 ```
 
