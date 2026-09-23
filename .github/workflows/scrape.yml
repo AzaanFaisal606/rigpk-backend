@@ -26,6 +26,11 @@ on:
         type: boolean
         required: false
         default: false
+      weekly:
+        description: "Act as the weekly run: open a new trend date and rebuild trends (only to stand in for a failed Friday run)"
+        type: boolean
+        required: false
+        default: false
 
 # Never let two scrape runs overlap — fetch() pacing assumes one process per
 # host. A manual run won't cancel an in-progress scheduled one; it queues.
@@ -56,6 +61,10 @@ jobs:
       TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
       TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
       SOURCES: ${{ github.event.inputs.sources }}
+      # Only the Friday schedule (or a dispatch with weekly=true) opens a new
+      # trend date and rebuilds trends. Any other run is pinned to the current
+      # trend date by run_all.py, so a midweek run can't add a stray point.
+      WEEKLY: ${{ (github.event_name == 'schedule' || github.event.inputs.weekly == 'true') && '--weekly' || '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -75,7 +84,7 @@ jobs:
       - name: Scrape parts
         id: scrape
         continue-on-error: true
-        run: python run_all.py $SOURCES --strict
+        run: python run_all.py $SOURCES --strict $WEEKLY
 
       - name: Mark job failed if parts scrape failed
         if: steps.scrape.outcome == 'failure'

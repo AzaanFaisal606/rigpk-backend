@@ -68,22 +68,12 @@ jobs:
           echo "valid=$valid" >> "$GITHUB_OUTPUT"
           echo "Parsed kind=$KIND key=$KEY valid=$valid from '$HEAD_REF'"
 
-      # Pin the rerun's rows to the current trend bucket so a fix merged on a
-      # later calendar day still lands in the weekly scrape's date, not a new one.
-      - name: Find current trend-bucket date
-        id: asof
-        if: steps.resolve.outputs.valid == 'yes'
-        run: |
-          DATE=$(python -c "from db.database import get_db; d=get_db(); print(d.latest_scrape_date() or ''); d.close()")
-          echo "date=$DATE" >> "$GITHUB_OUTPUT"
-          echo "SCRAPE_AS_OF_DATE will be: '$DATE'"
-
+      # A parts rerun is not --weekly, so run_all.py pins its rows to the current
+      # trend date itself: a fix merged on a later day joins that week's point.
       - name: Rerun the fixed scraper
         id: scrape
         if: steps.resolve.outputs.valid == 'yes'
         continue-on-error: true
-        env:
-          SCRAPE_AS_OF_DATE: ${{ steps.asof.outputs.date }}
         run: |
           if [ "${{ steps.resolve.outputs.kind }}" = "parts" ]; then
             python run_all.py "${{ steps.resolve.outputs.key }}" --strict

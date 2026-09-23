@@ -2240,9 +2240,10 @@ class Database:
     def latest_scrape_date(self) -> str | None:
         """
         Most recent scrape date (YYYY-MM-DD) present in price_log — i.e. the
-        current trend bucket. The heal rerun pins its rows to this via
-        SCRAPE_AS_OF_DATE so a late-merged fix joins the weekly bucket instead of
-        splitting trends onto a new day. None if price_log is empty.
+        current trend bucket. Every non-weekly run_all.py run pins its rows to
+        this via SCRAPE_AS_OF_DATE (run_all.pin_trend_bucket) so a midweek run
+        joins the weekly bucket instead of splitting trends onto a new day.
+        None if price_log is empty.
         """
         row = self._conn.execute(
             "SELECT substr(MAX(scraped_at), 1, 10) FROM price_log"

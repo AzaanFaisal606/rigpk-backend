@@ -19,6 +19,9 @@ import pytest
 def _force_local_sqlite(monkeypatch):
     monkeypatch.delenv("TURSO_DATABASE_URL", raising=False)
     monkeypatch.delenv("TURSO_AUTH_TOKEN", raising=False)
+    # run_all.main() pins non-weekly runs by setting this in os.environ;
+    # delenv here makes teardown remove it again so it can't leak across tests.
+    monkeypatch.delenv("SCRAPE_AS_OF_DATE", raising=False)
 
 
 @pytest.fixture(autouse=True)
