@@ -76,7 +76,7 @@ def _fmt_source_lines(health: dict[str, dict]) -> str:
     return "\n".join(lines)
 
 
-def build_embed(parts_status: str, prebuilts_status: str) -> dict:
+def build_embed(parts_status: str, prebuilts_status: str, warnings: list[str] | None = None) -> dict:
     # Read-only reporting — never migrates the DB it reports on. Without the
     # explicit False this raises against Turso, which is where scrape.yml
     # always runs it.
@@ -97,6 +97,8 @@ def build_embed(parts_status: str, prebuilts_status: str) -> dict:
         color, icon, verdict = RED, "❌", "one or more scrapers failed"
     elif any_stale:
         color, icon, verdict = ORANGE, "⚠️", "completed with stale sources"
+    elif warnings:
+        color, icon, verdict = ORANGE, "⚠️", "completed with warnings"
     else:
         color, icon, verdict = GREEN, "✅", "all sources fresh"
 
@@ -116,7 +118,8 @@ def build_embed(parts_status: str, prebuilts_status: str) -> dict:
         "fields": [
             {"name": "Part retailers", "value": _fmt_source_lines(parts_health), "inline": False},
             {"name": "Prebuilt sources", "value": _fmt_source_lines(prebuilt_health), "inline": False},
-        ],
+        ] + ([{"name": "Warnings", "value": "\n".join(f"⚠️ {w}" for w in warnings)[:1024], "inline": False}]
+             if warnings else []),
         "footer": {"text": "RigPK price bot"},
     }
 
@@ -145,7 +148,9 @@ def main() -> int:
         print("DISCORD_WEBHOOK_URL not set — skipping Discord notification.")
         return 0
 
-    embed = build_embed(args.parts_status, args.prebuilts_status)
+    # Health warnings from the parts job (scrape.yml passes them via env).
+    warnings = [w for w in os.getenv("HEALTH_WARNINGS", "").splitlines() if w.strip()]
+    embed = build_embed(args.parts_status, args.prebuilts_status, warnings)
     try:
         post(webhook, embed)
         print("Posted scrape summary to Discord.")

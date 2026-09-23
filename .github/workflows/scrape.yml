@@ -57,6 +57,9 @@ jobs:
   parts:
     runs-on: ubuntu-latest
     timeout-minutes: 150
+    # Health warnings (a sharp category drop that isn't a failure) for Discord.
+    outputs:
+      warnings: ${{ steps.scrape.outputs.warnings }}
     env:
       TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
       TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
@@ -155,7 +158,10 @@ jobs:
 
       # needs.<job>.result is one of success | failure | cancelled | skipped —
       # always defined, unlike a step outcome passed across jobs.
+      # Warnings travel via env, never interpolated into run:.
       - name: Notify Discord
+        env:
+          HEALTH_WARNINGS: ${{ needs.parts.outputs.warnings }}
         run: >
           python scripts/notify_discord.py
           --parts-status ${{ needs.parts.result }}

@@ -58,7 +58,8 @@ def test_evaluate_parts_combines():
     after_src = {"czone.com.pk": 205, "amdhouse.pk": 237}
     before_cat = {("czone.com.pk", "gpu"): 40}
     after_cat: dict = {}  # czone gpu emptied
-    out = health.evaluate_parts(runs, before_src, after_src, before_cat, after_cat)
+    out, warnings = health.evaluate_parts(runs, before_src, after_src, before_cat, after_cat)
+    assert warnings == []
     joined = " | ".join(out)
     assert "amdhouse.pk: run failed" in joined
     assert "czone.com.pk/gpu" in joined
@@ -71,16 +72,45 @@ def test_evaluate_parts_combines():
 # The amputation that motivated this (techmatched 653 -> 254 -> 163) never
 # emptied a category — it just kept shrinking, and nothing fired.
 
-from scrapers.health import category_anomalies, source_anomalies
+from scrapers.health import category_anomalies, category_warnings, source_anomalies
 
 
-def test_category_halving_is_an_anomaly():
-    out = category_anomalies(
-        {("techmatched", "gpu"): 200},
-        {("techmatched", "gpu"): 90},
-        {"techmatched"},
-    )
-    assert out and "gpu" in out[0]
+def test_category_halving_warns_but_does_not_fail():
+    """A 40-70% drop is usually stock or the upsert filters: warn, stay green."""
+    args = ({("techmatched", "gpu"): 200}, {("techmatched", "gpu"): 90}, {"techmatched"})
+    assert category_anomalies(*args) == []
+    warnings = category_warnings(*args)
+    assert len(warnings) == 1 and "techmatched/gpu" in warnings[0]
+
+
+def test_category_collapse_past_70_percent_fails():
+    args = ({("techmatched", "gpu"): 200}, {("techmatched", "gpu"): 50}, {"techmatched"})
+    out = category_anomalies(*args)
+    assert len(out) == 1 and "techmatched/gpu" in out[0]
+    assert category_warnings(*args) == [], "a failure is not also a warning"
+
+
+def test_emptied_category_fails_and_is_not_a_warning():
+    args = ({("czone", "gpu"): 40}, {}, {"czone"})
+    assert "category empty" in category_anomalies(*args)[0]
+    assert category_warnings(*args) == []
+
+
+def test_small_drop_neither_fails_nor_warns():
+    args = ({("pakbyte", "ram"): 100}, {("pakbyte", "ram"): 65}, {"pakbyte"})
+    assert category_anomalies(*args) == [] and category_warnings(*args) == []
+
+
+def test_the_2026_09_23_run_would_have_stayed_green():
+    """czone/hdd 39 -> 20 and pakbyte/ram 184 -> 83 were the new blocklist, not breakage."""
+    runs = [{"source": "czone.com.pk", "ok": True}, {"source": "pakbyte.pk", "ok": True}]
+    before_src = {"czone.com.pk": 345, "pakbyte.pk": 2651}
+    after_src = {"czone.com.pk": 311, "pakbyte.pk": 1958}
+    before_cat = {("czone.com.pk", "hdd"): 39, ("pakbyte.pk", "ram"): 184}
+    after_cat = {("czone.com.pk", "hdd"): 20, ("pakbyte.pk", "ram"): 83}
+    failures, warnings = health.evaluate_parts(runs, before_src, after_src, before_cat, after_cat)
+    assert failures == []
+    assert len(warnings) == 2
 
 
 def test_small_but_total_loss_on_a_tiny_source_still_fires():

@@ -97,7 +97,7 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          claude_args: "--max-turns 40 --model claude-opus-4-8"
+          claude_args: "--max-turns 20 --model claude-opus-4-8"
           # Without this the SDK output is redacted to "full output hidden for
           # security" and an auth/API failure shows only is_error:true with no
           # message — which made the 2026-07-31 failure undiagnosable from logs.
@@ -114,13 +114,20 @@ jobs:
             scraper exited non-zero on an anomaly) or was CANCELLED (a job hit its
             timeout / hung). Its logs are in ./scrape_failure.log at the repo root.
 
+            Keep this cheap. Work from the results first and only open code or read
+            the full log when the results point at a real scraper-side break.
+
             Do this:
-            1. Read scrape_failure.log and find the "ANOMALIES DETECTED" section plus any
-               "SCRAPER FAILED" / "BLOCKED" / "WARNING" lines. Identify exactly which
-               source(s) or (source/category) broke and the root cause.
-            2. TRIAGE BEFORE TOUCHING ANY CODE. Decide whether this is fixable in the
-               scrapers at all. If ANY of the following holds, do NOT create a branch and
-               do NOT open a PR — write your reasoning to the job output and stop:
+            1. RESULTS FIRST. Grep scrape_failure.log for the summary only: the
+               "Running:" / "=> N products" lines, "INCOMPLETE", "BLOCKED", "DB: ...
+               marked inactive" and the "ANOMALIES DETECTED" block. Do not read the
+               whole log yet. Ignore the "WARNINGS" block: warnings never fail a run
+               and are already posted to Discord. Identify which source(s) or
+               (source/category) failed.
+            2. TRIAGE FROM THOSE RESULTS, BEFORE TOUCHING ANY CODE. If ANY of the
+               following holds, do NOT open any code, do NOT create a branch and do NOT
+               open a PR. Write a SHORT report (5 lines at most: what failed, why it is
+               not a scraper bug, what to watch) to the job output and stop:
 
                - You cannot attribute the anomaly to a specific source, or cannot
                  establish the root cause from evidence in the log. A guessed PR is worse
@@ -130,20 +137,23 @@ jobs:
                  mid-run", "treating as a block, not as dead URLs", HostBlocked. That is
                  the circuit breaker working as designed: it deliberately kept the old
                  rows and skipped the sweep, so no data was lost. The cause is on the
-                 retailer's side (WAF, egress-IP reputation), not in our code.
-                 zahcomputers.pk 403s are the standing example — recurring, known, and
-                 DEFERRED. Never open a PR for one.
+                 retailer's side (WAF, egress-IP reputation), not in our code. Never
+                 open a PR for one.
                - The only fix you can think of is changing the User-Agent.
                  BaseScraper.USER_AGENT is deliberate and load-bearing — several
                  retailers block browser-claiming clients outright. Never change it.
                - The anomaly is legitimate: a retailer genuinely sold out of a category,
-                 or a one-off network blip.
+                 the upsert's price/blocklist filters removed rows (the scraper itself
+                 returned plenty), or a one-off network blip.
                - The run was CANCELLED by a timeout with no fixable code cause (a source
                  was merely slow, not broken). Nothing to patch.
 
                Stopping with no PR is a correct and expected outcome, not a failure to
                do your job. When in doubt, stop.
-            3. Otherwise, locate the cause in the scrapers/ code. czone, junaidtech,
+            3. Only for a real scraper-side break (a source INCOMPLETE or crashed with no
+               block, a category emptied, a source that returned far fewer products
+               than before) read the relevant part of the full log and locate the cause
+               in the scrapers/ code. czone, junaidtech,
                pakbyte and zah each have scrapers/<name>/scraper.py; amd, rbt, redtech,
                tech and techmatched are classes in scrapers/woo/stores.py on the shared
                scrapers/woo/base.py. Real code causes look like: a retailer changed its

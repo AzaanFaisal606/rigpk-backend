@@ -317,6 +317,18 @@ def parse_sources(requested: list[str]) -> list[str]:
     return requested
 
 
+def _export_warnings(warnings: list[str]) -> None:
+    """
+    Hand health warnings to the notify job (scrape.yml: steps.scrape.outputs.
+    warnings -> needs.parts.outputs.warnings). A no-op outside Actions.
+    """
+    out = os.getenv("GITHUB_OUTPUT")
+    if not out:
+        return
+    with open(out, "a") as f:
+        f.write("warnings<<__RIGPK_WARNINGS__\n" + "\n".join(warnings) + "\n__RIGPK_WARNINGS__\n")
+
+
 def pin_trend_bucket(db, weekly: bool) -> str | None:
     """
     Pin a non-weekly run's rows to the current trend date.
@@ -452,9 +464,9 @@ def main():
         for src, n in sorted(s["by_source"].items()):
             print(f"  {src:30s} {n}")
 
-        # Health check: stale sources, suspicious source-level drops, and
-        # categories that had rows but scraped zero. Sensitive by design.
-        anomalies = health.evaluate_parts(
+        # Health check: failures (a failed source, a collapsed source or
+        # category) turn --strict red; warnings (a sharp category drop) don't.
+        anomalies, warnings = health.evaluate_parts(
             runs, before_active, after_active, before_cat, after_cat
         )
 
@@ -466,6 +478,11 @@ def main():
             print(f"  ✗ {a}")
     else:
         print("\nHealth check: no anomalies.")
+    if warnings:
+        print(f"\nWARNINGS ({len(warnings)}) — worth a look, not a failure:")
+        for w in warnings:
+            print(f"  ! {w}")
+        _export_warnings(warnings)
 
     # Optional: DB integrity checks
     tests_ok = None
