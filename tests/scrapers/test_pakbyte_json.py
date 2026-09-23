@@ -28,6 +28,19 @@ def test_in_stock_product_becomes_a_row(products):
     assert row["source"] == "pakbyte.pk"
 
 
+def test_non_ascii_handle_is_percent_encoded_like_the_storefront(products):
+    """
+    The listing's hrefs (and so every stored URL) encode ® and ™ as uppercase
+    %XX. The raw handle would give _slug() a new source_id: a duplicate part,
+    with the old row swept and its price history orphaned.
+    """
+    p = copy.deepcopy(next(iter(products.values())))
+    p["handle"] = "intel®-core™-i9-14900kf-desktop-processor-tray"
+    assert PakByteScraper().parse_item(p)["url"] == (
+        "https://www.pakbyte.pk/products/intel%C2%AE-core%E2%84%A2-i9-14900kf-desktop-processor-tray"
+    )
+
+
 def test_thumbnail_is_served_from_the_store_domain(products):
     """Same file the listing showed, on the store's own /cdn/shop/ path."""
     p = products["sapphire-nitro-amd-radeon-rx-9070-xt-oc-16gb-gaming-graphics-card-phantomlink-polar-edition"]

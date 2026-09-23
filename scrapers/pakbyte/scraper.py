@@ -78,7 +78,10 @@ class PakByteScraper(BaseScraper):
         return {
             "name": name,
             "price_pkr": price,
-            "url": f"{BASE}/products/{handle}",
+            # Percent-encoded like the storefront's own hrefs: handles can be
+            # non-ASCII ("intel®-core™-…"), and the raw form would give
+            # _slug() a different source_id and orphan the price history.
+            "url": f"{BASE}/products/{urllib.parse.quote(handle)}",
             "category": "",         # filled in by the run_all wrapper
             "source": SOURCE,
             "scraped_at": self.now(),
