@@ -121,12 +121,15 @@ CREATE TABLE IF NOT EXISTS price_trends (
                                               -- after a chain break: center_price is a real median)
                                               -- | 'matched_basket_chained' (later date: center_price
                                               -- is the previous level times the matched-basket ratio)
-    min_price     INTEGER NOT NULL,          -- band low  (5%-trimmed range; n<5 full)
-    max_price     INTEGER NOT NULL,          -- band high (5%-trimmed range; n<5 full)
+    min_price     INTEGER NOT NULL,          -- band low  (basket p25 at the chained level; n<4 full)
+    max_price     INTEGER NOT NULL,          -- band high (basket p75 at the chained level; n<4 full)
     basket_size   INTEGER NOT NULL DEFAULT 0, -- parts priced on this date that were ALSO priced on
                                               -- the previous date in the series; for the FIRST date
                                               -- of a series (no previous date) this is just that
                                               -- date's own listing count, same as sample_count
+    median_price  INTEGER DEFAULT NULL,      -- real median of every listing on this date
+    low_price     INTEGER DEFAULT NULL,      -- real cheapest listing on this date
+    high_price    INTEGER DEFAULT NULL,      -- real priciest listing on this date
     computed_at   TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     UNIQUE (category, group_type, group_key, scrape_date)
 );

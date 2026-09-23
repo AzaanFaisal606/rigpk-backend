@@ -168,3 +168,30 @@ def test_identical_new_content_every_page_hits_the_page_cap(monkeypatch):
         s.scrape_all()
     assert "MAX_PAGES" in str(exc.value)
     assert calls["n"] == 3
+
+
+# No prebuilt scraper used to look at stock: 7 of 21 active redtech prebuilts
+# were sold out on the site. The saved pages are one of each, both carrying
+# related-product cards with their own `outofstock` classes.
+
+def test_sold_out_prebuilt_is_skipped(load_fixture):
+    html = load_fixture("redtech_prebuilt_soldout.html")
+    url = "https://redtech.pk/product/boost-3-0-core-i7-14700k-rtx-5070-12gb/"
+    assert RedTechScraper()._parse_product(html, url) is None
+
+
+def test_in_stock_prebuilt_is_kept(load_fixture):
+    html = load_fixture("redtech_prebuilt_instock.html")
+    url = "https://redtech.pk/product/prime-1-5-core-i5-14400f-nvidia-rtx-5060-8gb/"
+    item = RedTechScraper()._parse_product(html, url)
+    assert item is not None and item["price_pkr"]
+
+
+def test_stock_check_reads_json_ld_not_class_tokens():
+    from scrapers.prebuilts.base_prebuilt_scraper import is_sold_out
+
+    related = '<li class="product outofstock">other</li>'
+    assert not is_sold_out(related + '{"availability":"https://schema.org/InStock"}')
+    assert is_sold_out(related + '{"availability":"http://schema.org/OutOfStock"}')
+    assert not is_sold_out(related)
+    assert is_sold_out('<p class="stock out-of-stock">Out of stock</p>')

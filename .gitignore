@@ -71,6 +71,8 @@ PPC.pre-filter-backup/
 # local DB backups (manual snapshots before risky operations)
 /data/*.bak*
 /data/*.testbak
+# Turso dumps taken before migrations — full production data, never commit.
+/backups/
 
 # Scraper run logs
 logs/

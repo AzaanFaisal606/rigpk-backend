@@ -18,7 +18,9 @@ Usage:
 import html as _html
 import re
 
-from scrapers.listing_scraper import ListingScraper, run_listing_cli, total_from_results_text
+from scrapers.listing_scraper import (
+    ListingScraper, leading_classes, run_listing_cli, total_from_results_text, woodmart_card_blocks,
+)
 
 SOURCE = "techarc.pk"
 BASE = "https://techarc.pk"
@@ -57,14 +59,12 @@ class TechArcScraper(ListingScraper):
         return total_from_results_text(html)
 
     def card_blocks(self, html: str) -> list[str]:
-        # Same delimiter as zah; works on both wd-product-wrapper and wd-product wd-col
-        return re.split(r'class="wd-product-wrapper', html)[1:]
+        return woodmart_card_blocks(html)
 
     def parse_card(self, block: str) -> dict | None:
         _PLACEHOLDER = "woocommerce-placeholder"
 
-        # Skip out-of-stock items
-        if "outofstock" in block:
+        if "outofstock" in leading_classes(block).split():
             return None
 
         # Name from aria-label on image anchor

@@ -83,9 +83,11 @@ def test_rebuild_groups_gpu_models(db):
     # (there is no separate trimmed-mean center calculation any more).
     assert row["method"] == "matched_basket_median"
     assert row["sample_count"] == 6
-    # band is 5%-trimmed (ceil(6*.05)=1 dropped each end): 200000 and 205000 shed
-    assert row["min_price"] == 201000
-    assert row["max_price"] == 204000
+    # band is the interquartile range: p25/p75 of 200000..205000
+    assert row["min_price"] == 201250
+    assert row["max_price"] == 203750
+    # the headline numbers are real prices, not the index
+    assert (row["median_price"], row["low_price"], row["high_price"]) == (202500, 200000, 205000)
 
 def test_band_trims_lone_outlier(db):
     # 8 sane RTX 5080 listings + 1 absurd 9,999,999 typo -> band must not blow out
@@ -327,3 +329,13 @@ def test_window_is_per_category_so_groups_share_an_axis(db):
     # Every one of the 4060's dates falls outside the window, so it contributes
     # no points at all rather than back-filling with older ones.
     assert "RTX 4060" not in by_group
+
+
+def test_used_listings_stay_out_of_trends(db):
+    for i in range(3):
+        _seed(db, f"MSI RTX 4070 variant {i}", "gpu", {"2026-01-01": 200000})
+    _seed(db, "Zotac RTX 4070 Twin Edge – USED", "gpu", {"2026-01-01": 90000})
+    db.rebuild_price_trends()
+    row = db.get_price_trends("gpu", "RTX 4070")[0]
+    assert row["sample_count"] == 3
+    assert row["min_price"] == 200000

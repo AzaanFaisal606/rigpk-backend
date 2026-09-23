@@ -48,3 +48,14 @@ def test_no_url_local_sqlite_proceeds(monkeypatch):
     monkeypatch.delenv("TURSO_DATABASE_URL", raising=False)
     target = resolve_target([])
     assert "ppc.db" in target or target  # local path, non-empty either way
+
+
+def test_current_production_url_without_flag_exits_nonzero(monkeypatch):
+    """Production moved to a new account and name in Sep 2026; the guard
+    must still refuse it."""
+    monkeypatch.setenv(
+        "TURSO_DATABASE_URL", "libsql://ppc-backup-azaanfaisal.aws-us-west-2.turso.io"
+    )
+    with pytest.raises(SystemExit) as exc:
+        resolve_target([])
+    assert exc.value.code == 1

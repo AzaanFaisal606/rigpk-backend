@@ -15,10 +15,25 @@ Output schema per item:
 
 from __future__ import annotations
 
+import re
 from abc import abstractmethod
 from pathlib import Path
 
 from scrapers.base_scraper import BaseScraper
+
+
+_AVAILABILITY_RE = re.compile(r'"availability"\s*:\s*"(?:https?://schema\.org/)?(\w+)"')
+_SOLD_OUT = {"OutOfStock", "SoldOut", "Discontinued"}
+
+
+def is_sold_out(html: str) -> bool:
+    """A product page's JSON-LD availability; the Woo stock badge if it has none.
+    Related-product cards on the page carry their own `outofstock` classes,
+    so class tokens alone can't be trusted."""
+    avail = _AVAILABILITY_RE.findall(html)
+    if avail:
+        return all(a in _SOLD_OUT for a in avail)
+    return bool(re.search(r'<p[^>]+class="[^"]*\bstock\b[^"]*\bout-of-stock\b', html))
 
 
 class BasePrebuiltScraper(BaseScraper):

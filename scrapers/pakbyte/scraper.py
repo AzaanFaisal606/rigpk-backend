@@ -38,6 +38,19 @@ CATEGORIES: list[tuple[str, str]] = [
 ]
 
 
+_INVENTORY_RE = re.compile(r'class="product-item__inventory[^"]*"[^>]*>\s*([^<]*)')
+
+
+def _is_sold_out(block: str) -> bool:
+    """The theme renders a sold-out card as a bare `inventory` span reading
+    "Sold out" (in stock is `inventory inventory--high`), so the text is the
+    signal. The class markers are kept in case the theme adds them back."""
+    if "inventory--out" in block or "sold-out" in block:
+        return True
+    m = _INVENTORY_RE.search(block)
+    return bool(m and m.group(1).strip().lower().startswith("sold out"))
+
+
 class PakByteScraper(ListingScraper):
     """
     url should be the base collection URL, e.g.:
@@ -65,8 +78,7 @@ class PakByteScraper(ListingScraper):
         return re.split(r'class="product-item product-item--vertical', html)[1:]
 
     def parse_card(self, block: str) -> dict | None:
-        # Skip out-of-stock items (Shopify themes vary; check common markers)
-        if "inventory--out" in block or "sold-out" in block:
+        if _is_sold_out(block):
             return None
 
         # URL — first /products/<slug> href in block
@@ -157,7 +169,7 @@ class PakByteScraper(ListingScraper):
             )
         if not m:
             return None
-        src = m.group(1)
+        src = _html.unescape(m.group(1))
         # Skip placeholders
         if "placeholder" in src.lower() or "no-image" in src.lower():
             return None

@@ -107,12 +107,15 @@ def test_ram_capacity_kit_reversed():
     # "16GBx2" notation totals 32GB
     assert extract_specs("G.Skill 16GBx2 DDR5 6000MHz", "ram")["capacity"] == "32GB"
 
-def test_ram_capacity_8gb_excluded():
-    # 8GB not a tracked capacity
-    assert "capacity" not in extract_specs("Lexar 8GB DDR4-3200 UDIMM", "ram")
+def test_ram_capacity_8gb():
+    # Every standard kit size filters; trends still track only 16/32GB.
+    assert extract_specs("Lexar 8GB DDR4-3200 UDIMM", "ram")["capacity"] == "8GB"
 
-def test_ram_capacity_64gb_excluded():
-    assert "capacity" not in extract_specs("Kingston Fury 64GB 2x32GB DDR5 6000", "ram")
+def test_ram_capacity_64gb_kit():
+    assert extract_specs("Kingston Fury 64GB 2x32GB DDR5 6000", "ram")["capacity"] == "64GB"
+
+def test_ram_capacity_odd_size_excluded():
+    assert "capacity" not in extract_specs("Mystery 12GB DDR4-3200", "ram")
 
 
 # ── Motherboard ──────────────────────────────────────────────────────────────
@@ -124,7 +127,10 @@ def test_mobo_socket_lga1700():
     assert extract_specs("ASUS PRIME Z790-P LGA1700", "motherboard")["socket"] == "LGA1700"
 
 def test_mobo_chipset_b650():
-    assert extract_specs("Gigabyte B650M DS3H AM5", "motherboard")["chipset"] == "B650M"
+    # The M is the board size, which form_factor already carries.
+    specs = extract_specs("Gigabyte B650M DS3H AM5", "motherboard")
+    assert specs["chipset"] == "B650"
+    assert specs["form_factor"] == "Micro-ATX"
 
 def test_mobo_chipset_z790():
     assert extract_specs("MSI MEG Z790 ACE LGA1700", "motherboard")["chipset"] == "Z790"
@@ -299,8 +305,8 @@ def test_cpu_model_intel_ultra_kf():
     assert extract_specs("Intel Core Ultra 5 245KF Processor", "cpu")["model"] == "Ultra 5 245KF"
 
 def test_cpu_model_not_on_allowlist_apu():
-    # Ryzen 5 8500G not on the curated list
-    assert "model" not in extract_specs("AMD Ryzen 5 8500G Desktop", "cpu")
+    # Ryzen 5 4600G not on the curated list
+    assert "model" not in extract_specs("AMD Ryzen 5 4600G Desktop", "cpu")
 
 def test_cpu_model_not_on_allowlist_nonf():
     # plain i3-12100 (non-F) excluded; only the -F variant is listed
@@ -562,3 +568,134 @@ def test_real_name_warranty_junk_suffix():
 ])
 def test_motherboard_form_factor(name, ff):
     assert extract_specs(name, "motherboard")["form_factor"] == ff
+
+
+@pytest.mark.parametrize("name,expected", [
+    ("MSI GeForce RTX 3070 VENTUS 2X OC 8GB Graphics Card – Used", "Used"),
+    ("Nvidia GeForce ZOTAC RTX 2060 6GB used without Box in 1 Month Warranty", "Used"),
+    ("HP Enterprise Series 480GB 2.5 SSD Pulled", "Used"),
+    ("ZOTAC GAMING GeForce RTX 4060 Ti 8GB Twin Edge – USED (Refurb)", "Refurbished"),
+    ("Gigabyte GA-A320M-S2H Motherboard - Refurbished", "Refurbished"),
+    ("Sapphire Pulse AMD Radeon RX 9060 XT OC 16GB – OPEN BOX", "Open Box"),
+    ("Corsair SF-450 450W 80+ Gold ITX PSU Open-Box in 10 Months Warranty", "Open Box"),
+    ("SK Hynix 16GB DDR5 6400MHz CSODIMM (Pulled - New)", None),
+    ("MSI GeForce RTX 5070 Ti 16GB Gaming Trio", None),
+])
+def test_condition_from_name(name, expected):
+    assert extract_specs(name, "gpu").get("condition") == expected
+
+
+@pytest.mark.parametrize("name,expected", [
+    ("Thermalright Aqua Elite 360 V6 ARGB CPU Liquid Cooler - Black", "AIO"),
+    ("Lian Li Galahad 240 AIO UNI Fan SL120 Edition ARGB 240mm Liquid CPU Cooler", "AIO"),
+    ("Thermalright Grand Vision 360 ARGB CPU Water Cooler with 3 PWM Fans", "AIO"),
+    ("Cooler Master Hyper 212 3DHP ARGB CPU Air Cooler, Mobius 120 PWM Fan", "Air"),
+    ("Thermaltake UX400 ARGB CPU Cooler - 4x6mm Copper Heatpipes, 120mm PWM Fan", "Air"),
+    ("Corsair RS120 ARGB 120mm PWM Fan (Black, 3-Pack)", "Fan/Accessory"),
+    ("Cooler Master MF120 Lite 120mm PC Case Fan, Liquid Cooler, Air Cooler 3-Pack", "Fan/Accessory"),
+    ("SilverStone IMF70 ARGB 70mm Upgrade Fan Kit for IceMyst All-In-One Liquid Cooler", "Fan/Accessory"),
+    ("Cougar APOLAR 120 ARGB Fan, HDB Hydrodynamic Bearing", "Fan/Accessory"),
+    ("Thermalright TT Premium Concentrate - Green (4 Bottle Pack)", "Fan/Accessory"),
+])
+def test_cooling_type(name, expected):
+    assert extract_specs(name, "cooling").get("type") == expected
+
+
+def test_liquid_cooler_radiator_size_is_aio_size():
+    specs = extract_specs("DeepCool LT720 360mm CPU Liquid Cooler", "cooling")
+    assert specs.get("aio_size") == "360mm" and "fan_size" not in specs
+
+
+# ── Audit P1 filter gaps ─────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("name,socket,chipset,ff", [
+    ("MSI B850M Gaming WiFi DDR5 Motherboard", "AM5", "B850", "Micro-ATX"),
+    ("ASUS PRIME B760M-A WIFI D4", "LGA1700", "B760", "Micro-ATX"),
+    ("Gigabyte B550 AORUS ELITE V2", "AM4", "B550", None),
+    ("ASRock X670E Taichi", "AM5", "X670E", None),
+    ("MSI MAG Z890 TOMAHAWK WIFI", "LGA1851", "Z890", None),
+])
+def test_board_socket_and_form_from_chipset(name, socket, chipset, ff):
+    specs = extract_specs(name, "motherboard")
+    assert (specs.get("socket"), specs.get("chipset"), specs.get("form_factor")) == (socket, chipset, ff)
+
+
+def test_explicit_socket_beats_chipset_table():
+    assert extract_specs("Odd B760 board LGA1200", "motherboard")["socket"] == "LGA1200"
+
+
+@pytest.mark.parametrize("name,vram", [
+    ("GeForce RTX 3070 EAGLE 8G used", "8GB"),
+    ("Gigabyte RTX 5080 GAMING OC 16G", "16GB"),
+])
+def test_vram_short_g(name, vram):
+    assert extract_specs(name, "gpu")["vram"] == vram
+
+
+@pytest.mark.parametrize("name,category,model", [
+    ("MSI GeForce RTX 5050 Ventus 2X OC 8GB", "gpu", "RTX 5050"),
+    ("Sapphire Pulse RX 7650 GRE 8GB", "gpu", "RX 7650 GRE"),
+    ("AMD Ryzen 5 8400F Processor", "cpu", "Ryzen 5 8400F"),
+    ("AMD Ryzen 5 9500F Tray", "cpu", "Ryzen 5 9500F"),
+    ("AMD Ryzen 5 5500X3D Box", "cpu", "Ryzen 5 5500X3D"),
+])
+def test_new_models(name, category, model):
+    assert extract_specs(name, category)["model"] == model
+
+
+def test_ryzen_8000_socket():
+    assert extract_specs("AMD Ryzen 5 8400F Processor", "cpu")["socket"] == "AM5"
+
+
+@pytest.mark.parametrize("name,rating", [
+    ("MSI MAG A850GL PCIE5 850W Cybenetics Gold", "Cybenetics Gold"),
+    ("Corsair RM850e 850W 80Plus Gold", "80+ Gold"),
+    ("Thermaltake 750W 80-Plus Bronze", "80+ Bronze"),
+])
+def test_psu_ratings(name, rating):
+    assert extract_specs(name, "psu")["rating"] == rating
+
+
+@pytest.mark.parametrize("name,ff", [
+    ("Cougar Duoface RGB Mid Tower 2 type front panels", "ATX"),
+    ("Phanteks Eclipse Full-Tower", "ATX"),
+    ("Asus A21 Mini Tower Case", "Micro-ATX"),
+    ("Lian Li A4-H2O ITX Case", "Mini-ITX"),
+])
+def test_case_form_factor(name, ff):
+    assert extract_specs(name, "case")["form_factor"] == ff
+
+
+@pytest.mark.parametrize("name,iface,cap", [
+    ("Samsung 990 EVO Plus 1TB PCIe 4.0 M.2 2280", "NVMe", "1TB"),
+    ("WD Green SN350 M.2 SATA 480GB", "M.2 SATA", "480GB"),
+    ("Kingston A400 1000GB SATA SSD", "SATA", "1TB"),
+])
+def test_ssd_interface_and_capacity(name, iface, cap):
+    specs = extract_specs(name, "ssd")
+    assert (specs.get("interface"), specs.get("capacity")) == (iface, cap)
+
+
+def test_hdd_capacity():
+    assert extract_specs("Seagate IronWolf 16TB NAS 3.5\" SATA Hard Drive", "hdd")["capacity"] == "16TB"
+
+
+@pytest.mark.parametrize("name,expected", [
+    ("MXG G32IQ-18 32&#8243; 2K 180Hz 1ms IPS Gaming Monitor | HDR, G-Sync + FreeSync",
+     {"brand": "MXG", "screen_size": '32"', "resolution": "1440p", "refresh_rate": "180Hz", "panel": "IPS"}),
+    ("Koorui G2741L 27 Inch Gaming Monitor, (3840x2160), Dual Mode (4K 160Hz / FHD 320Hz), IPS Panel",
+     {"brand": "Koorui", "screen_size": '27"', "resolution": "4K", "refresh_rate": "320Hz", "panel": "IPS"}),
+    ("MSI Pro MP242 E14A 23.8\" 16:9 Full HD 144Hz IPS LCD HDR Monitor",
+     {"brand": "MSI", "screen_size": '24"', "resolution": "1080p", "refresh_rate": "144Hz", "panel": "IPS"}),
+    ("AOC Agon Pro AG276QKD2 26.5″ 2560×1440 500Hz QD-OLED",
+     {"brand": "AOC", "screen_size": '27"', "resolution": "1440p", "refresh_rate": "500Hz", "panel": "OLED"}),
+    ("Samsung Odyssey G5 34\" 3440x1440 165Hz VA Curved",
+     {"brand": "Samsung", "screen_size": '34"', "resolution": "Ultrawide 1440p", "refresh_rate": "165Hz", "panel": "VA"}),
+])
+def test_monitor_specs(name, expected):
+    specs = extract_specs(name, "monitor")
+    assert {k: specs.get(k) for k in expected} == expected
+
+
+def test_monitor_brand_never_falls_back_to_gpu_vendor():
+    assert "brand" not in extract_specs("Generic 27 inch 165Hz FreeSync AMD Monitor", "monitor")

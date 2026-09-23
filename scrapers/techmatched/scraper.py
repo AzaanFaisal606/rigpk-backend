@@ -6,7 +6,8 @@ How it works:
     https://techmatched.pk/product-category/{slug}/
   - Product names in <h2 class="woocommerce-loop-product__title"> title anchor.
     Names include "Buy " prefix and " | TechMatched" suffix — stripped on extraction.
-  - Prices: JSON dataLayer (most reliable) or woocommerce-Price-amount markup fallback.
+  - Prices: visible woocommerce-Price-amount, <ins> sale over <del> original;
+    the card's own wpmDataLayer entry as a fallback.
   - Thumbnails: <img src="..."> inside the product image link wrapper.
     Strip WooCommerce size suffix (-NNNxNNN) for full-size image.
   - Out-of-stock: <li class="product type-product ... outofstock ..."> token on the
@@ -54,6 +55,31 @@ def _is_sold_out(block: str) -> bool:
     if re.search(r'<p[^>]+class="[^"]*\bstock\b[^"]*\bout-of-stock\b', block):
         return True
     return False
+
+
+_AMOUNT = (r'<span class="woocommerce-Price-amount amount">'
+           r'<span class="woocommerce-Price-currencySymbol">[^<]*</span>([\d,]+)')
+_SALE_PRICE_RE = re.compile(r'<ins[^>]*>\s*' + _AMOUNT)
+_PRICE_RE = re.compile(_AMOUNT)
+
+
+def _extract_price(block: str) -> int | None:
+    """The visible price, sale (<ins>) over the crossed-out original (<del>).
+    Falls back to the card's own wpmDataLayer entry, keyed by its product id
+    so a related-product widget inside the card can't lend its price (M5)."""
+    for pattern in (_SALE_PRICE_RE, _PRICE_RE):
+        m = pattern.search(block)
+        if m:
+            return int(m.group(1).replace(",", ""))
+    id_m = re.search(r'class="wpmProductId" data-id="(\d+)"', block)
+    if id_m:
+        dl_m = re.search(
+            r'wpmDataLayer\.products\[' + id_m.group(1) + r'\]\s*=\s*\{[^}]*"price"\s*:\s*(\d+)',
+            block,
+        )
+        if dl_m:
+            return int(dl_m.group(1))
+    return None
 
 
 class TechMatchedScraper(ListingScraper):
@@ -110,6 +136,8 @@ class TechMatchedScraper(ListingScraper):
             name = name[4:].strip()
         if name.lower().endswith("| techmatched"):
             name = name[: -len("| techmatched")].rstrip(" |").strip()
+        # SEO suffix on every techmatched title
+        name = re.sub(r'\s+in\s+pakistan$', '', name, flags=re.IGNORECASE)
 
         # URL — first product link in block
         url_m = re.search(
@@ -123,25 +151,7 @@ class TechMatchedScraper(ListingScraper):
             )
         product_url = url_m.group(1) if url_m else ""
 
-        # Price — try JSON dataLayer first (exact integer rupees). No bare
-        # "price": N fallback here — a card can embed a related-product
-        # widget ahead of its own markup, and an unscoped regex picks
-        # that neighbour's price instead of the card's own (M5).
-        price_pkr: int | None = None
-        dl_m = re.search(
-            r'wpmDataLayer\)\.products\[\d+\]\s*=\s*\{[^}]*"price"\s*:\s*(\d+)',
-            block,
-        )
-        if dl_m:
-            price_pkr = int(dl_m.group(1))
-        else:
-            # Fallback: WooCommerce visible markup
-            price_m = re.search(
-                r'<span class="woocommerce-Price-amount amount"><span class="woocommerce-Price-currencySymbol">[^<]*</span>([\d,]+)',
-                block,
-            )
-            if price_m:
-                price_pkr = int(price_m.group(1).replace(",", ""))
+        price_pkr = _extract_price(block)
 
         # Thumbnail — <img src="..."> inside the product image link
         thumbnail: str | None = None

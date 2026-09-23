@@ -18,7 +18,7 @@ import time
 
 from scrapers.base_scraper import is_http_404 as _is_404
 from scrapers.exceptions import ScrapeIncomplete
-from scrapers.prebuilts.base_prebuilt_scraper import BasePrebuiltScraper
+from scrapers.prebuilts.base_prebuilt_scraper import BasePrebuiltScraper, is_sold_out
 
 SOURCE  = "redtech.pk"
 BASE    = "https://redtech.pk"
@@ -172,6 +172,8 @@ class RedTechScraper(BasePrebuiltScraper):
         return result
 
     def _parse_product(self, html: str, url: str) -> dict | None:
+        if is_sold_out(html):
+            return None
         scraped_at = self.now()
 
         # Title

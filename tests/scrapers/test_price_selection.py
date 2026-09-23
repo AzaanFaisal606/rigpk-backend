@@ -11,7 +11,7 @@ from scrapers.techmatched.scraper import TechMatchedScraper
 # --- amdhouse ---------------------------------------------------------------
 # amdhouse_gpu_discounted.html (saved from the itx-graphics-cards category,
 # which maps to "gpu") has exactly one in-stock product, and it's on sale:
-# "Radeon R7 240 2GB GDDR5 GPU OEM (2x Display Port Output) used 1month wty",
+# "Radeon R7 240 2GB GDDR5 GPU OEM (2x Display Port Output) used",
 # <del>Rs 6,000</del> <ins>Rs 5,000</ins>. Every other card on the page is out
 # of stock, so the "undiscounted product" case is checked at the
 # _extract_price level instead (same code path _parse_page calls), against a
@@ -20,7 +20,7 @@ from scrapers.techmatched.scraper import TechMatchedScraper
 def test_amdhouse_discounted_product_uses_the_sale_price(load_fixture):
     html = load_fixture("amdhouse_gpu_discounted.html")
     products = {p["name"]: p["price_pkr"] for p in AmdHouseScraper()._parse_page(html)}
-    name = "Radeon R7 240 2GB GDDR5 GPU OEM (2x Display Port Output) used 1month wty"
+    name = "Radeon R7 240 2GB GDDR5 GPU OEM (2x Display Port Output) used"
     sale, original = 5000, 6000
     assert products[name] == sale
     assert products[name] != original
@@ -78,6 +78,23 @@ def test_rbt_undiscounted_product_is_unaffected(load_fixture):
 def test_techmatched_fallback_price_does_not_leak_from_a_neighbour(load_fixture):
     html = load_fixture("techmatched_price_fallback_synthetic.html")
     products = {p["name"]: p["price_pkr"] for p in TechMatchedScraper()._parse_page(html)}
-    assert products["Plain Card GPU in Pakistan"] == 200000
-    assert products["Decoy Card GPU in Pakistan"] == 444999
-    assert products["Decoy Card GPU in Pakistan"] != 999999
+    assert products["Plain Card GPU"] == 200000
+    assert products["Decoy Card GPU"] == 444999
+    assert products["Decoy Card GPU"] != 999999
+
+
+# techmatched_cpu_sale.html is a live processors page with sale cards. The
+# old code read a wpmDataLayer shape the page no longer has and fell back to
+# the first price span, which on a sale card is the <del> original.
+
+def test_techmatched_discounted_product_uses_the_sale_price(load_fixture):
+    html = load_fixture("techmatched_cpu_sale.html")
+    products = {p["name"]: p["price_pkr"] for p in TechMatchedScraper()._parse_page(html)}
+    assert products["AMD Ryzen 7 7800X3D Box Processor"] == 94999
+    assert products["AMD Ryzen 9 9900X3D Desktop Processor (Box)"] == 139999
+
+
+def test_techmatched_undiscounted_product_is_unaffected(load_fixture):
+    html = load_fixture("techmatched_cpu_sale.html")
+    products = {p["name"]: p["price_pkr"] for p in TechMatchedScraper()._parse_page(html)}
+    assert products["AMD Ryzen 7 9700X Desktop Processor Box"] == 84999

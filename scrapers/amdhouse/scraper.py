@@ -47,6 +47,23 @@ CATEGORIES: list[tuple[str, str]] = [
 ]
 
 
+
+# Shop filler that isn't part of the product: a list number ("02. Tracer X2")
+# and the warranty ("New in 10 Months Warranty", "10months pump wty"). "used"
+# is kept, since the condition spec reads it.
+_LIST_NUMBER_RE = re.compile(r'^\d{1,2}\.\s*')
+_WARRANTY_RE = re.compile(
+    r'[\s,;–-]*\b(?:new\s+)?(?:in|with)?\s*\d+\s*(?:months?|weeks?|years?|yrs?)\s+'
+    r'(?:pump\s+)?(?:warranty|wty)\b',
+    re.IGNORECASE,
+)
+
+
+def clean_name(name: str) -> str:
+    name = _LIST_NUMBER_RE.sub('', name.strip())
+    name = _WARRANTY_RE.sub('', name)
+    return re.sub(r'\s{2,}', ' ', name).strip(' ,-–')
+
 class AmdHouseScraper(ListingScraper):
 
     SOURCE = SOURCE
@@ -109,7 +126,7 @@ class AmdHouseScraper(ListingScraper):
         )
         if not name_m:
             return None
-        name = _html.unescape(name_m.group(1)).strip()
+        name = clean_name(_html.unescape(name_m.group(1)))
 
         # URL
         url_m = re.search(

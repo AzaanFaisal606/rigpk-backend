@@ -35,6 +35,9 @@ from scrapers.exceptions import ScrapeIncomplete
 class ListingScraper(BaseScraper):
     MAX_PAGES = 200
     MAX_CONSECUTIVE_FAILURES = 3
+    # Pages in a row whose every card was skipped, before giving up when the
+    # site reports no total.
+    MAX_SKIPPED_PAGES = 10
     # Not read by scrape() itself — inter-page spacing is already covered by
     # BaseScraper.fetch()'s per-host _pace(). Kept as a documented config
     # surface (some subclasses previously had their own, inconsistent value
@@ -86,6 +89,12 @@ class ListingScraper(BaseScraper):
         # as "there was nothing there" — see the class docstring's fetch
         # hazard and F6 in the audit.
         pages_skipped = False
+        # Cards seen so far, sold-out ones included, and how many pages in a
+        # row had cards but every one was skipped. Sold-out cards come back
+        # as None, so a page of nothing but sold-out stock yields no new
+        # products without being the end of the listing.
+        cards_seen = 0
+        skipped_run = 0
 
         for page in range(1, self.MAX_PAGES + 1):
             page_url = self.next_page_url(url, page)
@@ -128,14 +137,27 @@ class ListingScraper(BaseScraper):
             if total is None:
                 total = self.extract_total(html)
 
+            items = self._parse_page(html)
+            cards = max(len(items), len(list(self.card_blocks(html))))
+            cards_seen += cards
             new = 0
-            for item in self._parse_page(html):
+            for item in items:
                 if item["url"] in seen:
                     continue
                 seen.add(item["url"])
                 products.append(item)
                 new += 1
 
+            if cards and not items:
+                # Every card skipped (sold out). Keep paging while the site's
+                # own count says there is more; with no count, give up after a
+                # bounded run so a site that clamps page numbers can't loop.
+                skipped_run += 1
+                more = cards_seen < total if total is not None else skipped_run < self.MAX_SKIPPED_PAGES
+                if more:
+                    continue
+                break
+            skipped_run = 0
             if new == 0:
                 break                       # no new products: end of listing
             if total is not None and len(products) >= total:
@@ -172,6 +194,20 @@ class ListingScraper(BaseScraper):
 # czone and pakbyte report totals differently or not at all.
 # --------------------------------------------------------------------------
 import re as _re
+
+
+def woodmart_card_blocks(html: str) -> list[str]:
+    """Woodmart (zah, techarc) cards, split on the outer `<div class="wd-product ...">`.
+    Splitting on the inner `wd-product-wrapper` put each card's own
+    `outofstock`/`sale` class tokens at the end of the PREVIOUS card's block."""
+    return ["<div " + b for b in _re.split(r'<div (?=class="wd-product\s)', html)[1:]]
+
+
+def leading_classes(block: str) -> str:
+    """The class attribute of a block's first tag: the card's own tokens,
+    not a related-product card or the page footer further down."""
+    m = _re.match(r'<\w+[^>]*?class="([^"]*)"', block)
+    return m.group(1) if m else ""
 
 
 def total_from_results_text(html: str) -> Optional[int]:

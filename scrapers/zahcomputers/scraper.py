@@ -12,9 +12,12 @@ Usage:
     python -m scrapers.zahcomputers.scraper
 """
 
+import html as _html
 import re
 
-from scrapers.listing_scraper import ListingScraper, run_listing_cli, total_from_results_text
+from scrapers.listing_scraper import (
+    ListingScraper, leading_classes, run_listing_cli, total_from_results_text, woodmart_card_blocks,
+)
 
 SOURCE = "zahcomputers.pk"
 BASE = "https://zahcomputers.pk"
@@ -53,20 +56,19 @@ class ZahComputersScraper(ListingScraper):
         return total_from_results_text(html)
 
     def card_blocks(self, html: str) -> list[str]:
-        return re.split(r'class="wd-product-wrapper', html)[1:]
+        return woodmart_card_blocks(html)
 
     def parse_card(self, block: str) -> dict | None:
         _PLACEHOLDER = "woocommerce-placeholder"
 
-        # Skip out-of-stock items
-        if "outofstock" in block:
+        if "outofstock" in leading_classes(block).split():
             return None
 
         # Name from aria-label on image anchor
         name_m = re.search(r'class="wd-product-img-link[^"]*"[^>]*aria-label="([^"]+)"', block)
         if not name_m:
             return None
-        name = name_m.group(1).strip()
+        name = _html.unescape(name_m.group(1)).strip()
 
         # URL
         url_m = re.search(r'href="(https://zahcomputers\.pk/product/[^"]+)"', block)
@@ -91,6 +93,10 @@ class ZahComputersScraper(ListingScraper):
         data_img_m = re.search(r'class="wd-product-grid-slide[^"]*"[^>]*data-image-url="([^"]+)"', block)
         if data_img_m and _PLACEHOLDER not in data_img_m.group(1):
             thumbnail = data_img_m.group(1)
+        else:
+            img_m = re.search(r'class="wd-product-img-link[^"]*"[^>]*>\s*<img[^>]+src="([^"]+)"', block)
+            if img_m and _PLACEHOLDER not in img_m.group(1):
+                thumbnail = img_m.group(1)
 
         return {
             "name": name,

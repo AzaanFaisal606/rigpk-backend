@@ -33,6 +33,7 @@ _INTEL_SUFFIX = r'(?:KF|KS|K|F|T)?'
 SOCKET_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(rf"\bryzen\s*[3579]\s*9\d{{3}}{_AMD_SUFFIX}\b", re.I), "AM5"),      # 9000 series
     (re.compile(rf"\bryzen\s*[3579]\s*7\d{{3}}{_AMD_SUFFIX}\b", re.I), "AM5"),      # 7000 series
+    (re.compile(rf"\bryzen\s*[3579]\s*8\d{{3}}{_AMD_SUFFIX}\b", re.I), "AM5"),      # 8000G/F series
     (re.compile(rf"\bryzen\s*[3579]\s*5\d{{3}}{_AMD_SUFFIX}\b", re.I), "AM4"),      # 5000 series
     (re.compile(rf"\bryzen\s*[3579]\s*3\d{{3}}{_AMD_SUFFIX}\b", re.I), "AM4"),      # 3000 series
     # Arrow Lake-S desktop only (200 series, e.g. 245K/265K/285K). Arrow

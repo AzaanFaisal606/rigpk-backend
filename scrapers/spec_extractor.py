@@ -1,4 +1,5 @@
 from __future__ import annotations
+import html
 import re
 from typing import Optional
 
@@ -85,6 +86,15 @@ _MAKER_BRANDS: list[tuple[str, str]] = [
     ("vastarmor",       "Vastarmor"),
     ("alseye",          "Alseye"),
     ("dataland",        "Dataland"),
+    # Monitor makers, mostly unbranded before.
+    ("twisted minds",   "Twisted Minds"),
+    ("koorui",          "Koorui"),
+    ("redragon",        "Redragon"),
+    ("xiaomi",          "Xiaomi"),
+    ("gameon",          "GameOn"),
+    ("gfury",           "GFury"),
+    ("acer",            "Acer"),
+    ("mxg",             "MXG"),
     # Misspelling seen in real listings ("Saphire RX590 Nitro Plus...") —
     # canonicalizes to the existing Sapphire value, not a second brand.
     ("saphire",         "Sapphire"),
@@ -115,6 +125,7 @@ _BOUNDARY_BRANDS = {
     "afox", "ninja", "ease", "colorful", "maxsun", "darkflash", "leadtek",
     "gunnir", "galax", "manli", "inno3d", "evga", "biostar", "yeston",
     "onda", "vastarmor", "alseye", "dataland", "saphire",
+    "gameon", "acer",
 }
 
 # Word-boundary alone isn't enough for tokens that are also ordinary English
@@ -152,11 +163,13 @@ def _match_brand_list(lower: str, brands: list[tuple[str, str]]) -> Optional[str
     return None
 
 
-def _extract_brand(name: str) -> Optional[str]:
+def _extract_brand(name: str, category: str = "") -> Optional[str]:
     lower = name.lower()
     maker = _match_brand_list(lower, _MAKER_BRANDS)
     if maker:
         return maker
+    if category == "monitor":
+        return None  # "G-Sync"/"FreeSync" name the GPU vendor, not the maker
     return _match_brand_list(lower, _CHIP_VENDOR_BRANDS)
 
 
@@ -171,7 +184,7 @@ def _extract_socket(name: str) -> Optional[str]:
 
 
 _VRAM_GDDR_RE = re.compile(r'(\d+)\s*GB\s+GDDR\d*', re.IGNORECASE)
-_VRAM_FALLBACK_RE = re.compile(r'\b(\d+)\s*GB\b', re.IGNORECASE)
+_VRAM_FALLBACK_RE = re.compile(r'\b(\d+)\s*GB?\b', re.IGNORECASE)   # "8GB", "EAGLE 8G"
 _VALID_VRAM = {2, 4, 6, 8, 10, 12, 16, 20, 24, 32}
 
 
@@ -201,6 +214,7 @@ def _extract_vram(name: str) -> Optional[str]:
 _GPU_MODELS = frozenset({
     # NVIDIA RTX 50 (Blackwell)
     "RTX 5090", "RTX 5080", "RTX 5070 Ti", "RTX 5070", "RTX 5060 Ti", "RTX 5060",
+    "RTX 5050",
     # NVIDIA RTX 40 (Ada)
     "RTX 4090", "RTX 4080 Super", "RTX 4080", "RTX 4070 Ti Super", "RTX 4070 Ti",
     "RTX 4070 Super", "RTX 4070", "RTX 4060 Ti", "RTX 4060",
@@ -216,7 +230,7 @@ _GPU_MODELS = frozenset({
     "RX 9070 XT", "RX 9070 GRE", "RX 9070", "RX 9060 XT", "RX 9060",
     # AMD RX 7000 (RDNA3)
     "RX 7900 XTX", "RX 7900 XT", "RX 7900 GRE", "RX 7800 XT", "RX 7700 XT",
-    "RX 7600 XT", "RX 7600",
+    "RX 7650 GRE", "RX 7600 XT", "RX 7600",
     # AMD RX 6000 (RDNA2)
     "RX 6950 XT", "RX 6900 XT", "RX 6800 XT", "RX 6800", "RX 6750 XT", "RX 6700 XT",
     "RX 6650 XT", "RX 6600 XT", "RX 6600", "RX 6500 XT", "RX 6400",
@@ -277,6 +291,9 @@ _CPU_MODELS = frozenset({
     # AMD Ryzen 9000 (Zen 5)
     "Ryzen 9 9950X3D", "Ryzen 9 9950X", "Ryzen 9 9900X3D", "Ryzen 9 9900X",
     "Ryzen 7 9850X3D", "Ryzen 7 9800X3D", "Ryzen 7 9700X", "Ryzen 5 9600X", "Ryzen 5 9600",
+    "Ryzen 5 9500F",
+    # AMD Ryzen 8000G/F (Zen 4, AM5)
+    "Ryzen 7 8700G", "Ryzen 5 8600G", "Ryzen 5 8500G", "Ryzen 5 8400F",
     # AMD Ryzen 7000 (Zen 4)
     "Ryzen 9 7950X3D", "Ryzen 9 7950X", "Ryzen 9 7900X3D", "Ryzen 9 7900X", "Ryzen 9 7900",
     "Ryzen 7 7800X3D", "Ryzen 7 7700X", "Ryzen 7 7700", "Ryzen 5 7600X", "Ryzen 5 7600",
@@ -284,7 +301,7 @@ _CPU_MODELS = frozenset({
     # AMD Ryzen 5000 (Zen 3)
     "Ryzen 9 5950X", "Ryzen 9 5900X", "Ryzen 7 5800X3D", "Ryzen 7 5800X", "Ryzen 7 5700X3D",
     "Ryzen 7 5700X", "Ryzen 7 5700G", "Ryzen 5 5600X", "Ryzen 5 5600G", "Ryzen 5 5600",
-    "Ryzen 5 5500",
+    "Ryzen 5 5500X3D", "Ryzen 5 5500",
     # AMD Ryzen 3000 (Zen 2)
     "Ryzen 9 3900X", "Ryzen 7 3700X", "Ryzen 5 3600X", "Ryzen 5 3600", "Ryzen 5 3400G",
     "Ryzen 3 3300X", "Ryzen 3 3100",
@@ -359,14 +376,15 @@ _RAM_KIT_RE = re.compile(r'(\d+)\s*x\s*(\d+)\s*GB', re.IGNORECASE)
 _RAM_KIT_REV_RE = re.compile(r'(\d+)\s*GB\s*x\s*(\d+)', re.IGNORECASE)
 # Plain total: first "<N>GB" token (after kit notation is handled).
 _RAM_CAP_RE = re.compile(r'\b(\d+)\s*GB\b', re.IGNORECASE)
-_VALID_RAM_CAP = {16, 32}
+_VALID_RAM_CAP = {4, 8, 16, 24, 32, 48, 64, 96, 128}
 
 
 def _extract_ram_capacity(name: str) -> Optional[str]:
     """
-    Total kit capacity, restricted to the standard sizes we track (16GB, 32GB).
+    Total kit capacity, restricted to standard kit sizes (4-128GB).
     Prefers explicit kit math ("2x8GB" -> 16GB) over a bare "<N>GB" token.
-    Returns None for sizes we don't track (8GB, 64GB+) or unparseable names.
+    Returns None for odd sizes or unparseable names. Trends only track
+    16/32GB (`_RAM_TRACK_CAPS`); the filter takes every size.
     """
     total = None
     m = _RAM_KIT_RE.search(name)          # "2x8GB"
@@ -388,25 +406,50 @@ def _extract_ram_capacity(name: str) -> Optional[str]:
 _CHIPSET_RE = re.compile(r'\b([ABXHZ]\d{3}[EFMKPS]?)\b', re.IGNORECASE)
 _VALID_CHIPSET_PREFIXES = (
     'A3', 'A4', 'A5', 'A6',
-    'B3', 'B4', 'B5', 'B6', 'B7',
+    'B3', 'B4', 'B5', 'B6', 'B7', 'B8',
     'X3', 'X4', 'X5', 'X6', 'X8',
-    'H3', 'H4', 'H5', 'H6', 'H7',
+    'H3', 'H4', 'H5', 'H6', 'H7', 'H8',
     'Z3', 'Z4', 'Z5', 'Z6', 'Z7', 'Z8',
 )
 
 
 def _extract_chipset(name: str) -> Optional[str]:
+    """Chipset without the board-size "M" (B760M -> B760): form factor is its
+    own filter. "E" stays, since B650E and X670E are chipsets of their own."""
     for m in _CHIPSET_RE.finditer(name):
         cs = m.group(1).upper()
         if any(cs.startswith(p) for p in _VALID_CHIPSET_PREFIXES):
-            return cs
+            return cs[:-1] if cs.endswith("M") else cs
     return None
+
+
+def _chipset_is_micro(name: str) -> bool:
+    """B760M, A620M-E ... the M suffix marks a Micro-ATX board."""
+    return any(
+        m.group(1).upper().endswith("M")
+        and any(m.group(1).upper().startswith(p) for p in _VALID_CHIPSET_PREFIXES)
+        for m in _CHIPSET_RE.finditer(name)
+    )
+
+
+# Chipset family -> socket, for boards that never name their socket.
+_CHIPSET_SOCKETS: dict[str, str] = {
+    **dict.fromkeys(("A320", "B350", "X370", "B450", "X470", "A520", "B550", "X570"), "AM4"),
+    **dict.fromkeys(("A620", "B650", "B650E", "X670", "X670E", "B840", "B850", "X870", "X870E"), "AM5"),
+    **dict.fromkeys(("H610", "B660", "H670", "Z690", "B760", "H770", "Z790"), "LGA1700"),
+    **dict.fromkeys(("H810", "B860", "Z890"), "LGA1851"),
+    **dict.fromkeys(("H410", "B460", "H470", "Z490", "H510", "B560", "H570", "Z590"), "LGA1200"),
+    **dict.fromkeys(("H310", "B360", "B365", "H370", "Z370", "Z390"), "LGA1151"),
+}
 
 
 _PSU_WATTS_RE = re.compile(r'\b(\d{3,4})W\b', re.IGNORECASE)
 _PSU_RATING_RE = re.compile(
-    r'80(?:\s+plus|\s*\+)\s*(Bronze|Silver|Gold|Platinum|Titanium|White)',
+    r'80[\s-]*(?:plus|\+)\s*(Bronze|Silver|Gold|Platinum|Titanium|White)',
     re.IGNORECASE,
+)
+_PSU_CYBENETICS_RE = re.compile(
+    r'cybenetics\s*(Bronze|Silver|Gold|Platinum|Titanium|Diamond)', re.IGNORECASE,
 )
 
 
@@ -423,6 +466,9 @@ def _extract_psu_rating(name: str) -> Optional[str]:
     m = _PSU_RATING_RE.search(name)
     if m:
         return f"80+ {m.group(1).capitalize()}"
+    m = _PSU_CYBENETICS_RE.search(name)
+    if m:
+        return f"Cybenetics {m.group(1).capitalize()}"
     return None
 
 
@@ -437,7 +483,20 @@ def _extract_form_factor(name: str) -> Optional[str]:
     if re.search(r'\batx\b', lower):
         return "ATX"
     if re.search(r'\bitx\b', lower):
-        return "ITX"
+        return "Mini-ITX"
+    return None
+
+
+def _extract_case_form_factor(name: str) -> Optional[str]:
+    """Named form factor, else the tower size ("Mid Tower" with no ATX)."""
+    ff = _extract_form_factor(name)
+    if ff:
+        return ff
+    lower = name.lower()
+    if re.search(r'\b(?:mid|full)[\s-]*tower\b', lower):
+        return "ATX"
+    if re.search(r'\bmini[\s-]*tower\b', lower):
+        return "Micro-ATX"
     return None
 
 
@@ -446,14 +505,30 @@ _COOLING_SIZE_RE = re.compile(
 )
 
 
+# Checked in order. A name that says it is a fan pack or a case fan is one,
+# even when it lists what it suits ("Case Fan, Liquid Cooler, Air Cooler
+# 3-Pack"). After that, a cooler's own name wins over the fan it ships with
+# ("CPU Air Cooler ... 120mm PWM Fan"), and a bare fan mention comes last.
+_COOLING_TYPE_RULES = (
+    ("Fan/Accessory", re.compile(
+        r'\b(?:case[\s-]+(?:cooler[\s-]+)?fans?|fan[\s-]+(?:kit|pack|hub|controller)'
+        r'|(?:\d|triple|dual|single)[\s-]*(?:fan[\s-]+)?pack|\d+[\s-]*pcs|reverse[\s-]+blade'
+        r'|thermal[\s-]+(?:paste|pad))\b')),
+    ("AIO", re.compile(
+        r'\b(?:aio|liquid[\s-]+cool\w*|water[\s-]+cool\w*|hydro|all[\s-]in[\s-]one)\b')),
+    ("Air", re.compile(
+        r'\b(?:air[\s-]+cooler|heatsink|cpu[\s-]+(?:air[\s-]+)?cooler|tower[\s-]+cooler?|air[\s-]+tower'
+        r'|dual[\s-]+tower|single[\s-]+tower)\b')),
+    ("Fan/Accessory", re.compile(
+        r'\b(?:fans?|uni[\s-]+fan|coolant|concentrate|lcd[\s-]+screen)\b')),
+)
+
+
 def _extract_cooling_type(name: str) -> Optional[str]:
     lower = name.lower()
-    if re.search(r'\b(aio|liquid\s+cool|water\s+cool|hydro|all[\s-]in[\s-]one)\b', lower):
-        return "AIO"
-    if re.search(r'\b(air[\s-]+cooler|heatsink|cpu[\s-]+cooler|tower[\s-]+cooler?|air[\s-]+tower|dual[\s-]+tower)\b', lower):
-        return "Air"
-    if re.search(r'\b(case\s+fan|argb\s+fan|rgb\s+fan|thermal\s+paste|thermal\s+pad)\b', lower):
-        return "Fan/Accessory"
+    for label, pattern in _COOLING_TYPE_RULES:
+        if pattern.search(lower):
+            return label
     return None
 
 
@@ -464,7 +539,7 @@ def _extract_cooling_size(name: str) -> Optional[str]:
 
 _SSD_CAP_TB_RE = re.compile(r'\b(\d+(?:\.\d+)?)\s*TB\b', re.IGNORECASE)
 _SSD_CAP_GB_RE = re.compile(r'\b(\d+)\s*GB\b', re.IGNORECASE)
-_VALID_SSD_GB = {64, 128, 240, 256, 480, 500, 512, 960, 1000}
+_VALID_SSD_GB = {64, 128, 240, 256, 480, 500, 512, 960}
 
 
 def _extract_ssd_interface(name: str) -> Optional[str]:
@@ -472,23 +547,87 @@ def _extract_ssd_interface(name: str) -> Optional[str]:
     if 'nvme' in lower:
         return "NVMe"
     if 'm.2' in lower:
-        return "M.2 SATA"
+        # "PCIe 4.0 M.2" is NVMe even when the name never says so.
+        return "NVMe" if re.search(r'\bpcie\b|\bgen\s*[345]\b', lower) else "M.2 SATA"
     if 'sata' in lower:
         return "SATA"
     return None
 
 
-def _extract_ssd_capacity(name: str) -> Optional[str]:
+def _extract_ssd_capacity(name: str, max_tb: float = 20) -> Optional[str]:
     m = _SSD_CAP_TB_RE.search(name)
     if m:
         tb = float(m.group(1))
-        if 0.5 <= tb <= 20:
+        if 0.5 <= tb <= max_tb:
             return f"{m.group(1)}TB"
     m = _SSD_CAP_GB_RE.search(name)
     if m:
         gb = int(m.group(1))
         if gb in _VALID_SSD_GB:
             return f"{gb}GB"
+        if gb in (1000, 2000, 4000):
+            return f"{gb // 1000}TB"
+    return None
+
+
+# ---- Monitor ----------------------------------------------------------------
+_MONITOR_SIZE_RE = re.compile(
+    r'(?<![\d.])(\d{2}(?:\.\d)?)\s*(?:"|″|”|\'\'|-?\s*inch(?:es)?\b|in\b)', re.IGNORECASE,
+)
+_MONITOR_HZ_RE = re.compile(r'\b(\d{2,3})\s*hz\b', re.IGNORECASE)
+_RESOLUTION_RULES = (
+    (re.compile(r'5120\s*[x×*]\s*2880|\b5k\b', re.I), "5K"),
+    (re.compile(r'3840\s*[x×*]\s*2160|\b4k\b|\buhd\b|\b2160p\b', re.I), "4K"),
+    (re.compile(r'(?:3440|5120)\s*[x×*]\s*1440|\buwqhd\b|\bdqhd\b', re.I), "Ultrawide 1440p"),
+    (re.compile(r'2560\s*[x×*]\s*1440|\bw?qhd\b|\b2k\b|\b1440p\b', re.I), "1440p"),
+    (re.compile(r'2560\s*[x×*]\s*1080|\bwfhd\b', re.I), "Ultrawide 1080p"),
+    (re.compile(r'1920\s*[x×*]\s*1080|\bfhd\b|\bfull\s*hd\b|\b1080p?\b', re.I), "1080p"),
+)
+_PANEL_RULES = (
+    (re.compile(r'oled', re.I), "OLED"),
+    (re.compile(r'\bips\b|in-plane\s+switching', re.I), "IPS"),
+    (re.compile(r'\bva\b', re.I), "VA"),
+    (re.compile(r'\btn\b', re.I), "TN"),
+)
+
+
+def _extract_monitor_size(name: str) -> Optional[str]:
+    """Nominal size in whole inches: 23.8 -> 24, 31.5 -> 32, 15.6 -> 16."""
+    for m in _MONITOR_SIZE_RE.finditer(name):
+        size = float(m.group(1))
+        if 13 <= size <= 57:
+            return f'{int(size + 0.5)}"'
+    return None
+
+
+def _extract_refresh_rate(name: str) -> Optional[str]:
+    """The highest rate named ("4K 160Hz / FHD 320Hz" dual-mode -> 320Hz)."""
+    rates = [int(m.group(1)) for m in _MONITOR_HZ_RE.finditer(name)]
+    rates = [r for r in rates if 50 <= r <= 600]
+    return f"{max(rates)}Hz" if rates else None
+
+
+def _first_rule(name: str, rules) -> Optional[str]:
+    for pattern, label in rules:
+        if pattern.search(name):
+            return label
+    return None
+
+
+# Second-hand stock sits in the same categories as new. Only a non-new
+# condition is recorded; no key means new. Refurbished beats used ("USED
+# (Refurb)"), and "Pulled - New" is new.
+_CONDITION_RULES = (
+    (re.compile(r'\brefurb', re.IGNORECASE), "Refurbished"),
+    (re.compile(r'\bopen[\s-]?box\b', re.IGNORECASE), "Open Box"),
+    (re.compile(r'\bused\b|\bpulled\b(?![\s-]*new)|\bsecond[\s-]hand\b|\bpre-?owned\b', re.IGNORECASE), "Used"),
+)
+
+
+def _extract_condition(name: str) -> Optional[str]:
+    for pattern, label in _CONDITION_RULES:
+        if pattern.search(name):
+            return label
     return None
 
 
@@ -499,12 +638,17 @@ def extract_specs(name: str, category: str) -> dict:
     """
     if not name:
         return {}
+    # zah names arrive with entities still in them ("27&#8243;").
+    name = html.unescape(name)
 
     specs: dict = {}
 
-    brand = _extract_brand(name)
+    brand = _extract_brand(name, category)
     if brand:
         specs["brand"] = brand
+    condition = _extract_condition(name)
+    if condition:
+        specs["condition"] = condition
 
     if category == "cpu":
         s = _extract_socket(name) or socket_for(name)
@@ -534,13 +678,13 @@ def extract_specs(name: str, category: str) -> dict:
             specs["capacity"] = cap
 
     elif category == "motherboard":
-        s = _extract_socket(name)
+        cs = _extract_chipset(name)
+        s = _extract_socket(name) or _CHIPSET_SOCKETS.get(cs or "")
         if s:
             specs["socket"] = s
-        cs = _extract_chipset(name)
         if cs:
             specs["chipset"] = cs
-        ff = _extract_form_factor(name)
+        ff = _extract_form_factor(name) or ("Micro-ATX" if _chipset_is_micro(name) else None)
         if ff:
             specs["form_factor"] = ff
 
@@ -553,7 +697,7 @@ def extract_specs(name: str, category: str) -> dict:
             specs["rating"] = r
 
     elif category == "case":
-        ff = _extract_form_factor(name)
+        ff = _extract_case_form_factor(name)
         if ff:
             specs["form_factor"] = ff
 
@@ -576,7 +720,19 @@ def extract_specs(name: str, category: str) -> dict:
         if cap:
             specs["capacity"] = cap
 
-    elif category in ("hdd", "monitor"):
-        pass  # brand-only; _extract_brand() above already handles it
+    elif category == "hdd":
+        cap = _extract_ssd_capacity(name, max_tb=30)
+        if cap:
+            specs["capacity"] = cap
+
+    elif category == "monitor":
+        for key, value in (
+            ("screen_size", _extract_monitor_size(name)),
+            ("resolution", _first_rule(name, _RESOLUTION_RULES)),
+            ("refresh_rate", _extract_refresh_rate(name)),
+            ("panel", _first_rule(name, _PANEL_RULES)),
+        ):
+            if value:
+                specs[key] = value
 
     return specs

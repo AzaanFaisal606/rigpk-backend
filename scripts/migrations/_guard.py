@@ -31,28 +31,29 @@ from urllib.parse import urlparse
 # would resolve to, including the .env fallback.
 import db.database  # noqa: F401  (import for its load_dotenv side effect)
 
-# Turso hostnames in this project are "<db-name>-<org-slug>.<region>.turso.io"
-# (see CLAUDE.md: libsql://ppc-azaan-faisal606.aws-ap-northeast-1.turso.io).
-# The org slug is fixed, so stripping it off the leading label recovers the
-# actual database name even when that name itself contains hyphens
-# (ppc-refactor, ppc-restoretest, ...).
-_ORG_SUFFIX = "-azaan-faisal606"
-_PRODUCTION_DB_NAME = "ppc"
+# Turso hostnames in this project are "<db-name>-<org-slug>.<region>.turso.io".
+# Stripping the org slug off the leading label recovers the database name even
+# when that name contains hyphens (ppc-refactor, ppc-restoretest, ...).
+# Production moved accounts in Sep 2026 (libsql://ppc-backup-azaanfaisal...),
+# which changed both the org slug and the database name.
+_ORG_SUFFIXES = ("-azaan-faisal606", "-azaanfaisal")
+_PRODUCTION_DB_NAMES = frozenset({"ppc", "ppc-backup"})
 
 
 def _db_name_from_url(url: str) -> str:
     host = urlparse(url).hostname or url
     label = host.split(".")[0]
-    if label.endswith(_ORG_SUFFIX):
-        return label[: -len(_ORG_SUFFIX)]
+    for suffix in _ORG_SUFFIXES:
+        if label.endswith(suffix):
+            return label[: -len(suffix)]
     return label
 
 
 def resolve_target(argv: list[str] | None = None) -> str:
     """Print + return the DB target this process would write to.
 
-    Raises SystemExit(1) if the target is production Turso (database name
-    exactly "ppc") and --yes-production is not present in argv.
+    Raises SystemExit(1) if the target is production Turso (database name in
+    _PRODUCTION_DB_NAMES) and --yes-production is not present in argv.
     """
     if argv is None:
         argv = sys.argv[1:]
@@ -60,7 +61,7 @@ def resolve_target(argv: list[str] | None = None) -> str:
     url = os.getenv("TURSO_DATABASE_URL")
     if url:
         db_name = _db_name_from_url(url)
-        is_production = db_name == _PRODUCTION_DB_NAME
+        is_production = db_name in _PRODUCTION_DB_NAMES
         target = url
     else:
         db_name = None

@@ -28,10 +28,9 @@ def test_filters_response_omits_capacity_range(client, seeded_db):
     options = client.get("/api/parts/filters?category=ram").json()
 
     # The deployed frontend's FilterBar.bucketValues() groups the raw value
-    # list client-side — that shape must be unchanged. Only 16/32GB show up:
-    # the RAM extractor only ever stores those two sizes (8/64GB rows above
-    # get capacity=None and are excluded), per _extract_ram_capacity.
-    assert set(options["capacity"]) == {"16GB", "32GB"}
+    # list client-side — that shape must be unchanged: plain values, every
+    # standard kit size.
+    assert set(options["capacity"]) == {"8GB", "16GB", "32GB", "64GB"}
 
     # Exactly master's key set for a fully-populated ram category — brand,
     # ddr_type and speed all come out of the same seeded name string.

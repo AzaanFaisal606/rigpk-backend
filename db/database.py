@@ -196,20 +196,20 @@ def _trimmed_mean(values: list[int], frac: float = 0.10) -> tuple[float, int]:
     return sum(trimmed) / len(trimmed), len(trimmed)
 
 
-def _trimmed_band(values: list[int], frac: float = 0.05) -> tuple[int, int]:
-    """
-    Robust (min, max) band: drop the most extreme listings from each end so a
-    mispriced outlier (data-entry error, junk SKU) doesn't blow out the range.
-    Buckets large enough to trim-mean (n>=5) always shed at least one item per
-    end (ceil), which catches lone outliers in small buckets too; tiny buckets
-    (n<5, shown as a median) keep their full range. Returns surviving low/high.
-    """
+def _iqr_band(values: list[int]) -> tuple[float, float]:
+    """(p25, p75), linearly interpolated. The chart band: a min/max band on
+    a group this mixed (kit types, stale and used stock) was wider than the
+    price movement on most charts and flooded the sparkline."""
     s = sorted(values)
-    if len(s) < 5:
+    if len(s) < 4:
         return s[0], s[-1]
-    k = max(1, math.ceil(len(s) * frac))
-    kept = s[k: len(s) - k] or s  # safety: never empty
-    return kept[0], kept[-1]
+
+    def q(f: float) -> float:
+        i = (len(s) - 1) * f
+        lo = math.floor(i)
+        return s[lo] + (s[min(lo + 1, len(s) - 1)] - s[lo]) * (i - lo)
+
+    return q(0.25), q(0.75)
 
 
 def _ratio_index(ratios: list[float], frac: float = 0.05) -> float:
@@ -228,7 +228,7 @@ def _ratio_index(ratios: list[float], frac: float = 0.05) -> float:
     "unchanged" about a group that had moved.
 
     Geometric, not arithmetic: price relatives compound, so a +10% followed
-    by a -10% must return to the start. The same trim as `_trimmed_band`
+    by a -10% must return to the start. A 5% trim
     (n>=5 only) guards the tail without pretending it can help a 3-item
     basket, where there is no non-extreme element to fall back on.
     """
@@ -252,12 +252,18 @@ _GLOBAL_BLOCKLIST: tuple[str, ...] = (
     "dvd writer",
     "dvd drive",
     "blu-ray",
+    "blue ray",
     "thermal paste",
     "thermal grease",
     "thermal compound",
     "thermal grizzly",
     "non-nand",
     "non nand",
+    # Laptop memory, wherever it's filed.
+    "so-dimm",
+    "sodimm",
+    "laptop memory",
+    "laptop ram",
 )
 
 # Per-category extra blocklist terms.
@@ -270,6 +276,18 @@ _CATEGORY_BLOCKLIST: dict[str, tuple[str, ...]] = {
         "card support",
         "nvlink",
         "sli bridge",
+        "keyboard",
+    ),
+    "cpu": (
+        "mini pc",
+    ),
+    "ram": (
+        "laptop",
+        "notebook",
+    ),
+    "case": (
+        "case panel",      # loose replacement panels
+        "mixed lot",
     ),
     "ssd": (
         "enclosure",
@@ -283,6 +301,11 @@ _CATEGORY_BLOCKLIST: dict[str, tuple[str, ...]] = {
         "m.2 adapter",
         "nvme adapter",
         "fulfill kit",
+        "external",        # the exact-phrase global terms miss "External Solid State Drive"
+        "portable",
+        "ddr3",            # RAM filed as SSD
+        "ddr4",
+        "ddr5",
     ),
     "cooling": (
         "thermal pad",
@@ -291,6 +314,7 @@ _CATEGORY_BLOCKLIST: dict[str, tuple[str, ...]] = {
         "rpd grease",
         "thermal grease",
         "thermal paste",
+        "ssd",             # "NVMe SSD for PS5"
     ),
     "psu": (
         "case with",       # "Case with 300W Power Supply" combos
@@ -301,6 +325,11 @@ _CATEGORY_BLOCKLIST: dict[str, tuple[str, ...]] = {
         "light bar",       # RGB light bars
         "lightbar",
         "mouse pad",
+        "android tv",
+        "smart google tv", # not "google tv": ASUS sells a monitor with Google TV built in
+        "monitor arm",
+        "universal screen",  # case LCD panels
+        "trofeo vision",
         # NOTE: "webcam" deliberately excluded — live data has real monitors
         # with a built-in Windows Hello webcam in the product name (e.g.
         # "Philips 27E1N5600HE ... with Windows Hello Webcam"); the term
@@ -312,8 +341,30 @@ _CATEGORY_BLOCKLIST: dict[str, tuple[str, ...]] = {
         "external ssd",
         "enclosure",
         "caddy",
+        "external",
+        "portable",
+        "synology",        # NAS units, not drives
+        "qnap",
+        "terramaster",
+        "diskless",
     ),
 }
+
+# Sources whose SSD category is really "storage" (amdhouse storage-devices,
+# rbt computers/storage) and zah's sata-ssd, which also carries HDDs. A name
+# that says HDD and never says SSD moves to hdd. "Internal Solid State Hard
+# Drive" is an SSD, hence the veto.
+_HDD_RE = re.compile(r"\bhdd\b|hard (?:disk|drive)|ironwolf|skyhawk|barracuda|surveillance|\d{4} ?rpm")
+_SSD_RE = re.compile(r"\bssd\b|solid state|nvme|m\.2")
+
+
+def _route_category(name: str, category: str) -> str:
+    """The category a listing belongs in, when its retailer filed it wrong."""
+    if category == "ssd":
+        lower = name.lower()
+        if _HDD_RE.search(lower) and not _SSD_RE.search(lower):
+            return "hdd"
+    return category
 
 
 # Minimum sane price in PKR per category.
@@ -393,7 +444,8 @@ def _values_clause(rows: int, cols: int) -> str:
 _VALID_SPEC_KEYS = frozenset({
     "brand", "socket", "vram", "ddr_type", "speed", "chipset",
     "wattage", "rating", "form_factor", "type", "aio_size",
-    "fan_size", "interface", "capacity", "model",
+    "fan_size", "interface", "capacity", "model", "condition",
+    "screen_size", "resolution", "refresh_rate", "panel",
 })
 
 # M29: `get_filter_options` used to hand the frontend raw exact spec values
@@ -469,9 +521,25 @@ _CATEGORY_SPEC_KEYS: dict[str, list[str]] = {
     "case":        ["brand", "form_factor"],
     "cooling":     ["brand", "type", "aio_size", "fan_size"],
     "ssd":         ["brand", "interface", "capacity"],
-    "hdd":         ["brand"],
-    "monitor":     ["brand"],
+    "hdd":         ["brand", "capacity"],
+    "monitor":     ["brand", "screen_size", "resolution", "refresh_rate", "panel"],
 }
+
+
+# Values whose names don't sort by their numbers.
+_FIXED_VALUE_ORDER: dict[str, dict[str, int]] = {
+    "resolution": {v: i for i, v in enumerate(
+        ("1080p", "Ultrawide 1080p", "1440p", "Ultrawide 1440p", "4K", "5K"))},
+}
+
+
+def _natural_key(value: str) -> tuple:
+    """"2TB" after "512GB", "144Hz" after "60Hz": numbers compare as numbers."""
+    m = re.match(r"(\d+(?:\.\d+)?)\s*(TB|GB)?", value, re.IGNORECASE)
+    if not m:
+        return (1, value.lower(), 0.0)
+    n = float(m.group(1)) * (1000 if (m.group(2) or "").upper() == "TB" else 1)
+    return (0, "", n) if m.end() == len(value) or m.group(2) else (0, value[m.end():].lower(), n)
 
 
 class _NoCommitConnection:
@@ -756,6 +824,11 @@ class Database:
             self._conn.execute(
                 "ALTER TABLE price_trends ADD COLUMN basket_size INTEGER NOT NULL DEFAULT 0"
             )
+        for col in ("median_price", "low_price", "high_price"):
+            if col not in trend_cols:
+                self._conn.execute(
+                    f"ALTER TABLE price_trends ADD COLUMN {col} INTEGER DEFAULT NULL"
+                )
         # One-time cleanup: an earlier revision of deactivate_unseen_* created
         # this as a shared scratch table, which is unsafe under overlapping
         # sweeps (cron + manual dispatch + heal rerun hitting the same DB).
@@ -903,6 +976,7 @@ class Database:
             if price is None:
                 skipped += 1
                 continue
+            p = {**p, "category": _route_category(p["name"], p["category"])}
             min_price = _MIN_PRICE.get(p["category"])
             if min_price is not None and price < min_price:
                 skipped += 1
@@ -930,6 +1004,25 @@ class Database:
                 p.get("thumbnail_url"), specs_json, normalize_name(p["name"]),
                 p["scraped_at"], price,
             )
+
+        # Same product listed twice by one retailer (pakbyte's "…-1" copy of a
+        # page, often at a different price): keep the cheapest, so one search
+        # doesn't show the same product twice. The loser is quarantined, so
+        # the sweep delists it.
+        def dup_key(row: tuple) -> tuple[str, str, str]:
+            return (row[0], row[3], " ".join(row[2].lower().split()))   # source, category, name
+
+        cheapest: dict[tuple[str, str, str], tuple] = {}
+        for row in staged.values():
+            best = cheapest.get(dup_key(row))
+            if best is None or row[9] < best[9]:
+                cheapest[dup_key(row)] = row
+        for key, row in list(staged.items()):
+            kept = cheapest[dup_key(row)]
+            if kept is not row:
+                del staged[key]
+                skipped += 1
+                quarantined.append((row[0], row[2], row[3], row[9], row[4], f"duplicate_of:{kept[4]}"))
 
         # -- phase 2: upsert parts, chunked, recovering the ids ------------
         #
@@ -1302,6 +1395,7 @@ class Database:
         offset: int = 0,
         ids: Optional[list[int]] = None,
         include_specs: bool = False,
+        exclude_type: Optional[str] = None,
     ) -> tuple[list[dict], int]:
         """
         Return (items, total) for the market listing page.
@@ -1309,6 +1403,8 @@ class Database:
         specs_filter: e.g. {"brand": "AMD", "socket": "AM5"}
         include_specs: the market grid never reads `specs` (only /build's
         picker does), so it's left out of the SELECT by default.
+        exclude_type: drop rows whose specs.type is this value; untyped rows
+        stay. The builder's cooler slot passes "Fan/Accessory".
         """
         conditions: list[str] = ["p.latest_price IS NOT NULL", "p.is_active = 1"]
         params: list = []
@@ -1347,6 +1443,9 @@ class Database:
                 else:
                     conditions.append("json_extract(p.specs, ?) = ?")
                     params.extend([f"$.{key}", value])
+        if exclude_type:
+            conditions.append("COALESCE(json_extract(p.specs, '$.type'), '') != ?")
+            params.append(exclude_type)
 
         # `ids` is the client-index path: the browser already matched, filtered,
         # sorted and paged, so we fetch exactly those rows in exactly that order.
@@ -1389,7 +1488,8 @@ class Database:
         rows = self._conn.execute(
             f"""
             SELECT p.id, p.source, p.name, p.category, p.url, p.thumbnail_url,
-                   {specs_col} p.last_seen_at, p.latest_price AS price_pkr
+                   {specs_col} p.last_seen_at, p.latest_price AS price_pkr,
+                   json_extract(p.specs, '$.condition') AS condition
             {base_query}
             {order}
             {page}
@@ -1406,42 +1506,36 @@ class Database:
         e.g. {"brand": ["AMD", "Intel"], "socket": ["AM4", "AM5"]}
         """
         keys = _CATEGORY_SPEC_KEYS.get(category, ["brand"])
-        result: dict = {}
-        for key in keys:
-            json_path = f"$.{key}"
-            rows = self._conn.execute(
-                """
-                SELECT DISTINCT json_extract(specs, ?) AS val
-                FROM parts
-                WHERE category = ?
-                  AND is_active = 1
-                  AND latest_price IS NOT NULL
-                  AND json_extract(specs, ?) IS NOT NULL
-                ORDER BY val
-                """,
-                (json_path, category, json_path),
-            ).fetchall()
-            values = [r[0] for r in rows if r[0]]
-            if not values:
+        # One pass over the category's specs, not one DISTINCT query per key:
+        # Turso bills rows read, and N keys cost N scans of the same rows.
+        rows = self._conn.execute(
+            """
+            SELECT specs
+            FROM parts
+            WHERE category = ?
+              AND is_active = 1
+              AND latest_price IS NOT NULL
+              AND specs IS NOT NULL
+            """,
+            (category,),
+        ).fetchall()
+        seen: dict[str, set] = {k: set() for k in keys}
+        for (raw,) in rows:
+            try:
+                specs = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
                 continue
-            # The raw value list is the shape the deployed frontend's
-            # FilterBar.bucketValues() already groups client-side — never
-            # replace it.
-            result[key] = values
-            # Fix round 2: do NOT also emit "<key>_range" here.
-            # FilterBar.tsx builds its spec dropdowns generically from
-            # Object.entries(filterOptions) — any non-empty key renders as a
-            # real dropdown, snake_case label and all, with no SPEC_LABELS
-            # entry for "capacity_range" and no allow-list entry in
-            # getParts() to carry its value anywhere — so on the live RAM
-            # market page this was a dead, mislabeled control with no
-            # effect, not an inert additive field. The range predicate
-            # itself (_parse_bucket / _BUCKETED_SPEC_KEYS, used by
-            # list_parts above) is unaffected and still works if called
-            # directly with a "lo-hiUNIT" value. Phase 4 must add the
-            # SPEC_LABELS entry and the getParts() allow-list entry in the
-            # same change that starts emitting this key again.
-        return result
+            for k in keys:
+                v = specs.get(k)
+                if v:
+                    seen[k].add(v)
+        # Plain value lists: FilterBar.bucketValues() groups them client-side.
+        # No "<key>_range" keys either — FilterBar renders every key it gets
+        # as a dropdown (fix round 2).
+        return {
+            k: sorted(v, key=lambda x, k=k: (_FIXED_VALUE_ORDER.get(k, {}).get(x, 0), _natural_key(x)))
+            for k, v in seen.items() if v
+        }
 
     def get_price_history(self, source_id: str, source: str) -> list[dict]:
         """Return all price log entries for a single product (for graphs)."""
@@ -1489,7 +1583,7 @@ class Database:
         (_RAM_TRACK_CAPS, i.e. 16GB/32GB) so each bucket holds genuinely
         comparable kits; 8GB/64GB+ and one-off speeds are dropped.
         """
-        if not specs:
+        if not specs or specs.get("condition"):
             return None
         if category in ("gpu", "cpu"):
             model = specs.get("model")
@@ -1686,7 +1780,7 @@ class Database:
 
                 matched_prices = list(basket.values())
                 used = len(matched_prices)
-                raw_lo, raw_hi = _trimmed_band(matched_prices, self._TREND_BAND_FRAC)
+                raw_lo, raw_hi = _iqr_band(matched_prices)
                 # Re-express the band at the chained level.
                 #
                 # `level` is an INDEX — anchored weeks ago and moved only by
@@ -1708,10 +1802,14 @@ class Database:
                 scale = (level / raw_center) if raw_center else 1.0
                 band_lo = round(raw_lo * scale)
                 band_hi = round(raw_hi * scale)
+                # Real prices for the headline numbers. `level` is an index and
+                # drifts from them (23 of 89 groups were >=10% off the median).
+                all_prices = list(prices_now.values())
                 records.append((
                     category, group_type, group_key, date,
                     len(prices_now), used, round(level), method,
                     band_lo, band_hi, basket_size,
+                    round(_median(all_prices)), min(all_prices), max(all_prices),
                 ))
 
         # Replace-wholesale, so redoing the block reaches the same end state
@@ -1725,8 +1823,9 @@ class Database:
                 INSERT INTO price_trends
                     (category, group_type, group_key, scrape_date,
                      sample_count, used_count, center_price, method,
-                     min_price, max_price, basket_size)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     min_price, max_price, basket_size,
+                     median_price, low_price, high_price)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 records,
             )
@@ -1757,7 +1856,8 @@ class Database:
             group_type = self._trend_group_type(category)
         sql = """
             SELECT group_key, scrape_date, center_price, method,
-                   min_price, max_price, sample_count, used_count
+                   min_price, max_price, sample_count, used_count,
+                   median_price, low_price, high_price
             FROM price_trends
             WHERE category = ? AND group_type = ?
         """
@@ -1795,7 +1895,10 @@ class Database:
                    t.center_price AS latest_price,
                    t.min_price,
                    t.max_price,
-                   t.sample_count
+                   t.sample_count,
+                   t.median_price,
+                   t.low_price,
+                   t.high_price
             FROM price_trends t
             JOIN (
                 SELECT group_key, MAX(scrape_date) AS d

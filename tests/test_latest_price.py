@@ -92,7 +92,7 @@ def test_migrate_backfills_latest_price_for_existing_rows(tmp_path):
     con = sqlite3.connect(path)
     con.execute(
         "CREATE TABLE parts (id INTEGER PRIMARY KEY, source TEXT, source_id TEXT, "
-        "name TEXT, category TEXT, url TEXT, thumbnail_url TEXT, "
+        "name TEXT, category TEXT, url TEXT, thumbnail_url TEXT, specs TEXT, "
         "is_active INTEGER NOT NULL DEFAULT 1, "
         "last_seen_at TEXT, name_norm TEXT)"
     )

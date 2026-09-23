@@ -413,3 +413,36 @@ def test_max_pages_raise_still_carries_no_partial_results():
         scraper.scrape("https://example.com/cat")
 
     assert not hasattr(exc.value, "partial_results") or exc.value.partial_results is None
+
+
+class _SoldOutPageScraper(_SkipPageScraper):
+    """Cards named `x…` are sold out: parse_card skips them."""
+
+    def __init__(self, pages, total=None):
+        super().__init__(pages)
+        self._total = total
+
+    def parse_card(self, block):
+        return None if block.startswith("x") else super().parse_card(block)
+
+    def extract_total(self, html):
+        return self._total
+
+
+def test_a_page_of_only_sold_out_cards_is_not_the_end_of_the_listing():
+    """
+    A page where every card is sold out yields no products, which used to hit
+    the `new == 0` exit and drop every later page — and a clean run then
+    swept those products. The site's own count says there is more.
+    """
+    scraper = _SoldOutPageScraper({1: "a|b", 2: "x1|x2", 3: "c|x3"}, total=6)
+    assert [p["name"] for p in scraper.scrape("https://example.com/cat")] == ["a", "b", "c"]
+
+
+def test_sold_out_pages_without_a_total_are_bounded():
+    """No count to go by: keep going past a sold-out page, but a site that
+    clamps page numbers to a sold-out last page must not loop to MAX_PAGES."""
+    pages = {1: "a", 2: "x1", 3: "b"}
+    pages.update({p: "x9" for p in range(4, ListingScraper.MAX_PAGES + 1)})
+    scraper = _SoldOutPageScraper(pages)
+    assert [p["name"] for p in scraper.scrape("https://example.com/cat")] == ["a", "b"]

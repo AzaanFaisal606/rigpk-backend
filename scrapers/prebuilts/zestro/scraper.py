@@ -16,7 +16,7 @@ import sys
 import time
 
 from scrapers.exceptions import ScrapeIncomplete
-from scrapers.prebuilts.base_prebuilt_scraper import BasePrebuiltScraper
+from scrapers.prebuilts.base_prebuilt_scraper import BasePrebuiltScraper, is_sold_out
 
 SOURCE = "zestrogaming.com"
 BASE   = "https://zestrogaming.com"
@@ -135,6 +135,8 @@ class ZestroScraper(BasePrebuiltScraper):
         return result
 
     def _parse_product(self, html: str, url: str) -> dict | None:
+        if is_sold_out(html):
+            return None
         scraped_at = self.now()
 
         # Title

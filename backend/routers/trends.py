@@ -19,6 +19,7 @@ class TrendPoint(BaseModel):
     min_price: int
     max_price: int
     sample_count: int
+    median_price: Optional[int] = None
 
 
 class TrendGroup(BaseModel):
@@ -27,6 +28,10 @@ class TrendGroup(BaseModel):
     min_price: int
     max_price: int
     sample_count: int
+    # Real prices on the latest date; null until the next trend rebuild.
+    median_price: Optional[int] = None
+    low_price: Optional[int] = None
+    high_price: Optional[int] = None
     thumbnail_url: Optional[str] = None
     series: list[TrendPoint]
 
@@ -66,6 +71,7 @@ def list_trend_groups(category: str = Query(...), db: Database = Depends(get_dat
                 min_price=r["min_price"],
                 max_price=r["max_price"],
                 sample_count=r["sample_count"],
+                median_price=r.get("median_price"),
             )
         )
     # Series are capped to the most recent scrapes (db._TREND_MAX_DATES), so a
@@ -78,6 +84,9 @@ def list_trend_groups(category: str = Query(...), db: Database = Depends(get_dat
             min_price=g["min_price"],
             max_price=g["max_price"],
             sample_count=g["sample_count"],
+            median_price=g.get("median_price"),
+            low_price=g.get("low_price"),
+            high_price=g.get("high_price"),
             thumbnail_url=g.get("thumbnail_url"),
             series=by_group[g["group_key"]],
         )
@@ -105,6 +114,7 @@ def get_trend_series(
             min_price=r["min_price"],
             max_price=r["max_price"],
             sample_count=r["sample_count"],
+            median_price=r.get("median_price"),
         )
         for r in rows
     ]

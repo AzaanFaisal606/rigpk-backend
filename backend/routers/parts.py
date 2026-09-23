@@ -25,6 +25,8 @@ class PartItem(BaseModel):
     price_pkr: Optional[int]
     last_seen_at: Optional[str] = None
     specs: Optional[dict[str, Any]] = None
+    # "Used" / "Open Box" / "Refurbished"; null means new.
+    condition: Optional[str] = None
 
 
 class PartsResponse(BaseModel):
@@ -299,10 +301,15 @@ def get_parts(
     rating:      Optional[str] = Query(None),
     form_factor: Optional[str] = Query(None),
     cooling_type: Optional[str] = Query(None, alias="type"),
+    exclude_type: Optional[str] = Query(None, description="Drop rows with this specs.type; untyped rows stay"),
     aio_size:    Optional[str] = Query(None),
     fan_size:    Optional[str] = Query(None),
     interface:   Optional[str] = Query(None),
     capacity:    Optional[str] = Query(None),
+    screen_size: Optional[str] = Query(None),
+    resolution:  Optional[str] = Query(None),
+    refresh_rate: Optional[str] = Query(None),
+    panel:       Optional[str] = Query(None),
     q:           Optional[str] = Query(None),
     ids:         Optional[str] = Query(None, description="Comma-separated part IDs, max 50"),
     include_specs: bool        = Query(True, description="Include the specs blob. Defaults True to match the currently-deployed frontend (PartPickerModal, checkCompatibility()); the market grid should opt out with include_specs=false once it's updated to not need it"),
@@ -328,6 +335,8 @@ def get_parts(
         "wattage": wattage, "rating": rating, "form_factor": form_factor,
         "type": cooling_type, "aio_size": aio_size, "fan_size": fan_size,
         "interface": interface, "capacity": capacity,
+        "screen_size": screen_size, "resolution": resolution,
+        "refresh_rate": refresh_rate, "panel": panel,
     }
     specs_filter = {k: v for k, v in raw_spec_filters.items() if v is not None} or None
 
@@ -343,6 +352,7 @@ def get_parts(
         offset=offset,
         ids=id_list,
         include_specs=include_specs,
+        exclude_type=exclude_type,
     )
 
     parsed_items = []

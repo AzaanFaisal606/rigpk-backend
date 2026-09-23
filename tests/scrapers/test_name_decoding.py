@@ -93,3 +93,28 @@ def test_techmatched_entities_are_decoded_once(load_fixture):
     for n in names:
         assert "&amp;" not in n and "&#" not in n, f"undecoded entity in {n!r}"
         assert htmllib.unescape(n) == n, f"double-decoding changed {n!r}"
+
+
+def test_zah_entities_are_decoded(load_fixture):
+    """zah read `aria-label` raw: 469 names showed "&#8243;", "&#8211;", "&amp;"."""
+    from scrapers.zahcomputers.scraper import ZahComputersScraper
+
+    names = [p["name"] for p in ZahComputersScraper()._parse_page(load_fixture("zah_monitor_page1.html"))]
+    assert len(names) == 32
+    for n in names:
+        assert "&#" not in n and "&amp;" not in n, f"undecoded entity in {n!r}"
+
+
+def test_shop_filler_is_stripped_from_names():
+    from scrapers.amdhouse.scraper import clean_name
+
+    assert clean_name("03.Tracer C402 CPU Cooler 4 Heatpipe Rgb New (White)") == \
+        "Tracer C402 CPU Cooler 4 Heatpipe Rgb New (White)"
+    assert clean_name("AMD Ryzen 5 7600X Chip New in 10 Months Warranty") == "AMD Ryzen 5 7600X Chip"
+    # "used" stays: the condition spec reads it
+    assert clean_name("AMD Ryzen 5 2600 chip only used 1month wty") == "AMD Ryzen 5 2600 chip only used"
+
+
+def test_techmatched_drops_in_pakistan(load_fixture):
+    names = [p["name"] for p in TechMatchedScraper()._parse_page(load_fixture("techmatched_cpu_sale.html"))]
+    assert names and not any(n.lower().endswith("in pakistan") for n in names)

@@ -118,6 +118,11 @@ jobs:
             1. Read scrape_failure.log and find the "ANOMALIES DETECTED" section plus any
                "SCRAPER FAILED" / "BLOCKED" / "WARNING" lines. Identify exactly which
                source(s) or (source/category) broke and the root cause.
+               A "DRIFT <source>:" line comes from the stock cross-check: that
+               source's parser lists sold-out items or stores the wrong price (e.g.
+               the crossed-out price of a sale item). The "soldout"/"price" lines
+               above it name example products; compare the parser against the
+               live card markup.
             2. TRIAGE BEFORE TOUCHING ANY CODE. Decide whether this is fixable in the
                scrapers at all. If ANY of the following holds, do NOT create a branch and
                do NOT open a PR — write your reasoning to the job output and stop:
