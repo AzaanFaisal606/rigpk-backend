@@ -8,11 +8,13 @@ Usage:
     python run_all.py --notify             # desktop notification on finish
     python run_all.py --test               # run DB integrity checks after scraping
     python run_all.py --notify --test      # both
+    python run_all.py --weekly             # the Friday cron: new trend date + trend rebuild
 
 Available scrapers: czone, zah, amd, rbt, junaid, tech, pakbyte, redtech, techmatched
 """
 
 import io
+import os
 import subprocess
 import sys
 import threading
@@ -20,21 +22,18 @@ import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 
 from db.database import backup_db, get_db
 from scrapers import health
 from scrapers.base_scraper import host_blocked, reset_host_state
 from scrapers.exceptions import ScrapeIncomplete
-from scrapers.czone.all_scraper import CzoneAllScraper, CATEGORIES as CZONE_CATS, BASE as CZONE_BASE
-from scrapers.zahcomputers.scraper import ZahComputersScraper, CATEGORIES as ZAH_CATS, BASE as ZAH_BASE
-from scrapers.amdhouse.scraper import AmdHouseScraper, CATEGORIES as AMD_CATS, BASE as AMD_BASE
-from scrapers.rbtechngames.scraper import RbTechNGamesScraper, CATEGORIES as RBT_CATS, BASE as RBT_BASE
+from scrapers.czone.scraper import CzoneAllScraper, CATEGORIES as CZONE_CATS, BASE as CZONE_BASE
 from scrapers.junaidtech.scraper import JunaidTechScraper, CATEGORIES as JT_CATS, BASE as JT_BASE
-from scrapers.techarc.scraper import TechArcScraper, CATEGORIES as TECH_CATS, BASE as TECH_BASE
-from scrapers.pakbyte.scraper import PakByteScraper, CATEGORIES as PB_CATS, BASE as PB_BASE
-from scrapers.redtech.scraper import RedTechScraper, CATEGORIES as RT_CATS, BASE as RT_BASE
-from scrapers.techmatched.scraper import TechMatchedScraper, CATEGORIES as TM_CATS, BASE as TM_BASE
+from scrapers.pakbyte.scraper import PakByteScraper
+from scrapers.woo.stores import AmdHouseScraper, RbtScraper, RedTechScraper, TechArcScraper, TechMatchedScraper
+from scrapers.zah.scraper import ZahScraper
 
 # Absolute, not "data/ppc.db": a cron job or CI runner invoking this from
 # another directory would otherwise silently create and populate an empty DB
@@ -82,94 +81,6 @@ def run_czone() -> list[dict]:
     return results
 
 
-def run_zah() -> list[dict]:
-    scraper = ZahComputersScraper()
-    results = []
-    incomplete: list[str] = []
-    for slug, category in ZAH_CATS:
-        url = f"{ZAH_BASE}/shop/?product_cat={slug}"
-        print(f"\n  [zah/{category.upper()}]")
-        try:
-            products = scraper.scrape(url)
-        except ScrapeIncomplete as e:
-            print(f"    INCOMPLETE: {e}")
-            incomplete.append(f"{category}: {e}")
-            continue
-        except Exception as e:
-            print(f"    ERROR: {e}")
-            continue
-        for p in products:
-            p["category"] = category
-        results.extend(products)
-    if incomplete:
-        exc = ScrapeIncomplete(f"zah: {'; '.join(incomplete)}")
-        exc.partial_results = results
-        raise exc
-    return results
-
-
-def run_amd() -> list[dict]:
-    from scrapers.amdhouse.scraper import _find_valid_categories
-    scraper = AmdHouseScraper()
-    results = []
-    incomplete: list[str] = []
-    print("  Checking amdhouse categories...")
-    try:
-        valid = _find_valid_categories()
-    except ScrapeIncomplete as e:
-        # Some category probes hit a real error (not a 404) — the categories
-        # that DID resolve are still worth scraping, we just can't call this
-        # source's coverage complete.
-        print(f"  INCOMPLETE probing categories: {e}")
-        valid = getattr(e, "valid_categories", [])
-        incomplete.append(str(e))
-    for url, category in valid:
-        print(f"\n  [amd/{category.upper()}]")
-        try:
-            products = scraper.scrape(url)
-        except ScrapeIncomplete as e:
-            print(f"    INCOMPLETE: {e}")
-            incomplete.append(f"{category}: {e}")
-            continue
-        except Exception as e:
-            print(f"    ERROR: {e}")
-            continue
-        for p in products:
-            p["category"] = category
-        results.extend(products)
-    if incomplete:
-        exc = ScrapeIncomplete(f"amd: {'; '.join(incomplete)}")
-        exc.partial_results = results
-        raise exc
-    return results
-
-
-def run_rbt() -> list[dict]:
-    scraper = RbTechNGamesScraper()
-    results = []
-    incomplete: list[str] = []
-    for path, category in RBT_CATS:
-        url = f"{RBT_BASE}/product-category/{path}/"
-        print(f"\n  [rbt/{category.upper()}]")
-        try:
-            products = scraper.scrape(url)
-        except ScrapeIncomplete as e:
-            print(f"    INCOMPLETE: {e}")
-            incomplete.append(f"{category}: {e}")
-            continue
-        except Exception as e:
-            print(f"    ERROR: {e}")
-            continue
-        for p in products:
-            p["category"] = category
-        results.extend(products)
-    if incomplete:
-        exc = ScrapeIncomplete(f"rbt: {'; '.join(incomplete)}")
-        exc.partial_results = results
-        raise exc
-    return results
-
-
 def run_junaid() -> list[dict]:
     scraper = JunaidTechScraper()
     results = []
@@ -194,15 +105,19 @@ def run_junaid() -> list[dict]:
     return results
 
 
-def run_tech() -> list[dict]:
-    scraper = TechArcScraper()
+def run_catalog(scraper_cls, key: str) -> list[dict]:
+    """
+    One wrapper for every JSON-catalogue source (the 6 WooCommerce stores and
+    pakbyte): scraper_cls.CATEGORIES is [(slug, category)], and
+    scraper.scrape(slug) returns that category's rows.
+    """
+    scraper = scraper_cls()
     results = []
     incomplete: list[str] = []
-    for slug, category in TECH_CATS:
-        url = f"{TECH_BASE}/{slug}/"
-        print(f"\n  [tech/{category.upper()}]")
+    for slug, category in scraper_cls.CATEGORIES:
+        print(f"\n  [{key}/{category.upper()}]")
         try:
-            products = scraper.scrape(url)
+            products = scraper.scrape(slug)
         except ScrapeIncomplete as e:
             print(f"    INCOMPLETE: {e}")
             incomplete.append(f"{category}: {e}")
@@ -214,85 +129,7 @@ def run_tech() -> list[dict]:
             p["category"] = category
         results.extend(products)
     if incomplete:
-        exc = ScrapeIncomplete(f"tech: {'; '.join(incomplete)}")
-        exc.partial_results = results
-        raise exc
-    return results
-
-
-def run_pakbyte() -> list[dict]:
-    scraper = PakByteScraper()
-    results = []
-    incomplete: list[str] = []
-    for slug, category in PB_CATS:
-        url = f"{PB_BASE}/collections/{slug}"
-        print(f"\n  [pakbyte/{category.upper()}]")
-        try:
-            products = scraper.scrape(url)
-        except ScrapeIncomplete as e:
-            print(f"    INCOMPLETE: {e}")
-            incomplete.append(f"{category}: {e}")
-            continue
-        except Exception as e:
-            print(f"    ERROR: {e}")
-            continue
-        for p in products:
-            p["category"] = category
-        results.extend(products)
-    if incomplete:
-        exc = ScrapeIncomplete(f"pakbyte: {'; '.join(incomplete)}")
-        exc.partial_results = results
-        raise exc
-    return results
-
-
-def run_redtech() -> list[dict]:
-    scraper = RedTechScraper()
-    results = []
-    incomplete: list[str] = []
-    for slug, category in RT_CATS:
-        url = f"{RT_BASE}/product-category/{slug}/"
-        print(f"\n  [redtech/{category.upper()}]")
-        try:
-            products = scraper.scrape(url)
-        except ScrapeIncomplete as e:
-            print(f"    INCOMPLETE: {e}")
-            incomplete.append(f"{category}: {e}")
-            continue
-        except Exception as e:
-            print(f"    ERROR: {e}")
-            continue
-        for p in products:
-            p["category"] = category
-        results.extend(products)
-    if incomplete:
-        exc = ScrapeIncomplete(f"redtech: {'; '.join(incomplete)}")
-        exc.partial_results = results
-        raise exc
-    return results
-
-
-def run_techmatched() -> list[dict]:
-    scraper = TechMatchedScraper()
-    results = []
-    incomplete: list[str] = []
-    for slug, category in TM_CATS:
-        url = f"{TM_BASE}/product-category/{slug}/"
-        print(f"\n  [techmatched/{category.upper()}]")
-        try:
-            products = scraper.scrape(url)
-        except ScrapeIncomplete as e:
-            print(f"    INCOMPLETE: {e}")
-            incomplete.append(f"{category}: {e}")
-            continue
-        except Exception as e:
-            print(f"    ERROR: {e}")
-            continue
-        for p in products:
-            p["category"] = category
-        results.extend(products)
-    if incomplete:
-        exc = ScrapeIncomplete(f"techmatched: {'; '.join(incomplete)}")
+        exc = ScrapeIncomplete(f"{key}: {'; '.join(incomplete)}")
         exc.partial_results = results
         raise exc
     return results
@@ -300,14 +137,14 @@ def run_techmatched() -> list[dict]:
 
 SCRAPERS = {
     "czone":       ("czone.com.pk",       run_czone),
-    "zah":         ("zahcomputers.pk",    run_zah),
-    "amd":         ("amdhouse.pk",        run_amd),
-    "rbt":         ("rbtechngames.com",   run_rbt),
+    "zah":         ("zahcomputers.pk",    partial(run_catalog, ZahScraper, "zah")),
+    "amd":         ("amdhouse.pk",        partial(run_catalog, AmdHouseScraper, "amd")),
+    "rbt":         ("rbtechngames.com",   partial(run_catalog, RbtScraper, "rbt")),
     "junaid":      ("junaidtech.pk",      run_junaid),
-    "tech":        ("techarc.pk",         run_tech),
-    "pakbyte":     ("pakbyte.pk",         run_pakbyte),
-    "redtech":     ("redtech.pk",         run_redtech),
-    "techmatched": ("techmatched.pk",     run_techmatched),
+    "tech":        ("techarc.pk",         partial(run_catalog, TechArcScraper, "tech")),
+    "pakbyte":     ("pakbyte.pk",         partial(run_catalog, PakByteScraper, "pakbyte")),
+    "redtech":     ("redtech.pk",         partial(run_catalog, RedTechScraper, "redtech")),
+    "techmatched": ("techmatched.pk",     partial(run_catalog, TechMatchedScraper, "techmatched")),
 }
 
 
@@ -480,15 +317,41 @@ def parse_sources(requested: list[str]) -> list[str]:
     return requested
 
 
+def pin_trend_bucket(db, weekly: bool) -> str | None:
+    """
+    Pin a non-weekly run's rows to the current trend date.
+
+    A trend point is the UTC date of scraped_at, so a midweek run (manual
+    dispatch, heal rerun, local fix) would otherwise open a stray date that the
+    next weekly rebuild turns into its own point. Pinned, its prices still go
+    live at once and fold into the current weekly point instead. Only --weekly
+    opens a new date. An explicit SCRAPE_AS_OF_DATE wins; an empty DB pins
+    nothing. Returns the date in effect, or None.
+    """
+    if weekly or os.getenv("SCRAPE_AS_OF_DATE"):
+        return os.getenv("SCRAPE_AS_OF_DATE") or None
+    date = db.latest_scrape_date()
+    if date:
+        os.environ["SCRAPE_AS_OF_DATE"] = date
+    return date
+
+
 def main():
     args = sys.argv[1:]
     do_notify = "--notify" in args
     do_test   = "--test"   in args
     do_strict = "--strict" in args   # CI: exit non-zero on any anomaly → self-heal
-    args = [a for a in args if a not in ("--notify", "--test", "--strict")]
+    weekly    = "--weekly" in args   # the Friday cron: new trend date + rebuild
+    args = [a for a in args if a not in ("--notify", "--test", "--strict", "--weekly")]
 
     sources = parse_sources(args)
     to_run = {k: v for k, v in SCRAPERS.items() if k in sources}
+
+    # Before any scraper thread starts: scraped_at_now() reads the env per row.
+    with get_db(DB_PATH, allow_remote_migrations=True) as db:
+        as_of = pin_trend_bucket(db, weekly)
+    if as_of:
+        print(f"Trend date: rows stamped {as_of}")
 
     all_results: list[dict] = []
     # One entry per source attempted, recorded to scrape_runs afterwards.
@@ -568,14 +431,19 @@ def main():
         if stale:
             print(f"DB: marked stale — {', '.join(stale)}")
 
-        trend_rows = db.rebuild_price_trends()
+        # Trends move once a week. A non-weekly run's rows are pinned to the
+        # current date (pin_trend_bucket) and join it at the next weekly rebuild.
+        trend_rows = db.rebuild_price_trends() if weekly else None
         # The only moment price_log actually changes size. /api/stats reads
         # this stored number instead of counting the table on every request.
         db.refresh_price_log_count()
         s = db.stats()
         print(f"\nDB: {inserted} new price rows written to {DB_PATH}")
         print(f"DB: {deactivated} parts marked inactive this run")
-        print(f"DB: {trend_rows} price-trend rows computed")
+        if trend_rows is None:
+            print("DB: price trends not rebuilt (not a weekly run)")
+        else:
+            print(f"DB: {trend_rows} price-trend rows computed")
         print(f"DB: {s['total_parts']} total parts, {s['total_price_rows']} total price rows")
         print(f"\nBy category:")
         for cat, n in sorted(s["by_category"].items()):

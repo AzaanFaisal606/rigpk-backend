@@ -1,5 +1,7 @@
 """
-Shared skeleton for the paginated listing scrapers.
+Shared skeleton for the paginated HTML listing scrapers. Only czone uses it
+now: the WooCommerce and Shopify retailers read JSON (scrapers/woo/,
+scrapers/pakbyte/). run_listing_cli() below is shared by all of them.
 
 The listing scrapers previously carried their own copy of: the pagination
 loop, the consecutive-failure bound, the total-count extraction, the
@@ -188,47 +190,15 @@ class ListingScraper(BaseScraper):
 
 
 # --------------------------------------------------------------------------
-# Shared "of X results" total extractor — byte-identical across redtech,
-# techarc, techmatched and zahcomputers before this refactor. Kept as a
-# module-level function (not forced onto every subclass) since amdhouse,
-# czone and pakbyte report totals differently or not at all.
-# --------------------------------------------------------------------------
-import re as _re
-
-
-def woodmart_card_blocks(html: str) -> list[str]:
-    """Woodmart (zah, techarc) cards, split on the outer `<div class="wd-product ...">`.
-    Splitting on the inner `wd-product-wrapper` put each card's own
-    `outofstock`/`sale` class tokens at the end of the PREVIOUS card's block."""
-    return ["<div " + b for b in _re.split(r'<div (?=class="wd-product\s)', html)[1:]]
-
-
-def leading_classes(block: str) -> str:
-    """The class attribute of a block's first tag: the card's own tokens,
-    not a related-product card or the page footer further down."""
-    m = _re.match(r'<\w+[^>]*?class="([^"]*)"', block)
-    return m.group(1) if m else ""
-
-
-def total_from_results_text(html: str) -> Optional[int]:
-    """Shared 'Showing 1-24 of 132 results' pattern (WooCommerce's default loop)."""
-    m = _re.search(r"of\s+([\d,]+)\s+results", html, _re.IGNORECASE)
-    return int(m.group(1).replace(",", "")) if m else None
-
-
-# --------------------------------------------------------------------------
 # Shared `python -m scrapers.<name>` entry point. Seven near-identical
 # main()s previously differed only in: whether they write to the DB, which
 # single category they smoke-test by default, and whether --all overrides
-# that default. Both flavours are covered here.
+# that default. Both flavours are covered here. The JSON scrapers use it too,
+# passing the identity as url_for since their scrape() takes a slug.
 # --------------------------------------------------------------------------
 
 def run_and_persist(scraper: BaseScraper, resolved: list[tuple[str, str]], *, write_db: bool) -> None:
-    """
-    resolved: [(url, our_category), ...] already built by the caller — lets
-    amdhouse pass its dynamically-probed category list through the same path
-    as every scraper with a static CATEGORIES table.
-    """
+    """resolved: [(url_or_slug, our_category), ...] already built by the caller."""
     all_results: list[dict] = []
     for url, category in resolved:
         print(f"\n[{category.upper()}] {url}")
@@ -282,10 +252,10 @@ def run_listing_cli(
 ) -> None:
     """
     categories: module-level CATEGORIES — (slug_or_path, our_category, ...) tuples.
-    url_for: slug_or_path -> full category URL.
-    write_db=False is the "standalone smoke test" flavour (pakbyte, redtech,
-    techarc, techmatched): defaults to `default_filter`'s category alone
-    unless the process was invoked with --all.
+    url_for: slug_or_path -> whatever scraper_cls.scrape() takes.
+    write_db=False is the "standalone smoke test" flavour (every scraper but
+    czone): defaults to `default_filter`'s category alone unless the process
+    was invoked with --all.
     """
     scraper = scraper_cls()
     cats = categories

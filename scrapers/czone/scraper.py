@@ -22,7 +22,7 @@ How it works:
 No Playwright needed — plain HTTP requests work.
 
 Usage:
-    python -m scrapers.czone.all_scraper
+    python -m scrapers.czone.scraper
 """
 
 import html

@@ -1,14 +1,17 @@
 """
-Parser tests read saved retailer HTML, never the network.
+Parser tests read saved retailer HTML or JSON, never the network.
 
 Retailer markup changes without warning; a saved fixture is what turns "the
 scraper broke last Friday" into "this test failed the moment I edited it".
 """
 from pathlib import Path
 
+import json
+
 import pytest
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures" / "html"
+JSON_FIXTURES = Path(__file__).resolve().parent.parent / "fixtures" / "json"
 
 
 @pytest.fixture(autouse=True)
@@ -35,4 +38,11 @@ def load_fixture():
                 f"  python scripts/save_fixture.py <url> {name}"
             )
         return path.read_text(encoding="utf-8", errors="replace")
+    return _load
+
+
+@pytest.fixture
+def load_json():
+    def _load(name: str):
+        return json.loads((JSON_FIXTURES / name).read_text(encoding="utf-8"))
     return _load

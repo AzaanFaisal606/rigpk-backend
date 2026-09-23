@@ -8,13 +8,10 @@ could not be extracted, or the host blocked us mid-run). The orchestrator
   - never let ONE category's ScrapeIncomplete get silently absorbed into
     "0 products for that category" while the other categories look clean
     (the routed finding this file exists to pin down — confirmed live in
-    run_junaid/run_tech/run_pakbyte/run_redtech/run_techmatched, and in fact
-    identical across every run_X() in this file);
+    every run_X() wrapper, now run_czone/run_junaid/run_catalog);
   - still upsert whatever products the categories that DID succeed returned;
   - skip the freshness sweep for that source.
 """
-import urllib.error
-
 import pytest
 
 from scrapers.exceptions import ScrapeIncomplete
@@ -118,6 +115,42 @@ def test_run_czone_keeps_partial_results_from_a_failed_category(monkeypatch):
     gpu_rows = [p for p in partial if p["name"] == "partial gpu product"]
     assert len(gpu_rows) == 1
     assert gpu_rows[0]["category"] == "gpu"
+
+
+def test_run_catalog_keeps_other_categories_and_flags_incomplete(monkeypatch):
+    """The shared JSON-source wrapper: same contract as run_czone."""
+    import run_all
+    from scrapers.woo.stores import AmdHouseScraper
+
+    def fake_scrape(self, slug):
+        if slug == "processors":
+            raise ScrapeIncomplete("amdhouse.pk: processors page 2 failed")
+        return [{
+            "name": f"Product {slug}", "price_pkr": 10000,
+            "url": f"https://amdhouse.pk/product/{slug}/", "category": "",
+            "source": "amdhouse.pk", "scraped_at": "t", "thumbnail_url": None,
+        }]
+
+    monkeypatch.setattr(AmdHouseScraper, "scrape", fake_scrape)
+
+    with pytest.raises(ScrapeIncomplete) as exc:
+        run_all.run_catalog(AmdHouseScraper, "amd")
+
+    assert str(exc.value).startswith("amd: cpu: ")
+    partial = exc.value.partial_results
+    assert len(partial) == len(AmdHouseScraper.CATEGORIES) - 1
+    by_url = {p["url"]: p["category"] for p in partial}
+    assert by_url["https://amdhouse.pk/product/itx-psu/"] == "psu"
+    assert "https://amdhouse.pk/product/processors/" not in by_url
+
+
+def test_every_json_source_is_wired_to_run_catalog():
+    import run_all
+
+    for key in ("zah", "amd", "rbt", "tech", "pakbyte", "redtech", "techmatched"):
+        label, fn = run_all.SCRAPERS[key]
+        assert fn.func is run_all.run_catalog and fn.args[1] == key
+        assert fn.args[0].SOURCE == label
 
 
 def test_incomplete_run_is_not_ok_and_does_not_sweep(tmp_path, monkeypatch):
@@ -231,52 +264,6 @@ def test_prebuilt_incomplete_run_upserts_partial_results_and_does_not_sweep(tmp_
     )
     assert health["stale"] is True, "an incomplete run must mark the source stale, not clean"
     assert "ScrapeIncomplete" in health["last_error"]
-
-
-# ----------------------------------------------------------------------
-# H9 — amdhouse's probe: a transient failure is not "category doesn't exist"
-# ----------------------------------------------------------------------
-
-def test_amdhouse_probe_network_error_is_not_read_as_category_missing(monkeypatch):
-    from scrapers.amdhouse import scraper as amd_mod
-
-    monkeypatch.setattr(amd_mod, "CATEGORIES", [
-        ("graphics-cards", "gpu"),
-        ("retired-category", "gpu"),
-        ("processors", "cpu"),
-    ])
-    monkeypatch.setattr(amd_mod.time, "sleep", lambda *_a, **_k: None)
-
-    def fake_fetch(self, url):
-        if "retired-category" in url:
-            raise urllib.error.HTTPError(url=url, code=404, msg="Not Found", hdrs=None, fp=None)
-        if "processors" in url:
-            raise OSError("connection reset")
-        return "<div class='woocommerce-loop-product__title'></div>"
-
-    monkeypatch.setattr(amd_mod.AmdHouseScraper, "fetch", fake_fetch)
-
-    with pytest.raises(ScrapeIncomplete) as exc:
-        amd_mod._find_valid_categories()
-
-    assert "processors" in str(exc.value)
-    assert "retired-category" not in str(exc.value), "a genuine 404 must not be reported as a probe error"
-    assert [cat for _url, cat in exc.value.valid_categories] == ["gpu"]
-
-
-def test_amdhouse_probe_all_404s_returns_cleanly(monkeypatch):
-    """The original, correct case: every slug 404s -> empty list, no exception."""
-    from scrapers.amdhouse import scraper as amd_mod
-
-    monkeypatch.setattr(amd_mod, "CATEGORIES", [("retired-a", "gpu"), ("retired-b", "cpu")])
-    monkeypatch.setattr(amd_mod.time, "sleep", lambda *_a, **_k: None)
-
-    def fake_fetch(self, url):
-        raise urllib.error.HTTPError(url=url, code=404, msg="Not Found", hdrs=None, fp=None)
-
-    monkeypatch.setattr(amd_mod.AmdHouseScraper, "fetch", fake_fetch)
-
-    assert amd_mod._find_valid_categories() == []
 
 
 # ----------------------------------------------------------------------

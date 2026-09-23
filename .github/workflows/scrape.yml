@@ -26,6 +26,11 @@ on:
         type: boolean
         required: false
         default: false
+      weekly:
+        description: "Act as the weekly run: open a new trend date and rebuild trends (only to stand in for a failed Friday run)"
+        type: boolean
+        required: false
+        default: false
 
 # Never let two scrape runs overlap — fetch() pacing assumes one process per
 # host. A manual run won't cancel an in-progress scheduled one; it queues.
@@ -56,6 +61,10 @@ jobs:
       TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
       TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
       SOURCES: ${{ github.event.inputs.sources }}
+      # Only the Friday schedule (or a dispatch with weekly=true) opens a new
+      # trend date and rebuilds trends. Any other run is pinned to the current
+      # trend date by run_all.py, so a midweek run can't add a stray point.
+      WEEKLY: ${{ (github.event_name == 'schedule' || github.event.inputs.weekly == 'true') && '--weekly' || '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -75,7 +84,7 @@ jobs:
       - name: Scrape parts
         id: scrape
         continue-on-error: true
-        run: python run_all.py $SOURCES --strict
+        run: python run_all.py $SOURCES --strict $WEEKLY
 
       - name: Mark job failed if parts scrape failed
         if: steps.scrape.outcome == 'failure'
@@ -120,34 +129,6 @@ jobs:
         run: |
           echo "Prebuilts scrape exited non-zero — see the step log above."
           exit 1
-
-  # ── Stock cross-check ────────────────────────────────────────────────────
-  # Compares the freshly written rows against each retailer's own JSON feed
-  # (Woo Store API, Shopify products.json) and fails on parser drift: sold-out
-  # stock still listed, or the wrong price stored. Neither shows up as an
-  # anomaly in the scrape itself (pakbyte listed 646 sold-out items for months).
-  # Read-only. Runs after prebuilts so no two jobs hit one host at once, and
-  # only after a clean parts run: a failed source isn't swept, so its rows are
-  # stale by design (the script also skips any source whose last run failed).
-  crosscheck:
-    needs: [parts, prebuilts]
-    if: ${{ always() && needs.parts.result == 'success' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    env:
-      TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
-      TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Cross-check stock and prices
-        run: python scripts/crosscheck_stock.py --strict
 
   # ── Notify ───────────────────────────────────────────────────────────────
   # Runs after BOTH scrape jobs, whatever their outcome (always()), and posts a
