@@ -3,7 +3,7 @@
 Saved retailer pages, used by the parser tests. Never fetched at test time.
 
 Naming: `<source>_<category>_<what>.html`, e.g. `czone_gpu_page1.html`,
-`amdhouse_gpu_discounted.html`, `techmatched_prebuilt_list.html`.
+`redtech_prebuilt_instock.html`. JSON API fixtures live in `../json/`.
 
 To add or refresh one:
 

@@ -1,29 +1,34 @@
 """
-pakbyte.pk scraper — Shopify storefront
+pakbyte.pk scraper — Shopify products.json
 
 How it works:
-  - SSR HTML; Shopify collection pages at /collections/<slug>?page=N (page 1 omits).
-  - Product blocks wrapped in class="product-item product-item--vertical".
-  - Title: <a class="product-item__title text--strong link">...</a>
-  - URL:   /products/<slug>  (relative; needs BASE prefix)
-  - Price: <span class="price">...Rs.234,990.00</span>  (Shopify renders Rs.X,XXX.XX)
-  - Thumbnail: <img class="product-item__primary-image" src="//cdn.shopify.com/.../?width=100">
-      Protocol-relative; bump width via param strip.
-  - Total count: "X products" inside .collection__products-count-total.
+  - GET /collections/<slug>/products.json?limit=250&page=N, until a page
+    returns fewer than 250 products.
+  - In stock = any variant `available`. Price = the cheapest available
+    variant (the listing showed the cheapest variant too).
+  - URL is /products/<handle>, as the listing linked it.
+  - Thumbnail is images[0].src, moved from cdn.shopify.com to the store's own
+    /cdn/shop/ path, which is what the listing served (same file).
+  - robots.txt disallows /collections/*sort_by*. Never add sort_by.
 
 Usage:
-    python -m scrapers.pakbyte.scraper
+    python -m scrapers.pakbyte.scraper          # GPU only (smoke test, no DB write)
+    python -m scrapers.pakbyte.scraper --all    # all categories
 """
 
-import html as _html
+import json
 import re
+import urllib.parse
+from typing import Optional
 
-from scrapers.listing_scraper import ListingScraper, run_listing_cli
+from scrapers.base_scraper import BaseScraper
+from scrapers.exceptions import ScrapeIncomplete
+from scrapers.listing_scraper import run_listing_cli
 
 SOURCE = "pakbyte.pk"
 BASE = "https://www.pakbyte.pk"
 
-# (category_slug_on_site, our_category_key)
+# (collection handle, our_category_key)
 CATEGORIES: list[tuple[str, str]] = [
     ("processors",     "cpu"),
     ("graphic-cards",  "gpu"),
@@ -37,159 +42,82 @@ CATEGORIES: list[tuple[str, str]] = [
     ("monitors",       "monitor"),
 ]
 
-
-_INVENTORY_RE = re.compile(r'class="product-item__inventory[^"]*"[^>]*>\s*([^<]*)')
-
-
-def _is_sold_out(block: str) -> bool:
-    """The theme renders a sold-out card as a bare `inventory` span reading
-    "Sold out" (in stock is `inventory inventory--high`), so the text is the
-    signal. The class markers are kept in case the theme adds them back."""
-    if "inventory--out" in block or "sold-out" in block:
-        return True
-    m = _INVENTORY_RE.search(block)
-    return bool(m and m.group(1).strip().lower().startswith("sold out"))
+# https://cdn.shopify.com/s/files/1/0589/8049/9523/files/x.jpg?v=1
+#   -> https://www.pakbyte.pk/cdn/shop/files/x.jpg?v=1
+_SHOPIFY_CDN_RE = re.compile(r'^https?://cdn\.shopify\.com/s/files/(?:\d+/)+')
 
 
-class PakByteScraper(ListingScraper):
-    """
-    url should be the base collection URL, e.g.:
-    https://www.pakbyte.pk/collections/graphic-cards
-    Pagination appends ?page=N.
-    """
+class PakByteScraper(BaseScraper):
 
     SOURCE = SOURCE
+    CATEGORIES = CATEGORIES
+    PER_PAGE = 250
+    MAX_PAGES = 200
 
-    def extract_total(self, html: str) -> int | None:
-        # PakByte renders "277 products" inside .collection__products-count-total
-        m = re.search(
-            r'collection__products-count-total[^>]*>\s*([\d,]+)\s+products',
-            html,
-        )
-        if m:
-            return int(m.group(1).replace(",", ""))
-        # Fallback: any "N products" string
-        m2 = re.search(r'of\s+([\d,]+)\s+products', html)
-        if m2:
-            return int(m2.group(1).replace(",", ""))
-        return None
+    def api_url(self, slug: str, page: int) -> str:
+        query = urllib.parse.urlencode({"limit": self.PER_PAGE, "page": page})
+        return f"{BASE}/collections/{slug}/products.json?{query}"
 
-    def card_blocks(self, html: str) -> list[str]:
-        return re.split(r'class="product-item product-item--vertical', html)[1:]
-
-    def parse_card(self, block: str) -> dict | None:
-        if _is_sold_out(block):
+    def parse_item(self, item: dict) -> Optional[dict]:
+        """One products.json product -> a product dict, or None to skip it."""
+        available = [v for v in item.get("variants") or [] if v.get("available")]
+        if not available:
             return None
-
-        # URL — first /products/<slug> href in block
-        url_m = re.search(r'href="(/products/[^"?#]+)"', block)
-        if not url_m:
+        try:
+            price = int(min(float(v["price"]) for v in available))
+        except (KeyError, TypeError, ValueError):
             return None
-        slug = url_m.group(1)
-        url = BASE + slug
-
-        # Name from .product-item__title anchor text
-        name_m = re.search(
-            r'class="product-item__title[^"]*"[^>]*>([^<]+)</a>',
-            block,
-        )
-        if not name_m:
+        if price <= 0:
             return None
-        name = _html.unescape(name_m.group(1)).strip()
-
-        # Price — Shopify renders e.g. "Rs.234,990.00" inside .price span
-        price_pkr = self._parse_price_block(block)
-
-        # Thumbnail — primary image src (protocol-relative, possibly ?width=100)
-        thumbnail = self._parse_thumbnail(block)
-
+        handle = item.get("handle") or ""
+        name = (item.get("title") or "").strip()
+        if not handle or not name:
+            return None
+        images = item.get("images") or []
+        src = images[0].get("src") if images else None
         return {
             "name": name,
-            "price_pkr": price_pkr,
-            "url": url,
-            "category": "",
+            "price_pkr": price,
+            "url": f"{BASE}/products/{handle}",
+            "category": "",         # filled in by the run_all wrapper
             "source": SOURCE,
             "scraped_at": self.now(),
-            "thumbnail_url": thumbnail,
+            "thumbnail_url": _SHOPIFY_CDN_RE.sub(f"{BASE}/cdn/shop/", src) if src else None,
         }
 
-    @staticmethod
-    def _parse_price_block(block: str) -> int | None:
-        """
-        Shopify price markup (PakByte theme):
-          <span class="price">
-            <span class="visually-hidden">Sale price</span>Rs.234,990.00
-          </span>
-        Sale layout also exposes <s class="price--original"> for the strikethrough.
-        Strategy: locate the .price span, strip any nested span tags, then grab
-        the Rs.XXX,XXX number (dropping trailing .NN cents).
-        """
-        # Match the .price block as a whole including any inner spans.
-        # Greedy on the body, anchor on </span> at the END of the price element.
-        m = re.search(
-            r'<span[^>]*class="price[^"]*"[^>]*>(.*?)</span>(?:\s*</div>|\s*<)',
-            block, re.DOTALL,
-        )
-        if not m:
-            return None
-        inner = m.group(1)
-        # Drop any nested spans (e.g. visually-hidden "Sale price" label)
-        inner = re.sub(r'<span[^>]*>.*?</span>', '', inner, flags=re.DOTALL)
-        # Strip tags + entities, keep visible text
-        inner = re.sub(r'<[^>]+>', '', inner)
-        inner = _html.unescape(inner)
-        # Match "Rs.234,990.00", "Rs 234,990", "PKR 1,20,000" — digits with commas
-        price_m = re.search(r'([\d][\d,]*?)(?:\.\d+)?(?:\s|$)', inner)
-        if not price_m:
-            # Fallback: any digit run
-            price_m = re.search(r'([\d,]+)', inner)
-            if not price_m:
-                return None
-        digits = price_m.group(1).replace(",", "")
-        if not digits:
-            return None
-        return int(digits)
+    def scrape(self, slug: str) -> list[dict]:
+        """Same failure contract as WooStoreScraper.scrape()."""
+        products: list[dict] = []
+        seen: set[str] = set()
+        for page in range(1, self.MAX_PAGES + 1):
+            try:
+                items = json.loads(self.fetch(self.api_url(slug, page)))["products"]
+                if not isinstance(items, list):
+                    raise ValueError(f"expected a list of products, got {type(items).__name__}")
+            except ScrapeIncomplete as exc:
+                exc.partial_results = products
+                raise
+            except Exception as exc:
+                err = ScrapeIncomplete(f"{SOURCE}: {slug} page {page} failed: {type(exc).__name__}: {exc}")
+                err.partial_results = products
+                raise err from exc
 
-    @staticmethod
-    def _parse_thumbnail(block: str) -> str | None:
-        """
-        Primary image: <img ... class="product-item__primary-image" src="//cdn.shopify.com/...?width=100">
-        Returns protocol-prefixed URL with width param stripped (request larger image).
-        """
-        # Prefer the explicit primary-image; fall back to first <img> with shopify CDN.
-        m = re.search(
-            r'<img[^>]+src="([^"]+)"[^>]+class="product-item__primary-image"',
-            block,
-        )
-        if not m:
-            # Alternative attribute order: class first, then src
-            m = re.search(
-                r'<img[^>]*class="product-item__primary-image"[^>]+src="([^"]+)"',
-                block,
-            )
-        if not m:
-            return None
-        src = _html.unescape(m.group(1))
-        # Skip placeholders
-        if "placeholder" in src.lower() or "no-image" in src.lower():
-            return None
-        # Protocol-relative to absolute
-        if src.startswith("//"):
-            src = "https:" + src
-        # Drop shopify width=100 param — too small for site UI
-        src = re.sub(r'([?&])width=\d+(&|$)', r'\1', src)
-        # Clean any trailing ? or stray &
-        src = src.rstrip("?&")
-        return src
+            for item in items:
+                row = self.parse_item(item)
+                if row is None or row["url"] in seen:
+                    continue
+                seen.add(row["url"])
+                products.append(row)
+
+            if len(items) < self.PER_PAGE:
+                return products
+
+        raise ScrapeIncomplete(f"{SOURCE}: {slug} hit MAX_PAGES={self.MAX_PAGES} without finishing")
 
 
 def main():
     """Standalone smoke test — does NOT write to DB."""
-    run_listing_cli(
-        PakByteScraper, CATEGORIES,
-        lambda slug: f"{BASE}/collections/{slug}",
-        write_db=False, default_filter="gpu",
-    )
+    run_listing_cli(PakByteScraper, CATEGORIES, lambda slug: slug, write_db=False, default_filter="gpu")
 
 
 if __name__ == "__main__":

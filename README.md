@@ -34,21 +34,21 @@ and serves a REST API consumed by the Next.js frontend.
 
 | Site | Notes |
 |---|---|
-| pakbyte.pk | Shopify storefront — `/collections/<slug>` pagination |
+| pakbyte.pk | Shopify — `products.json` per collection |
 | junaidtech.pk | webx.pk Nuxt SSR — Bearer token from `__NUXT_DATA__`, POST JSON API, server-side stock filter |
-| zahcomputers.pk | WooCommerce / Woodmart theme |
-| techarc.pk | WooCommerce / Woodmart — flat permalinks (no `/product-category/`) |
+| zahcomputers.pk | WooCommerce — Store API (`/wp-json/wc/store/v1/products`) |
+| techarc.pk | WooCommerce — Store API |
 | czone.com.pk | ASP.NET server-rendered listings, 10 categories |
-| amdhouse.pk | WooCommerce / Flatsome |
-| techmatched.pk | WooCommerce / Woostify |
-| rbtechngames.com | WooCommerce / Flatsome |
-| redtech.pk | WooCommerce / Woodmart |
+| amdhouse.pk | WooCommerce — Store API |
+| techmatched.pk | WooCommerce — Store API |
+| rbtechngames.com | WooCommerce — Store API |
+| redtech.pk | WooCommerce — Store API |
 
 Prebuilts scraped from: zestrogaming.com, redtech.pk, techmatched.pk
 
 Every scraper shares one `fetch()` (`scrapers/base_scraper.py`): an honest named bot User-Agent,
-jittered per-host pacing, retry by failure kind, and a per-host circuit breaker. Listing
-pagination is shared too (`scrapers/listing_scraper.py`).
+jittered per-host pacing, retry by failure kind, and a per-host circuit breaker. The six
+WooCommerce stores share one Store API scraper (`scrapers/woo/base.py`).
 
 ## Database Design
 
@@ -136,10 +136,11 @@ db/
   database.py               # all DB access; picks sqlite3 vs libsql from TURSO_DATABASE_URL
 scrapers/               # 9 part retailers
   base_scraper.py       # BaseScraper: honest bot UA, fetch() retry/pacing, HostBlocked breaker
-  listing_scraper.py     # ListingScraper: shared pagination template, used by 8 of 9 part scrapers
+  listing_scraper.py     # ListingScraper: HTML pagination template (czone)
   spec_extractor.py       # regex spec extraction from product names
   health.py                 # post-scrape anomaly detection for --strict + self-heal
-  czone/ zahcomputers/ junaidtech/ amdhouse/ rbtechngames/ pakbyte/ techarc/ redtech/ techmatched/
+  woo/                    # WooStoreScraper (base.py) + amd, rbt, redtech, techarc, techmatched (stores.py)
+  czone/ zah/ junaidtech/ pakbyte/
   prebuilts/              # zestro, redtech, techmatched prebuilt scrapers
 scripts/
   check_db_integrity.py  # operational integrity check, safe against production

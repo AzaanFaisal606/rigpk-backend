@@ -9,7 +9,7 @@ import re
 
 import pytest
 
-from scrapers.czone.all_scraper import CzoneAllScraper
+from scrapers.czone.scraper import CzoneAllScraper
 from scrapers.exceptions import ScrapeIncomplete
 
 
@@ -67,7 +67,7 @@ def test_a_card_missing_a_price_does_not_shift_its_neighbours(load_fixture):
 
 def test_persistent_fetch_failure_terminates(monkeypatch):
     """An unreachable host must end the run, not spin until the job timeout."""
-    import scrapers.czone.all_scraper as mod
+    import scrapers.czone.scraper as mod
 
     monkeypatch.setattr(mod.time, "sleep", lambda *_a, **_k: None)
     s = CzoneAllScraper()
@@ -89,7 +89,7 @@ def test_page_failure_after_success_preserves_earlier_pages(monkeypatch):
     discard it (the earlier bug: only the outer run_czone() wrapping in
     run_all.py preserved data, this internal raise site didn't).
     """
-    import scrapers.czone.all_scraper as mod
+    import scrapers.czone.scraper as mod
 
     monkeypatch.setattr(mod.time, "sleep", lambda *_a, **_k: None)
     s = CzoneAllScraper()
@@ -127,7 +127,7 @@ def test_identical_page_every_offset_hits_the_page_cap(monkeypatch, load_fixture
     each time so `new` never comes back empty), the loop must still stop at
     MAX_PAGES rather than spin forever.
     """
-    import scrapers.czone.all_scraper as mod
+    import scrapers.czone.scraper as mod
 
     monkeypatch.setattr(mod.time, "sleep", lambda *_a, **_k: None)
     html = load_fixture("czone_gpu_page1.html")
@@ -180,7 +180,7 @@ def test_a_404_past_page_one_ends_the_listing_cleanly(monkeypatch):
     techmatched's SSD listing is one page of 16 products, so pages 2/3/4 all
     404 and tripped MAX_CONSECUTIVE_FAILURES on every single run.
     """
-    import scrapers.czone.all_scraper as mod
+    import scrapers.czone.scraper as mod
 
     monkeypatch.setattr(mod.time, "sleep", lambda *_a, **_k: None)
     s = CzoneAllScraper()
@@ -213,7 +213,7 @@ def test_a_404_on_page_one_is_still_a_failure(monkeypatch):
     would scrape zero products and report success, which then lets the
     freshness sweep delist everything that category holds.
     """
-    import scrapers.czone.all_scraper as mod
+    import scrapers.czone.scraper as mod
 
     monkeypatch.setattr(mod.time, "sleep", lambda *_a, **_k: None)
     s = CzoneAllScraper()
