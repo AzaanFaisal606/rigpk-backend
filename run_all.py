@@ -33,7 +33,9 @@ from scrapers.czone.scraper import CzoneAllScraper, CATEGORIES as CZONE_CATS, BA
 from scrapers.junaidtech.scraper import JunaidTechScraper, CATEGORIES as JT_CATS, BASE as JT_BASE
 from scrapers.pakbyte.scraper import PakByteScraper
 from scrapers.woo.stores import AmdHouseScraper, RbtScraper, RedTechScraper, TechArcScraper, TechMatchedScraper
-from scrapers.zah.scraper import ZahScraper
+from scrapers.zah.html.scraper import ZahHtmlScraper, CATEGORIES as ZAH_CATS, category_url as zah_category_url
+# Unused while zah's Store API 403s us; to switch back, point SCRAPERS["zah"] at partial(run_catalog, ZahScraper, "zah").
+from scrapers.zah.scraper import ZahScraper  # noqa: F401
 
 # Absolute, not "data/ppc.db": a cron job or CI runner invoking this from
 # another directory would otherwise silently create and populate an empty DB
@@ -81,6 +83,38 @@ def run_czone() -> list[dict]:
     return results
 
 
+def run_zah_html() -> list[dict]:
+    """zah's HTML listing, the default zah source while its Store API is blocked."""
+    scraper = ZahHtmlScraper()
+    results = []
+    incomplete: list[str] = []
+    for slug, category in ZAH_CATS:
+        print(f"\n  [zah/{category.upper()}]")
+        try:
+            products = scraper.scrape(zah_category_url(slug))
+        except ScrapeIncomplete as e:
+            # Same contract as run_czone(): keep going, keep the partial
+            # pages, raise once at the end so the sweep is skipped.
+            print(f"    INCOMPLETE: {e}")
+            incomplete.append(f"{category}: {e}")
+            partial = getattr(e, "partial_results", None) or []
+            for p in partial:
+                p["category"] = category
+            results.extend(partial)
+            continue
+        except Exception as e:
+            print(f"    ERROR: {e}")
+            continue
+        for p in products:
+            p["category"] = category
+        results.extend(products)
+    if incomplete:
+        exc = ScrapeIncomplete(f"zah: {'; '.join(incomplete)}")
+        exc.partial_results = results
+        raise exc
+    return results
+
+
 def run_junaid() -> list[dict]:
     scraper = JunaidTechScraper()
     results = []
@@ -107,9 +141,10 @@ def run_junaid() -> list[dict]:
 
 def run_catalog(scraper_cls, key: str) -> list[dict]:
     """
-    One wrapper for every JSON-catalogue source (the 6 WooCommerce stores and
-    pakbyte): scraper_cls.CATEGORIES is [(slug, category)], and
-    scraper.scrape(slug) returns that category's rows.
+    One wrapper for every JSON-catalogue source (the WooCommerce stores and
+    pakbyte; zah's Store API is parked, see run_zah_html):
+    scraper_cls.CATEGORIES is [(slug, category)], and scraper.scrape(slug)
+    returns that category's rows.
     """
     scraper = scraper_cls()
     results = []
@@ -137,7 +172,7 @@ def run_catalog(scraper_cls, key: str) -> list[dict]:
 
 SCRAPERS = {
     "czone":       ("czone.com.pk",       run_czone),
-    "zah":         ("zahcomputers.pk",    partial(run_catalog, ZahScraper, "zah")),
+    "zah":         ("zahcomputers.pk",    run_zah_html),
     "amd":         ("amdhouse.pk",        partial(run_catalog, AmdHouseScraper, "amd")),
     "rbt":         ("rbtechngames.com",   partial(run_catalog, RbtScraper, "rbt")),
     "junaid":      ("junaidtech.pk",      run_junaid),

@@ -147,10 +147,46 @@ def test_run_catalog_keeps_other_categories_and_flags_incomplete(monkeypatch):
 def test_every_json_source_is_wired_to_run_catalog():
     import run_all
 
-    for key in ("zah", "amd", "rbt", "tech", "pakbyte", "redtech", "techmatched"):
+    for key in ("amd", "rbt", "tech", "pakbyte", "redtech", "techmatched"):
         label, fn = run_all.SCRAPERS[key]
         assert fn.func is run_all.run_catalog and fn.args[1] == key
         assert fn.args[0].SOURCE == label
+
+
+def test_zah_is_wired_to_the_html_scraper():
+    """zah's Store API 403s us, so the HTML listing is the default zah source."""
+    import run_all
+    from scrapers.zah.html.scraper import ZahHtmlScraper
+
+    label, fn = run_all.SCRAPERS["zah"]
+    assert fn is run_all.run_zah_html
+    assert ZahHtmlScraper.SOURCE == label
+
+
+def test_run_zah_html_keeps_partial_results_and_flags_incomplete(monkeypatch):
+    """Same contract as run_czone: other categories and the failed one's partial pages survive."""
+    import run_all
+
+    def fake_scrape(self, url):
+        row = {"name": f"Product for {url}", "price_pkr": 10000, "url": url,
+               "category": "", "source": "zahcomputers.pk", "scraped_at": "t",
+               "thumbnail_url": None}
+        if "/graphics-cards/" in url:
+            exc = ScrapeIncomplete("zahcomputers.pk: 3 consecutive page failures")
+            exc.partial_results = [row]
+            raise exc
+        return [row]
+
+    monkeypatch.setattr(run_all.ZahHtmlScraper, "scrape", fake_scrape)
+
+    with pytest.raises(ScrapeIncomplete) as exc:
+        run_all.run_zah_html()
+
+    assert str(exc.value).startswith("zah: gpu: ")
+    partial = exc.value.partial_results
+    assert len(partial) == len(run_all.ZAH_CATS)
+    gpu = [p for p in partial if "/graphics-cards/" in p["url"]]
+    assert len(gpu) == 1 and gpu[0]["category"] == "gpu"
 
 
 def test_incomplete_run_is_not_ok_and_does_not_sweep(tmp_path, monkeypatch):

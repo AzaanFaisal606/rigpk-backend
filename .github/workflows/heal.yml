@@ -153,8 +153,9 @@ jobs:
             3. Only for a real scraper-side break (a source INCOMPLETE or crashed with no
                block, a category emptied, a source that returned far fewer products
                than before) read the relevant part of the full log and locate the cause
-               in the scrapers/ code. czone, junaidtech,
-               pakbyte and zah each have scrapers/<name>/scraper.py; amd, rbt, redtech,
+               in the scrapers/ code. czone, junaidtech and
+               pakbyte each have scrapers/<name>/scraper.py; zah runs on its HTML
+               listing, scrapers/zah/html/scraper.py; amd, rbt, redtech,
                tech and techmatched are classes in scrapers/woo/stores.py on the shared
                scrapers/woo/base.py. Real code causes look like: a retailer changed its
                HTML/JSON layout, a category slug/URL changed, or a selector/regex no
