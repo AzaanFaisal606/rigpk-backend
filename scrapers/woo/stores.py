@@ -119,17 +119,21 @@ class TechMatchedScraper(WooStoreScraper):
     SOURCE = "techmatched.pk"
     BASE = "https://techmatched.pk"
     THUMB_KEY = "src"       # the listing showed the full-size image
+    # techmatched renamed most slugs to SEO forms by Nov 2026; the old ones
+    # return [] (no error), which silently emptied five categories. NVMe is a
+    # sibling of the SATA slug under "storage-in-pakistan", not a child of it.
     CATEGORIES = [
-        ("processors",                   "cpu"),
-        ("graphics-card-in-pakistan",    "gpu"),
-        ("motherboards",                 "motherboard"),
-        ("rams",                         "ram"),
-        ("find-ssd-prices-in-pakistan",  "ssd"),
-        ("hard-drive",                   "hdd"),
-        ("buy-power-supply-in-pakistan", "psu"),
-        ("computer-case",                "case"),
-        ("cpu-coolers",                  "cooling"),
-        ("gaming-monitors",              "monitor"),
+        ("processors-prices-in-pakistan",  "cpu"),
+        ("graphics-card-in-pakistan",      "gpu"),
+        ("motherboard-prices-in-pakistan", "motherboard"),
+        ("rams-prices-in-pakistan",        "ram"),
+        ("find-ssd-prices-in-pakistan",    "ssd"),
+        ("nvme-m-2-ssd",                   "ssd"),
+        ("hard-drive",                     "hdd"),
+        ("buy-power-supply-in-pakistan",   "psu"),
+        ("computer-case",                  "case"),
+        ("cpu-coolers-in-pakistan",        "cooling"),
+        ("gaming-monitors-pakistan",       "monitor"),
     ]
 
     def clean_name(self, name: str) -> str:
