@@ -141,3 +141,11 @@ def test_persistent_fetch_failure_terminates():
     s.fetch = _boom
     with pytest.raises(OSError):
         s.scrape(URL)
+
+
+def test_row_carries_details_raw(load_details_fixture):
+    item = load_details_fixture("czone_gpu.json")
+    row = CzoneAllScraper().parse_item(item)
+    assert row["details_raw"]["kind"] == "webx"
+    assert row["details_raw"]["desc"] == item["productDesc"]
+    assert row["details_raw"]["highlights"] == item["productHighlights"]

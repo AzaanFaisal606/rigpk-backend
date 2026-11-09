@@ -27,6 +27,7 @@ import json
 import time  # kept for tests that monkeypatch this module's `time.sleep`
 
 from scrapers.base_scraper import BaseScraper
+from scrapers.details.parse import webx_raw
 from scrapers.exceptions import ScrapeIncomplete
 from scrapers.junaidtech.scraper import JunaidTechScraper
 
@@ -155,6 +156,7 @@ class CzoneAllScraper(BaseScraper):
             "source": SOURCE,
             "scraped_at": self.now(),
             "thumbnail_url": item.get("thumbnailFile") or item.get("imageFile") or None,
+            "details_raw": webx_raw(item, SOURCE),
         }
 
     @staticmethod

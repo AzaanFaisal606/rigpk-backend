@@ -1,0 +1,60 @@
+{
+ "productID": "946876",
+ "productName": "Asus GeForce GT 730 2GB Graphics Card",
+ "productDesc": "GT 730 is the fantastic graphics card from ASUS. Engineered with a highly-efficient 0dB thermal design, it dissipates heat in complete silence — making GT 730 the perfect choice for your slimline home-theater PC (HTPC) build.\n• Silent passive cooling means true 0dB\n• Auto-Extreme Technology\n• GPU Tweak II provides intuitive performance tweaking\n• With I/O port brackets",
+ "productHighlights": "",
+ "productURL": "/product/asus-geforce-gt-730-2gb-graphics-card",
+ "affiliateURL": "",
+ "imageFile": "https://static.store-cdn.com/files/19643/Images/white-81uxgyoexel.-ac-sl1500--19643-0-010722021122838.jpg",
+ "thumbnailFile": "https://static.store-cdn.com/files/19643/Images/Thumbnails-Large/white-81uxgyoexel.-ac-sl1500--19643-0-010722021122838.jpg",
+ "productImages": [
+  {
+   "imageFile": "https://static.store-cdn.com/files/19643/Images/white-81uxgyoexel.-ac-sl1500--19643-0-010722021122838.jpg",
+   "thumbnailFile": "https://static.store-cdn.com/files/19643/Images/Thumbnails-Large/white-81uxgyoexel.-ac-sl1500--19643-0-010722021122838.jpg",
+   "mediaType": "image"
+  },
+  {
+   "imageFile": "https://static.store-cdn.com/files/19643/Images/71nxcjxbdql.-ac-sl1500--19643-0-010722021121417.jpg",
+   "thumbnailFile": "https://static.store-cdn.com/files/19643/Images/Thumbnails-Large/71nxcjxbdql.-ac-sl1500--19643-0-010722021121417.jpg",
+   "mediaType": "image"
+  }
+ ],
+ "productStock": {
+  "stockStatusID": "1",
+  "stockStatus": "instock",
+  "availability": "In Stock",
+  "availableQuantity": null,
+  "soldQuantity": null,
+  "inventoryTracking": "0",
+  "isNoStockSale": "0"
+ },
+ "productPrice": {
+  "price": "14999.00",
+  "listPrice": "0.00",
+  "discount": "",
+  "isHidePrice": "0",
+  "hidePriceMessage": "",
+  "isDeal": "0",
+  "dealStartDate": "",
+  "dealEndDate": ""
+ },
+ "productRating": {
+  "isRating": "1",
+  "rating": "0.0",
+  "ratingCount": "0",
+  "reviewCount": null,
+  "recommendedCount": null
+ },
+ "productFields": {
+  "sku": "GT730-SL-2GD5-BRK",
+  "categoryName": "Graphics Cards (GPU)",
+  "vendorName": "Asus",
+  "warranty": "1 - Year Local",
+  "manufacturerURL": "https://www.asus.com/Motherboards-Components/Graphics-Cards/ASUS/GT730-SL-2GD5-BRK/",
+  "customFields": []
+ },
+ "isVariant": "0",
+ "isRating": "1",
+ "newTag": "",
+ "discountTag": ""
+}

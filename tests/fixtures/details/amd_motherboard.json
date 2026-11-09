@@ -1,0 +1,111 @@
+{
+ "id": 15249,
+ "name": "MSI B850 GAMING PLUS WIFI6E new in 10 months warranty",
+ "slug": "msi-b850-gaming-plus-wifi6e-new-in-10-months-warranty",
+ "parent": 0,
+ "type": "simple",
+ "variation": "",
+ "permalink": "https://amdhouse.pk/product/msi-b850-gaming-plus-wifi6e-new-in-10-months-warranty/",
+ "sku": "",
+ "short_description": "<p class=\"msiText\">The B850 GAMING PLUS WIFI6E is crafted to offer extensive connectivity, versatile tools, and a premium Wi-Fi solution for gamers seeking a comprehensive experience. Featuring the advanced Wi-Fi 6E, 2.5G LAN, PCIe 5.0 M.2 solution, and exclusive EZ DIY features, it is ready for 24/7 non-stop gaming optimized for AMD Ryzen™ 9000 series processors.</p>",
+ "description": "<h1 class=\"productNav__mainNav__title\">B850 GAMING PLUS WIFI6E</h1>\n<div class=\"productNav__mainNav__operation\">\n<table class=\"table table-hover table-configurations-noicons table-configurations\" data-cols=\"2\">\n<tbody>\n<tr>\n<th scope=\"row\"><span class=\"h2\">Chipset</span></th>\n<td>AMD B850</td>\n</tr>\n<tr>\n<th scope=\"row\"><span class=\"h2\">CPU</span></th>\n<td>Supports AMD Ryzen™ 9000/ 8000/ 7000 Series Desktop Processors<br />\nSocket AM5</td>\n</tr>\n<tr>\n<th scope=\"row\"><span class=\"h2\">Memory</span></th>\n<td>4x DDR5 UDIMM, Maximum Memory Capacity 256GB<br />\nMemory Support DDR5 8200 &#8211; 5600 (OC) MT/s / 5600 &#8211; 4800 (JEDEC) MT/s<br />\nRyzen™ 9000 Series Processors max. overclocking frequency:<br />\n• 1DPC 1R Max speed up to 8200+ MT/s<br />\n• 1DPC 2R Max speed up to 6400+ MT/s<br />\n• 2DPC 1R Max speed up to 6400+ MT/s<br />\n• 2DPC 2R Max speed up to 6000+ MT/s</p>\n<p>Supports AMD POR Speed and JEDEC Speed<br />\nSupports Memory Overclocking and AMD EXPO<sup>TM</sup><br />\nSupports Dual-Channel mode<br />\nSupports Non-ECC, Un-buffered memory<br />\nSupports CUDIMM, Clock Driver bypass mode only*</p>\n<p><i>* CUDIMM support and POR boot frequency may vary by CPU series, with manual overclocking available after boot. Certain CPUs may fail to boot, but future BIOS updates will improve compatibility.</i><br />\n<i>• Memory compatibility and supported speeds can vary depending on the CPU and memory configuration. For detailed information, please refer to the Memory Compatibility List available on the product’s Support page or visit https://www.msi.com/support/.</i></td>\n</tr>\n<tr>\n<th scope=\"row\"><span class=\"h2\">Onboard Graphics</span></th>\n<td>1x HDMI™<br />\nSupport HDMI™ 2.1, maximum resolution of 4K 60Hz*<br />\n1x DisplayPort<br />\nSupport DisplayPort 1.4, maximum resolution of 4K 60Hz*</p>\n<p><i>*Available only on processors featuring integrated graphics. Graphics specifications may vary depending on the CPU installed.</i></td>\n</tr>\n<tr>\n<th scope=\"row\"><span class=\"h2\">Slot</span></th>\n<td>2x PCI-E x16 slot<br />\n1x PCI-E x1 slot<br />\nPCI_E1 Gen PCIe 4.0 supports up to x16 (From CPU)<br />\nPCI_E2 Gen PCIe 3.0 supports up to x1 (From Chipset)<br />\nPCI_E3 Gen PCIe 4.0 supports up to x4 (From Chipset)</p>\n<p>PCI_E1 slot<br />\n• Supports PCIe 4.0 x16 (For Ryzen™ 9000/ 7000 Series processors)<br />\n• Supports PCIe 4.0 x8 (For Ryzen™ 8700/ 8600/ 8400 Series processors)<br />\n• Supports PCIe 4.0 x4 (For Ryzen™ 8500/ 8300 Series processor)</td>\n</tr>\n<tr>\n<th scope=\"row\"><span class=\"h2\">Audio</span></th>\n<td>Realtek<sup>®</sup> ALC897<br />\n7.1-Channel High Definition Audio</td>\n</tr>\n<tr>\n<th scope=\"row\"><span class=\"h2\">Storage</span></th>\n<td>2x M.2<br />\nM.2_1 Source (From CPU) supports up to PCIe 5.0 x4 , supports 22110/2280 devices<br />\nM.2_2 Source (From CPU) supports up to PCIe 4.0 x4 , supports 2280/2260 devices<br />\n4x SATA 6G</p>\n<p>M2_1 slot<br />\n• Supports up to PCIe 5.0 x4 (For Ryzen™ 9000/ 7000 Series processors)<br />\n• Supports up to PCIe 4.0 x4 (For Ryzen™ 8000 Series processors)</p>\n<p>M2_2 slot<br />\n• Supports up to PCIe 4.0 x4 (For Ryzen™ 9000/ 8700/ 8600/ 8400/ 7000 Series processors)<br />\n• Supports up to PCIe 4.0 x2 (For Ryzen™ 8500/ 8300 Series processors)</p>\n<p><i>*Please refer to the manual for M.2 SSD heatsink restrictions.</i></td>\n</tr>\n<tr>\n<th scope=\"row\"><span class=\"h2\">RAID</span></th>\n<td>Supports RAID 0, RAID 1 and RAID 10 for SATA storage devices<br />\nSupports RAID 0 and RAID 1 for M.2 NVMe storage devices</td>\n</tr>\n<tr>\n<th scope=\"row\"><span class=\"h2\">USB</span></th>\n<td>4x USB 2.0 (Front)<br />\n4x USB 5Gbps Type A (Rear)<br />\n2x USB 5Gbps Type A (Front)<br />\n3x USB 10Gbps Type A (Rear)<br />\n1x USB 10Gbps Type C (Rear)<br />\n1x USB 10Gbps Type C (Front)</td>\n</tr>\n<tr>\n<th scope=\"row\"><span class=\"h2\">LAN</span></th>\n<td>Realtek<sup>®</sup> 8125D 2.5G LAN</td>\n</tr>\n<tr>\n<th scope=\"row\"><span class=\"h2\">Internal IO</span></th>\n<td>1x Power Connector(ATX_PWR)<br />\n2x Power Connector(CPU_PWR)<br />\n1x CPU Fan<br />\n1x Combo Fan (Pump_Sys Fan)<br />\n4x System Fan<br />\n1x EZ Conn-header (JAF_1)<br />\n2x Front Panel (JFP)<br />\n1x Chassis Intrusion (JCI)<br />\n1x Front Audio (JAUD)<br />\n1x Com Port (JCOM)<br />\n1x Tuning Controller connector(JDASH)<br />\n3x Addressable V2 RGB LED connector (JARGB_V2)<br />\n1x RGB LED connector(JRGB)<br />\n1x TPM pin header(Support TPM 2.0)<br />\n4x USB 2.0 ports<br />\n2x USB 5Gbps Type A ports<br />\n1x USB 10Gbps Type C ports</td>\n</tr>\n<tr>\n<th scope=\"row\"><span class=\"h2\">WIRELESS LAN &amp; BLUETOOTH</span></th>\n<td>Wi-Fi 6E Solution<br />\nThe Wireless module is pre-installed in the M.2 (Key-E) slot<br />\nSupports MU-MIMO TX/RX, 2.4GHz / 5GHz / 6GHz* (160MHz) up to 2.4Gbps<br />\nSupports 802.11 a/ b/ g/ n/ ac/ ax</p>\n<p>Supports Bluetooth<sup>®</sup> 5.3, FIPS, FISMA</p>\n<p><i>* Wi-Fi 6E 6GHz may depend on every country’s regulations and will be ready in Windows 11.<br />\n** Bluetooth 5.3 will be ready in Windows 10 build 21H1 and Windows 11.</i></td>\n</tr>\n<tr>\n<th scope=\"row\"><span class=\"h2\">LED FEATURE</span></th>\n<td>4x EZ Debug LED<br />\n1x EZ Memory Detection LED</td>\n</tr>\n<tr>\n<th scope=\"row\"><span class=\"h2\">BACK PANEL PORTS</span></th>\n<td><img src=\"https://storage-asset.msi.com/global/picture/images/mb/IO/b850-gaming-plus-wifi6e-io.png\" alt=\"\" /></p>\n<ol class=\"list-negative-circled-red\">\n<li>Clear CMOS Button</li>\n<li>DisplayPort 1.4</li>\n<li>2.5G LAN</li>\n<li>USB 10Gbps (Type-A)</li>\n<li>Wi-Fi / Bluetooth</li>\n<li>HD Audio Connectors</li>\n<li>Flash BIOS Button</li>\n<li>HDMI™</li>\n<li>USB 10Gbps (Type-A)</li>\n<li>USB 10Gbps (Type-C)</li>\n<li>USB 5Gbps (Type-A)</li>\n</ol>\n</td>\n</tr>\n<tr>\n<th scope=\"row\"><span class=\"h2\">OPERATING SYSTEM</span></th>\n<td>Support for Windows<sup>®</sup> 11 64-bit</td>\n</tr>\n<tr>\n<th scope=\"row\"><span class=\"h2\">BOX CONTENT</span></th>\n<td><img src=\"https://storage-asset.msi.com/global/picture/image/feature/mb/B850/B850-GAMING-PLUS-WIFI6E/accessories.png\" /></td>\n</tr>\n<tr>\n<th scope=\"row\"><span class=\"h2\">PCB Info</span></th>\n<td>ATX<br />\n243.84mmx304.8mm</td>\n</tr>\n</tbody>\n</table>\n</div>",
+ "on_sale": false,
+ "prices": {
+  "price": "62000",
+  "regular_price": "62000",
+  "sale_price": "62000",
+  "price_range": null,
+  "currency_code": "PKR",
+  "currency_symbol": "₨",
+  "currency_minor_unit": 0,
+  "currency_decimal_separator": ".",
+  "currency_thousand_separator": ",",
+  "currency_prefix": "₨",
+  "currency_suffix": ""
+ },
+ "price_html": "<span class=\"woocommerce-Price-amount amount\"><span class=\"woocommerce-Price-currencySymbol\">&#8360;</span>62,000</span>",
+ "average_rating": "0",
+ "review_count": 0,
+ "images": [
+  {
+   "id": 15250,
+   "src": "https://amdhouse.pk/wp-content/uploads/2026/09/product_17501424369e84437d7c89e8087852b81013e7106e.webp",
+   "thumbnail": "https://amdhouse.pk/wp-content/uploads/2026/09/product_17501424369e84437d7c89e8087852b81013e7106e-247x247.webp",
+   "srcset": "https://amdhouse.pk/wp-content/uploads/2026/09/product_17501424369e84437d7c89e8087852b81013e7106e.webp 1000w, https://amdhouse.pk/wp-content/uploads/2026/09/product_17501424369e84437d7c89e8087852b81013e7106e-300x240.webp 300w, https://amdhouse.pk/wp-content/uploads/2026/09/product_17501424369e84437d7c89e8087852b81013e7106e-768x614.webp 768w, https://amdhouse.pk/wp-content/uploads/2026/09/product_17501424369e84437d7c89e8087852b81013e7106e-510x408.webp 510w",
+   "sizes": "(max-width: 1000px) 100vw, 1000px",
+   "thumbnail_srcset": "https://amdhouse.pk/wp-content/uploads/2026/09/product_17501424369e84437d7c89e8087852b81013e7106e-247x247.webp 247w, https://amdhouse.pk/wp-content/uploads/2026/09/product_17501424369e84437d7c89e8087852b81013e7106e-150x150.webp 150w, https://amdhouse.pk/wp-content/uploads/2026/09/product_17501424369e84437d7c89e8087852b81013e7106e-100x100.webp 100w",
+   "thumbnail_sizes": "(max-width: 247px) 100vw, 247px",
+   "name": "product_17501424369e84437d7c89e8087852b81013e7106e",
+   "alt": ""
+  }
+ ],
+ "categories": [
+  {
+   "id": 19,
+   "name": "Motherboards",
+   "slug": "motherboards",
+   "link": "https://amdhouse.pk/product-category/motherboards/"
+  }
+ ],
+ "tags": [],
+ "brands": [],
+ "attributes": [],
+ "variations": [],
+ "grouped_products": [],
+ "has_options": false,
+ "is_purchasable": true,
+ "is_in_stock": true,
+ "is_on_backorder": false,
+ "low_stock_remaining": null,
+ "stock_availability": {
+  "text": "",
+  "class": "in-stock"
+ },
+ "sold_individually": false,
+ "weight": "",
+ "dimensions": {
+  "length": "",
+  "width": "",
+  "height": ""
+ },
+ "formatted_weight": "N/A",
+ "formatted_dimensions": "N/A",
+ "add_to_cart": {
+  "text": "Add to cart",
+  "description": "Add to cart: &ldquo;MSI B850 GAMING PLUS WIFI6E new in 10 months warranty&rdquo;",
+  "url": "/wp-json/wc/store/v1/products?category=motherboards&#038;per_page=8&#038;page=1&#038;add-to-cart=15249",
+  "single_text": "Add to cart",
+  "minimum": 1,
+  "maximum": 9999,
+  "multiple_of": 1
+ },
+ "is_password_protected": false,
+ "extensions": {
+  "woocommerce_google_analytics_integration": {
+   "identifier": "15249"
+  }
+ },
+ "_links": {
+  "self": [
+   {
+    "href": "https://amdhouse.pk/wp-json/wc/store/v1/products/15249",
+    "targetHints": {
+     "allow": [
+      "GET"
+     ]
+    }
+   }
+  ],
+  "collection": [
+   {
+    "href": "https://amdhouse.pk/wp-json/wc/store/v1/products"
+   }
+  ],
+  "related": [
+   {
+    "embeddable": true,
+    "href": "https://amdhouse.pk/wp-json/wc/store/v1/products?related=15249&per_page=10"
+   }
+  ]
+ }
+}

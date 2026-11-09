@@ -211,3 +211,11 @@ def test_duplicate_urls_are_kept_once(make_items):
     rows = store.scrape("gpus")
     assert len(rows) == 101
     assert len({r["url"] for r in rows}) == 101
+
+
+def test_row_carries_details_raw(load_details_fixture):
+    item = load_details_fixture("redtech_psu.json")
+    row = WooStoreScraper().parse_item(item)
+    assert row["details_raw"]["kind"] == "woo"
+    assert row["details_raw"]["description"] == item["description"]
+    assert row["details_raw"]["short_description"] == item["short_description"]

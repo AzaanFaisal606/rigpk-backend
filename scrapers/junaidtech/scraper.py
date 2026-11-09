@@ -19,6 +19,7 @@ import sys
 import time
 
 from scrapers.base_scraper import BaseScraper
+from scrapers.details.parse import webx_raw
 from scrapers.exceptions import ScrapeIncomplete
 
 SOURCE = "junaidtech.pk"
@@ -177,6 +178,7 @@ class JunaidTechScraper(BaseScraper):
                 "source": SOURCE,
                 "scraped_at": scraped_at,
                 "thumbnail_url": thumbnail,
+                "details_raw": webx_raw(item, SOURCE),
             })
 
         return products, total

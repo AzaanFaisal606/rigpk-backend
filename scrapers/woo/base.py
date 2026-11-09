@@ -23,6 +23,7 @@ import urllib.parse
 from typing import Optional
 
 from scrapers.base_scraper import BaseScraper
+from scrapers.details.parse import woo_raw
 from scrapers.exceptions import ScrapeIncomplete
 
 
@@ -71,6 +72,7 @@ class WooStoreScraper(BaseScraper):
             "source": self.SOURCE,
             "scraped_at": self.now(),
             "thumbnail_url": thumbnail or None,
+            "details_raw": woo_raw(item, self.SOURCE),
         }
 
     def scrape(self, slug: str) -> list[dict]:

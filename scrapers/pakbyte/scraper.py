@@ -22,6 +22,7 @@ import urllib.parse
 from typing import Optional
 
 from scrapers.base_scraper import BaseScraper
+from scrapers.details.parse import shopify_raw
 from scrapers.exceptions import ScrapeIncomplete
 from scrapers.listing_scraper import run_listing_cli
 
@@ -86,6 +87,7 @@ class PakByteScraper(BaseScraper):
             "source": SOURCE,
             "scraped_at": self.now(),
             "thumbnail_url": _SHOPIFY_CDN_RE.sub(f"{BASE}/cdn/shop/", src) if src else None,
+            "details_raw": shopify_raw(item, SOURCE),
         }
 
     def scrape(self, slug: str) -> list[dict]:

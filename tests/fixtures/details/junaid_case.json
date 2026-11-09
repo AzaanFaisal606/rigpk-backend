@@ -1,0 +1,60 @@
+{
+ "productID": "672984",
+ "productName": "AeroCool Split Acrylic Edition RGB Mid-Tower ATX Gaming PC Case, Front LED Lighting, 1x Black Fan",
+ "productDesc": "Affordable mid tower case with a stylish RGB LED design in the front panel. Comes equipped with a full Acrylic side panel to showcase the inside of your rig. Air vents on the front and sides of the front panel provide superior air flow and circulation.",
+ "productHighlights": "1x Non-RGB Fan Pre-intsalled_Stylish RGB LED Lighting_Full Acrylic Side Panel_Front & Side Air Vent Design",
+ "productURL": "/product/aerocool-split-acrylic-edition-atx-gaming-case",
+ "affiliateURL": "",
+ "imageFile": "https://static.store-cdn.com/files/19643/Images/aerocool-split-acrylic-casing-price-in-pakistan-junaidtech-g-19643-672984-210425095830061.jpg",
+ "thumbnailFile": "https://static.store-cdn.com/files/19643/Images/Thumbnails-Large/aerocool-split-acrylic-casing-price-in-pakistan-junaidtech-g-19643-672984-210425095830061.jpg",
+ "productImages": [
+  {
+   "imageFile": "https://static.store-cdn.com/files/19643/Images/aerocool-split-acrylic-casing-price-in-pakistan-junaidtech-g-19643-672984-210425095830061.jpg",
+   "thumbnailFile": "https://static.store-cdn.com/files/19643/Images/Thumbnails-Large/aerocool-split-acrylic-casing-price-in-pakistan-junaidtech-g-19643-672984-210425095830061.jpg",
+   "mediaType": "image"
+  },
+  {
+   "imageFile": "https://static.store-cdn.com/files/19643/Images/aerocool-split-acrylic-casing-price-in-pakistan-junaidtech-g-19643-672984-210425095827942.jpg",
+   "thumbnailFile": "https://static.store-cdn.com/files/19643/Images/Thumbnails-Large/aerocool-split-acrylic-casing-price-in-pakistan-junaidtech-g-19643-672984-210425095827942.jpg",
+   "mediaType": "image"
+  }
+ ],
+ "productStock": {
+  "stockStatusID": "1",
+  "stockStatus": "instock",
+  "availability": "In Stock",
+  "availableQuantity": null,
+  "soldQuantity": null,
+  "inventoryTracking": "0",
+  "isNoStockSale": "0"
+ },
+ "productPrice": {
+  "price": "8999.00",
+  "listPrice": "0.00",
+  "discount": "",
+  "isHidePrice": "0",
+  "hidePriceMessage": "",
+  "isDeal": "0",
+  "dealStartDate": "",
+  "dealEndDate": ""
+ },
+ "productRating": {
+  "isRating": "1",
+  "rating": "0.0",
+  "ratingCount": "0",
+  "reviewCount": null,
+  "recommendedCount": null
+ },
+ "productFields": {
+  "sku": "SPLITABK",
+  "categoryName": "PC Casings",
+  "vendorName": "AeroCool",
+  "warranty": "7 - Days Checking*",
+  "manufacturerURL": "https://aerocool.io/product/split/",
+  "customFields": []
+ },
+ "isVariant": "0",
+ "isRating": "1",
+ "newTag": "",
+ "discountTag": ""
+}

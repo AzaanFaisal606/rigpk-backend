@@ -1,0 +1,60 @@
+{
+ "productID": "2699758",
+ "productName": "ARKTEK GeForce GTX 1050 Ti Video Graphics Card, 4GB GDDR5 128-Bit, 768SP 1290-1392MHz, DP 1.4 and DVI Digital Output",
+ "productDesc": "Boost game performance with better speed and power efficiency, helping you enjoy smoother frame rates in more of your favorite titles. With DP 1.4 and DVI digital output, it is a solid pick for high-resolution displays and everyday gaming builds.",
+ "productHighlights": "NVIDIA GeForce GTX 1050 Ti GPU, 768SP, 1290-1392MHz_4GB GDDR5, 128-Bit, 7Gbps Memory Clock_1x DP and 1x DVI and 1x Digital Output, DP 1.4_DirectX 12 and OpenGL 4.5, PCIe Gen3, 75W",
+ "productURL": "/arktek-gtx-1050-ti-4gb-video-graphics-card",
+ "affiliateURL": "",
+ "imageFile": "https://static.webx.pk/files/87161/Images/czone-20261010103529-1-87161-0-101026103555460.webp",
+ "thumbnailFile": "https://static.webx.pk/files/87161/Images/Thumbnails-Large/czone-20261010103529-1-87161-0-101026103555460.webp",
+ "productImages": [
+  {
+   "imageFile": "https://static.webx.pk/files/87161/Images/czone-20261010103529-1-87161-0-101026103555460.webp",
+   "thumbnailFile": "https://static.webx.pk/files/87161/Images/Thumbnails-Large/czone-20261010103529-1-87161-0-101026103555460.webp",
+   "mediaType": "image"
+  },
+  {
+   "imageFile": "https://static.webx.pk/files/87161/Images/czone-20261010103529-87161-0-101026103555380.webp",
+   "thumbnailFile": "https://static.webx.pk/files/87161/Images/Thumbnails-Large/czone-20261010103529-87161-0-101026103555380.webp",
+   "mediaType": "image"
+  }
+ ],
+ "productStock": {
+  "stockStatusID": "1",
+  "stockStatus": "instock",
+  "availability": "In Stock",
+  "availableQuantity": null,
+  "soldQuantity": null,
+  "inventoryTracking": "1",
+  "isNoStockSale": "0"
+ },
+ "productPrice": {
+  "price": "42500.00",
+  "listPrice": "0.00",
+  "discount": "",
+  "isHidePrice": "0",
+  "hidePriceMessage": "",
+  "isDeal": "0",
+  "dealStartDate": "",
+  "dealEndDate": ""
+ },
+ "productRating": {
+  "isRating": "1",
+  "rating": "0.0",
+  "ratingCount": "0",
+  "reviewCount": null,
+  "recommendedCount": null
+ },
+ "productFields": {
+  "sku": "4897088770224",
+  "categoryName": "Nvidia GeForce",
+  "vendorName": "ArkTek",
+  "warranty": "10 - Month(s) Warranty",
+  "manufacturerURL": "",
+  "customFields": []
+ },
+ "isVariant": "0",
+ "isRating": "1",
+ "newTag": "New",
+ "discountTag": ""
+}

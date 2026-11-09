@@ -46,3 +46,17 @@ def load_json():
     def _load(name: str):
         return json.loads((JSON_FIXTURES / name).read_text(encoding="utf-8"))
     return _load
+
+
+DETAILS_FIXTURES = Path(__file__).resolve().parent.parent / "fixtures" / "details"
+
+
+@pytest.fixture
+def load_details_fixture():
+    """Saved retailer description payloads: .json -> dict, .html -> str."""
+    def _load(name: str):
+        path = DETAILS_FIXTURES / name
+        if name.endswith(".json"):
+            return json.loads(path.read_text(encoding="utf-8"))
+        return path.read_text(encoding="utf-8", errors="replace")
+    return _load

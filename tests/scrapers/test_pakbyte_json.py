@@ -111,3 +111,10 @@ def test_a_failed_page_raises_with_partial_results(make_products):
     with pytest.raises(ScrapeIncomplete) as exc:
         scraper.scrape("graphic-cards")
     assert len(exc.value.partial_results) == 250
+
+
+def test_row_carries_details_raw(load_details_fixture):
+    item = load_details_fixture("pakbyte_gpu.json")
+    row = PakByteScraper().parse_item(item)
+    assert row["details_raw"]["kind"] == "shopify"
+    assert row["details_raw"]["body_html"] == item["body_html"]

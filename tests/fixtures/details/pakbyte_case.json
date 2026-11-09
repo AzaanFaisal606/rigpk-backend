@@ -1,0 +1,88 @@
+{
+ "id": 7060088389699,
+ "title": "Redragon Steeljaw GC-608 Gaming Case",
+ "handle": "redragon-steeljaw-gc-608-gaming-case",
+ "body_html": "<div id=\"divProductDesc\" class=\"details-description\">Special Edition fallout ATX mid-Tower PC Gaming case. Motherboard SYNC RGB lighting. Pre-installed 4 fans:2 black fans without light in front, 1 RGB fan on top,1 RGB fan at the rear. Dynamic RGB lighting will amaze everybody. Front and left tempered glass panel to showcase your build and Fallout graphic designs.</div>\n<div id=\"divProductHighlights\" class=\"details-description no-margin\">\n<ul id=\"ulHighlights\" class=\"highlights text-left\">\n<li>Convenient top-mounted I/O panel:USB3.0X1, USB2.0X2</li>\n<li>Power supply: ATX standard at bottom</li>\n<li>Material:SPCC,ABS</li>\n<li>Motherboard: ATX, Micro ATX</li>\n</ul>\n<h1>Redragon Steeljaw GC-608 Gaming Case Price in Pakistan</h1>\n<p>Special Edition fallout ATX mid-Tower PC Gaming case</p>\n<p>Motherboard SYNC RGB lighting</p>\n<p>Pre-installed 4 fans:2 black fans without light in front, 1 RGB fan on top,1 RGB fan at the rear</p>\n<p>Dynamic RGB lighting will amaze everybody</p>\n<p>Convenient top-mounted I/O panel:USB3.0X1, USB2.0X2</p>\n<p>Front and left tempered glass panel to showcase your build and Fallout graphic designs</p>\n</div>",
+ "published_at": "2020-06-25T22:41:07+05:00",
+ "created_at": "2024-04-09T18:05:41+05:00",
+ "updated_at": "2026-11-09T16:34:56+05:00",
+ "vendor": "Redragon",
+ "product_type": "",
+ "tags": [],
+ "variants": [
+  {
+   "id": 41178073399363,
+   "title": "Default Title",
+   "option1": "Default Title",
+   "option2": null,
+   "option3": null,
+   "sku": null,
+   "requires_shipping": true,
+   "taxable": true,
+   "featured_image": null,
+   "available": true,
+   "price": "18090.00",
+   "grams": 0,
+   "compare_at_price": null,
+   "position": 1,
+   "product_id": 7060088389699,
+   "created_at": "2024-04-09T18:05:41+05:00",
+   "updated_at": "2026-11-09T16:34:56+05:00"
+  }
+ ],
+ "images": [
+  {
+   "id": 31857485578307,
+   "created_at": "2024-04-09T18:05:47+05:00",
+   "position": 1,
+   "updated_at": "2025-07-28T11:32:59+05:00",
+   "product_id": 7060088389699,
+   "variant_ids": [],
+   "src": "https://cdn.shopify.com/s/files/1/0589/8049/9523/files/Redragon-Steeljaw-GC-608-Gaming-Case-PakByte-Computers-24396945883203.jpg?v=1753684379",
+   "width": 800,
+   "height": 800
+  },
+  {
+   "id": 31857485774915,
+   "created_at": "2024-04-09T18:05:47+05:00",
+   "position": 2,
+   "updated_at": "2025-07-28T11:32:59+05:00",
+   "product_id": 7060088389699,
+   "variant_ids": [],
+   "src": "https://cdn.shopify.com/s/files/1/0589/8049/9523/files/Redragon-Steeljaw-GC-608-Gaming-Case-PakByte-Computers-24396945915971.jpg?v=1753684379",
+   "width": 800,
+   "height": 800
+  },
+  {
+   "id": 31857485414467,
+   "created_at": "2024-04-09T18:05:47+05:00",
+   "position": 3,
+   "updated_at": "2025-07-28T11:32:59+05:00",
+   "product_id": 7060088389699,
+   "variant_ids": [],
+   "src": "https://cdn.shopify.com/s/files/1/0589/8049/9523/files/Redragon-Steeljaw-GC-608-Gaming-Case-PakByte-Computers-24396945948739.jpg?v=1753684379",
+   "width": 800,
+   "height": 800
+  },
+  {
+   "id": 31857485742147,
+   "created_at": "2024-04-09T18:05:47+05:00",
+   "position": 4,
+   "updated_at": "2025-07-28T11:32:59+05:00",
+   "product_id": 7060088389699,
+   "variant_ids": [],
+   "src": "https://cdn.shopify.com/s/files/1/0589/8049/9523/files/Redragon-Steeljaw-GC-608-Gaming-Case-PakByte-Computers-24396945981507.jpg?v=1753684379",
+   "width": 800,
+   "height": 800
+  }
+ ],
+ "options": [
+  {
+   "name": "Title",
+   "position": 1,
+   "values": [
+    "Default Title"
+   ]
+  }
+ ]
+}

@@ -37,6 +37,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, Sequence
 import json
+from scrapers import details as _details
 from scrapers.spec_extractor import extract_specs
 from db.tokenize import MAX_SEARCH_TOKENS, normalize_name, search_tokens  # noqa: F401
 
@@ -428,6 +429,8 @@ def _blocked_by(name: str, category: str) -> Optional[str]:
 _PARTS_CHUNK = 200        # 10 params/row ->  2,000 params
 _PRICE_CHUNK = 500        #  3 params/row ->  1,500 params
 _QUARANTINE_CHUNK = 200   #  7 params/row ->  1,400 params
+_DETAILS_CHUNK = 25       #  7 params/row; small because `raw` can be ~20KB, keeps a statement well under 1MB
+_DETAILS_READ_CHUNK = 500  # ids per IN (...) lookup
 
 
 def _chunks(seq: list, n: int):
@@ -969,6 +972,7 @@ class Database:
         # retailers. Last occurrence wins, matching what the row-at-a-time
         # version left behind after its second DO UPDATE overwrote the first.
         staged: dict[tuple[str, str], tuple] = {}
+        staged_details: dict[tuple[str, str], dict] = {}
         for p in products:
             if not p.get("category"):
                 raise ValueError(f"Product missing category: {p.get('name', '<unknown>')!r}")
@@ -1004,6 +1008,10 @@ class Database:
                 p.get("thumbnail_url"), specs_json, normalize_name(p["name"]),
                 p["scraped_at"], price,
             )
+            if p.get("details_raw"):
+                staged_details[(p["source"], source_id)] = p["details_raw"]
+            else:
+                staged_details.pop((p["source"], source_id), None)
 
         # Same product listed twice by one retailer (pakbyte's "…-1" copy of a
         # page, often at a different price): keep the cheapest, so one search
@@ -1021,6 +1029,7 @@ class Database:
             kept = cheapest[dup_key(row)]
             if kept is not row:
                 del staged[key]
+                staged_details.pop(key, None)
                 skipped += 1
                 quarantined.append((row[0], row[2], row[3], row[9], row[4], f"duplicate_of:{kept[4]}"))
 
@@ -1110,9 +1119,125 @@ class Database:
             except Exception as e:
                 print(f"    WARNING: quarantine write failed (non-fatal): {e}")
 
+        # -- phase 4: part details (non-fatal; committed with the rest) -----
+        if staged_details:
+            try:
+                self.write_details([
+                    (part_ids[k], raw, staged[k][2])   # part_id, raw, name
+                    for k, raw in staged_details.items() if k in staged
+                ])
+            except Exception as e:
+                print(f"    WARNING: part details write failed (non-fatal): {e}")
+
         self._conn.commit()
         self._last_seen_ids = seen_ids
         return inserted
+
+    def write_details(self, items: list[tuple[int, dict, str]]) -> int:
+        """
+        Parse and store details for (part_id, raw, name) items. Only rows that
+        are new, whose raw hash changed, or whose parser_version is older than
+        the current one are parsed and written. Returns rows written. Does not
+        commit; the caller's commit covers it.
+        """
+        if not items:
+            return 0
+        cur = self._conn.cursor()
+        existing: dict[int, tuple[str, int]] = {}
+        ids = [i[0] for i in items]
+        for chunk in _chunks(ids, _DETAILS_READ_CHUNK):
+            marks = ",".join("?" * len(chunk))
+            for r in cur.execute(
+                f"SELECT part_id, raw_hash, parser_version FROM part_details "
+                f"WHERE part_id IN ({marks})", chunk,
+            ).fetchall():
+                existing[r[0]] = (r[1], r[2])
+
+        version = _details.PARSER_VERSION
+        rows: list[tuple] = []
+        for part_id, raw, name in items:
+            h = _details.raw_hash(raw)
+            prev = existing.get(part_id)
+            if prev is not None and prev[0] == h and prev[1] >= version:
+                continue
+            try:
+                parsed = _details.parse_details(raw, name)
+                rows.append((
+                    part_id,
+                    json.dumps(raw, ensure_ascii=False, sort_keys=True),
+                    h,
+                    parsed.get("overview"),
+                    json.dumps(parsed.get("highlights") or [], ensure_ascii=False),
+                    json.dumps(parsed.get("specs") or [], ensure_ascii=False),
+                    version,
+                ))
+            except Exception as e:
+                print(f"    WARNING: details parse failed for part {part_id}: {e}")
+
+        for chunk in _chunks(rows, _DETAILS_CHUNK):
+            cur.execute(
+                f"""
+                INSERT INTO part_details (part_id, raw, raw_hash, overview, highlights,
+                                          specs, parser_version)
+                VALUES {_values_clause(len(chunk), 7)}
+                ON CONFLICT(part_id) DO UPDATE SET
+                    raw            = excluded.raw,
+                    raw_hash       = excluded.raw_hash,
+                    overview       = excluded.overview,
+                    highlights     = excluded.highlights,
+                    specs          = excluded.specs,
+                    parser_version = excluded.parser_version,
+                    updated_at     = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                """,
+                [v for row in chunk for v in row],
+            )
+        return len(rows)
+
+    def parts_missing_details(self, source: str, limit: int) -> list[dict]:
+        rows = self._conn.execute(
+            """
+            SELECT p.id, p.url, p.name FROM parts p
+            LEFT JOIN part_details d ON d.part_id = p.id
+            WHERE p.source = ? AND p.is_active = 1 AND d.part_id IS NULL
+            ORDER BY p.id LIMIT ?
+            """,
+            (source, limit),
+        ).fetchall()
+        return [{"id": r[0], "url": r[1], "name": r[2]} for r in rows]
+
+    def get_part_details(self, part_id: int) -> dict | None:
+        r = self._conn.execute(
+            "SELECT overview, highlights, specs, parser_version, updated_at "
+            "FROM part_details WHERE part_id = ?", (part_id,),
+        ).fetchone()
+        if r is None:
+            return None
+        return {
+            "overview": r[0],
+            "highlights": json.loads(r[1]),
+            "specs": json.loads(r[2]),
+            "parser_version": r[3],
+            "updated_at": r[4],
+        }
+
+    def iter_details_for_reparse(self, below_version: int, page: int = 500):
+        """Yield (part_id, raw, name) for rows with parser_version < below_version, paged by id."""
+        last = 0
+        while True:
+            rows = self._conn.execute(
+                """
+                SELECT d.part_id, d.raw, p.name FROM part_details d
+                JOIN parts p ON p.id = d.part_id
+                WHERE d.parser_version < ? AND d.part_id > ?
+                ORDER BY d.part_id LIMIT ?
+                """,
+                (below_version, last, page),
+            ).fetchall()
+            if not rows:
+                return
+            for r in rows:
+                yield r[0], json.loads(r[1]), r[2]
+            last = rows[-1][0]
 
     @staticmethod
     def _write_quarantine(cur, quarantined: list[tuple]) -> None:

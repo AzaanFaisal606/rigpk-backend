@@ -281,6 +281,30 @@ def get_search_index(response: Response, category: str = Query(...), db: Databas
     return payload
 
 
+class PartDetails(BaseModel):
+    overview: Optional[str] = None
+    highlights: list[str] = []
+    # Retailer rows as [group | null, label, value], labels as the store wrote them.
+    specs: list[list[Optional[str]]] = []
+
+
+@router.get("/parts/{part_id}/details", response_model=PartDetails)
+def get_part_details(part_id: int, response: Response, db: Database = Depends(get_database)):
+    """
+    Retailer description for the product popup. A part with no stored row
+    (zah page not fetched yet, unknown id) gets an empty body, not a 404: the
+    popup already has the part itself from the list it was opened from, and
+    an empty body just shows "no details from this retailer".
+    """
+    if part_id <= 0:
+        raise HTTPException(status_code=400, detail="part_id must be a positive integer")
+    d = db.get_part_details(part_id)
+    response.headers["Cache-Control"] = "public, max-age=3600, stale-while-revalidate=86400"
+    if d is None:
+        return PartDetails()
+    return PartDetails(overview=d["overview"], highlights=d["highlights"], specs=d["specs"])
+
+
 @router.get("/parts", response_model=PartsResponse)
 def get_parts(
     category:    Optional[str] = Query(None),

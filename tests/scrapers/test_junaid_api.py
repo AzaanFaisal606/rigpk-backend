@@ -84,3 +84,15 @@ def test_token_present_but_api_rejects_raises_scrape_incomplete(monkeypatch):
         s.scrape("<category url>", known_category_id="123", category="gpu")
 
     assert API in calls, "the rejected API call must actually have been attempted"
+
+
+def test_api_rows_carry_details_raw(monkeypatch, load_details_fixture):
+    import json
+
+    item = load_details_fixture("junaid_gpu.json")
+    payload = {"data": {"totalRecords": 1, "results": [item]}}
+    monkeypatch.setattr(JunaidTechScraper, "fetch", lambda self, url, **kw: json.dumps(payload))
+    rows, _total = JunaidTechScraper()._api_fetch("tok", "1", 1, 10, "gpu")
+    assert rows[0]["details_raw"]["kind"] == "webx"
+    assert rows[0]["details_raw"]["desc"] == item["productDesc"]
+    assert rows[0]["details_raw"]["highlights"] == item["productHighlights"]

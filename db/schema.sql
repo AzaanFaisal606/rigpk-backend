@@ -41,6 +41,17 @@ CREATE TABLE IF NOT EXISTS price_log (
     UNIQUE (part_id, scraped_at)            -- prevent duplicate runs
 );
 
+CREATE TABLE IF NOT EXISTS part_details (
+    part_id        INTEGER PRIMARY KEY REFERENCES parts(id) ON DELETE CASCADE,
+    raw            TEXT    NOT NULL,   -- JSON of details_raw; never read by the API
+    raw_hash       TEXT    NOT NULL,   -- sha256 of canonical JSON of raw
+    overview       TEXT,
+    highlights     TEXT    NOT NULL,   -- JSON list
+    specs          TEXT    NOT NULL,   -- JSON list of [group, label, value]
+    parser_version INTEGER NOT NULL,
+    updated_at     TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
 -- Fast lookups used by the future web backend
 CREATE INDEX IF NOT EXISTS idx_parts_category ON parts(category);
 CREATE INDEX IF NOT EXISTS idx_parts_source   ON parts(source);

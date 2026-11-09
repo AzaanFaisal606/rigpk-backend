@@ -33,6 +33,7 @@ from scrapers.czone.scraper import CzoneAllScraper, CATEGORIES as CZONE_CATS, BA
 from scrapers.junaidtech.scraper import JunaidTechScraper, CATEGORIES as JT_CATS, BASE as JT_BASE
 from scrapers.pakbyte.scraper import PakByteScraper
 from scrapers.woo.stores import AmdHouseScraper, RbtScraper, RedTechScraper, TechArcScraper, TechMatchedScraper
+from scrapers.zah.html.details import ZAH_DETAILS_PER_RUN, fetch_zah_details
 from scrapers.zah.html.scraper import ZahHtmlScraper, CATEGORIES as ZAH_CATS, category_url as zah_category_url
 # Unused while zah's Store API 403s us; to switch back, point SCRAPERS["zah"] at partial(run_catalog, ZahScraper, "zah").
 from scrapers.zah.scraper import ZahScraper  # noqa: F401
@@ -459,6 +460,15 @@ def main():
             deactivated += swept
             if swept:
                 print(f"DB: {r['source']} — {swept} parts marked inactive (not seen this run)")
+
+        # zah's listing carries no descriptions: fetch a capped batch of product
+        # pages for parts that still have no details. Never affects the run's outcome.
+        if any(r["source"] == "zahcomputers.pk" and r["ok"] for r in runs):
+            try:
+                print(f"DB: zah details {fetch_zah_details(db, ZAH_DETAILS_PER_RUN)}")
+            except Exception as e:
+                print(f"WARNING: zah details pass failed: {type(e).__name__}: {e}")
+            db._conn.commit()
 
         # "After" side, once upsert + all sweeps have landed.
         after_active = db.stats()["by_source"]
