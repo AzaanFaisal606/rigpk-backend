@@ -1,6 +1,6 @@
 """
-Shared skeleton for the paginated HTML listing scrapers. Only czone uses it
-now: the WooCommerce and Shopify retailers read JSON (scrapers/woo/,
+Shared skeleton for the paginated HTML listing scrapers. Only zah's HTML
+scraper uses it now (czone moved to the webx API 2026-11-09): the WooCommerce and Shopify retailers read JSON (scrapers/woo/,
 scrapers/pakbyte/). run_listing_cli() below is shared by all of them.
 
 The listing scrapers previously carried their own copy of: the pagination

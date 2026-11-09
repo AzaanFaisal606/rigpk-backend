@@ -38,7 +38,7 @@ and serves a REST API consumed by the Next.js frontend.
 | junaidtech.pk | webx.pk Nuxt SSR — Bearer token from `__NUXT_DATA__`, POST JSON API, server-side stock filter |
 | zahcomputers.pk | WooCommerce — Store API (`/wp-json/wc/store/v1/products`) |
 | techarc.pk | WooCommerce — Store API |
-| czone.com.pk | ASP.NET server-rendered listings, 10 categories |
+| czone.com.pk | webx JSON listing API, 10 categories |
 | amdhouse.pk | WooCommerce — Store API |
 | techmatched.pk | WooCommerce — Store API |
 | rbtechngames.com | WooCommerce — Store API |
@@ -136,7 +136,7 @@ db/
   database.py               # all DB access; picks sqlite3 vs libsql from TURSO_DATABASE_URL
 scrapers/               # 9 part retailers
   base_scraper.py       # BaseScraper: honest bot UA, fetch() retry/pacing, HostBlocked breaker
-  listing_scraper.py     # ListingScraper: HTML pagination template (czone)
+  listing_scraper.py     # ListingScraper: HTML pagination template (zah)
   spec_extractor.py       # regex spec extraction from product names
   health.py                 # post-scrape anomaly detection for --strict + self-heal
   woo/                    # WooStoreScraper (base.py) + amd, rbt, redtech, techarc, techmatched (stores.py)

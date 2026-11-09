@@ -1,231 +1,143 @@
 """
-CZone parses names, prices and URLs from three separate passes and zips them by
-list index. Any skew silently attaches the wrong price to the wrong product —
-the output stays well-formed, so nothing downstream can detect it.
+czone runs on webx (same platform as junaidtech): token + category id from the
+SSR page's __NUXT_DATA__, then the JSON listing API with startRow paging.
 
-These tests pin per-product association and bound the pagination loop.
+The bug this replaced: czone's `?page=N` started shifting by one product, so
+the HTML pager saw ~1/3 of each category, reported `ok`, and the sweep hid the
+rest. These tests pin completeness (a short read must raise, never return),
+the stock rule, and URL bytes (source_id continuity).
 """
-import re
+import copy
+import json
 
 import pytest
 
-from scrapers.czone.scraper import CzoneAllScraper
+import scrapers.czone.scraper as mod
+from scrapers.czone.scraper import BASE, CzoneAllScraper
 from scrapers.exceptions import ScrapeIncomplete
 
-
-def test_parses_products_from_fixture(load_fixture):
-    html = load_fixture("czone_gpu_page1.html")
-    products = CzoneAllScraper()._parse_page(html)
-    assert len(products) > 0
-    for p in products:
-        assert p["name"]
-        assert p["url"].startswith("http")
-        assert p["price_pkr"] is None or p["price_pkr"] > 0
+PATH = "/motherboards-pakistan-ppt.157.aspx"
+URL = BASE + PATH
 
 
-def test_price_belongs_to_its_own_product(load_fixture):
-    """
-    Every product's price must come from the same card as its name. Pinning a
-    few known (name, price) pairs from the fixture catches index skew, which is
-    invisible to a count-based check.
-    """
-    html = load_fixture("czone_gpu_page1.html")
-    products = {p["name"]: p["price_pkr"] for p in CzoneAllScraper()._parse_page(html)}
-    # Pinned from the fixture itself (first and last cards on the page).
-    expected = {
-        "MSI GeForce RTX 3050 VENTUS 2X 6G OC Video Graphics Card, 6GB GDDR6, "
-        "Boost Clock 1492MHz, 14Gbps, HDMI 2.1 4K@120Hz, DisplayPort 1.4a, "
-        "Dual Fan Cooling": 95000,
-        "MSI GeForce RTX 5070 12G VENTUS 2X OC WHITE Graphics Card, 12GB GDDR7 "
-        "192-Bit, PCI Express Gen 5, 2557MHz Extreme Performance, DisplayPort x 3 "
-        "v2.1b and HDMI 2.1b, White G5070-12V2CW": 247000,
-    }
-    for name, price in expected.items():
-        assert products[name] == price
+@pytest.fixture
+def listing(load_json):
+    return load_json("webx_czone_motherboard_listing.json")
 
 
-def test_a_card_missing_a_price_does_not_shift_its_neighbours(load_fixture):
-    """
-    The failure mode: one card has no price node, the price list is shorter than
-    the name list, and every subsequent product takes its neighbour's price.
-    """
-    html = load_fixture("czone_gpu_page1.html")
-    products = CzoneAllScraper()._parse_page(html)
-    baseline = {p["name"]: p["price_pkr"] for p in products}
-
-    # Remove the first price node from the markup and re-parse.
-    damaged = re.sub(r'<div class="product-price">.*?</div>', "", html,
-                      count=1, flags=re.DOTALL)
-    after = {p["name"]: p["price_pkr"] for p in CzoneAllScraper()._parse_page(damaged)}
-
-    shifted = [n for n in after if n in baseline
-               and after[n] is not None
-               and baseline[n] is not None
-               and after[n] != baseline[n]]
-    assert not shifted, f"prices shifted onto the wrong products: {shifted[:5]}"
-
-
-def test_persistent_fetch_failure_terminates(monkeypatch):
-    """An unreachable host must end the run, not spin until the job timeout."""
-    import scrapers.czone.scraper as mod
-
+@pytest.fixture(autouse=True)
+def no_sleep(monkeypatch):
     monkeypatch.setattr(mod.time, "sleep", lambda *_a, **_k: None)
+
+
+def _scraper(page_html, listing, page_size=None, fail_at=None):
+    """A scraper whose fetch serves the SSR fixture and pages the API fixture."""
+    rows = listing["data"]["results"]
+    calls = []
+    s = CzoneAllScraper()
+
+    def fetch(url, headers=None, data=None, **_k):
+        if data is None:
+            return page_html
+        body = json.loads(data)
+        calls.append((body, headers))
+        start = int(body["startRow"])
+        if fail_at is not None and start >= fail_at:
+            raise OSError("api down")
+        n = page_size or int(body["results"])
+        out = copy.deepcopy(listing)
+        out["data"]["results"] = rows[start - 1:start - 1 + n]
+        return json.dumps(out)
+
+    s.fetch = fetch
+    s.calls = calls
+    return s
+
+
+def test_reads_token_and_category_id(load_fixture):
+    html = load_fixture("czone_motherboard_page1.html")
+    assert CzoneAllScraper.extract_token(html) == "REDACTED.TEST.TOKEN"
+    assert CzoneAllScraper.extract_category_id(html, PATH) == "4336084"
+    assert CzoneAllScraper.extract_category_id(html, "/not-this-page.aspx") is None
+
+
+def test_whole_category_and_stock_rule(load_fixture, listing):
+    s = _scraper(load_fixture("czone_motherboard_page1.html"), listing)
+    out = s.scrape(URL)
+    stock = [r["productStock"]["stockStatus"] for r in listing["data"]["results"]]
+    assert len(out) == sum(st in ("instock", "onorderonly") for st in stock)
+    assert len(out) == 40   # fixture: 22 instock + 18 onorderonly + 3 outofstock
+    body, headers = s.calls[0]
+    assert body["categoryID"] == "4336084" and body["stockStatus"] == ""
+    assert headers["Authorization"] == "Bearer REDACTED.TEST.TOKEN"
+    for p in out:
+        assert p["source"] == "czone.com.pk" and p["category"] == ""
+        assert p["url"].startswith(BASE + "/") and p["price_pkr"] > 0
+        assert p["thumbnail_url"].startswith("https://static.webx.pk/")
+
+
+def test_url_bytes_and_price_come_from_the_same_row(load_fixture, listing):
+    """productURL is used as-is (source_id = _slug(url)); price is the selling price."""
+    out = {p["url"]: p for p in _scraper(load_fixture("czone_motherboard_page1.html"), listing).scrape(URL)}
+    for r in listing["data"]["results"]:
+        if r["productStock"]["stockStatus"] == "outofstock":
+            assert BASE + r["productURL"] not in out
+            continue
+        p = out[BASE + r["productURL"]]
+        assert p["name"] == r["productName"].strip()
+        assert p["price_pkr"] == int(float(r["productPrice"]["price"]))
+
+
+def test_pages_until_total_even_if_server_caps_page_size(load_fixture, listing):
+    """Asked for 100, served 10: paging must advance by rows received, not rows asked."""
+    s = _scraper(load_fixture("czone_motherboard_page1.html"), listing, page_size=10)
+    assert len(s.scrape(URL)) == 40
+    assert [c[0]["startRow"] for c in s.calls] == ["1", "11", "21", "31", "41"]
+
+
+def test_short_read_raises_instead_of_returning(load_fixture, listing):
+    """The old failure: a partial category reported as complete feeds the sweep."""
+    trimmed = copy.deepcopy(listing)
+    trimmed["data"]["results"] = trimmed["data"]["results"][:20]   # totalRecords still 43
+    s = _scraper(load_fixture("czone_motherboard_page1.html"), trimmed)
+    with pytest.raises(ScrapeIncomplete) as exc:
+        s.scrape(URL)
+    assert "20 of 43" in str(exc.value)
+    assert exc.value.partial_results
+
+
+def test_api_failure_mid_listing_keeps_partial(load_fixture, listing, monkeypatch):
+    monkeypatch.setattr(mod, "PAGE_SIZE", 20)
+    s = _scraper(load_fixture("czone_motherboard_page1.html"), listing, page_size=20, fail_at=21)
+    with pytest.raises(ScrapeIncomplete) as exc:
+        s.scrape(URL)
+    assert 0 < len(exc.value.partial_results) <= 20
+
+
+def test_missing_token_fails_loudly(listing):
+    s = _scraper("<html>no nuxt here</html>", listing)
+    with pytest.raises(ScrapeIncomplete):
+        s.scrape(URL)
+    assert s.calls == []
+
+
+def test_hidden_price_and_unknown_stock(listing):
+    s = CzoneAllScraper()
+    row = copy.deepcopy(next(r for r in listing["data"]["results"]
+                             if r["productStock"]["stockStatus"] == "instock"))
+    row["productPrice"]["isHidePrice"] = "1"
+    assert s.parse_item(row)["price_pkr"] is None
+    row["productStock"]["stockStatus"] = "discontinued"
+    assert s.parse_item(row) is None
+
+
+def test_persistent_fetch_failure_terminates():
+    """An unreachable host must end the run, not spin until the job timeout."""
     s = CzoneAllScraper()
 
     def _boom(*_a, **_k):
         raise OSError("down")
 
     s.fetch = _boom
-    with pytest.raises(ScrapeIncomplete) as exc:
-        s.scrape("https://www.czone.com.pk/graphic-cards-pakistan-ppt.154.aspx")
-    assert "consecutive page failures" in str(exc.value)
-
-
-def test_page_failure_after_success_preserves_earlier_pages(monkeypatch):
-    """
-    Pages 1-2 succeed and contribute products; page 3 then fails
-    MAX_CONSECUTIVE_FAILURES times in a row. The raise must carry forward
-    everything already scraped from pages 1-2 on .partial_results, not
-    discard it (the earlier bug: only the outer run_czone() wrapping in
-    run_all.py preserved data, this internal raise site didn't).
-    """
-    import scrapers.czone.scraper as mod
-
-    monkeypatch.setattr(mod.time, "sleep", lambda *_a, **_k: None)
-    s = CzoneAllScraper()
-
-    page1_products = [{"name": "p1", "price_pkr": 100, "url": "http://x/1",
-                        "category": "", "source": "czone.com.pk",
-                        "scraped_at": "t", "thumbnail_url": None}]
-    page2_products = [{"name": "p2", "price_pkr": 200, "url": "http://x/2",
-                        "category": "", "source": "czone.com.pk",
-                        "scraped_at": "t", "thumbnail_url": None}]
-    parse_map = {"page1": page1_products, "page2": page2_products}
-
-    fetch_calls = {"n": 0}
-
-    def _fake_fetch(_url):
-        fetch_calls["n"] += 1
-        if fetch_calls["n"] <= 2:
-            return f"page{fetch_calls['n']}"
-        raise OSError("down")
-
-    s.fetch = _fake_fetch
-    monkeypatch.setattr(s, "_extract_total", lambda _html: None)
-    monkeypatch.setattr(s, "_parse_page", lambda html: parse_map.get(html, []))
-
-    with pytest.raises(ScrapeIncomplete) as exc:
-        s.scrape("https://www.czone.com.pk/graphic-cards-pakistan-ppt.154.aspx")
-
-    assert "consecutive page failures" in str(exc.value)
-    assert exc.value.partial_results == page1_products + page2_products
-
-
-def test_identical_page_every_offset_hits_the_page_cap(monkeypatch, load_fixture):
-    """
-    If the site ever serves the same page regardless of ?page=N (new products
-    each time so `new` never comes back empty), the loop must still stop at
-    MAX_PAGES rather than spin forever.
-    """
-    import scrapers.czone.scraper as mod
-
-    monkeypatch.setattr(mod.time, "sleep", lambda *_a, **_k: None)
-    html = load_fixture("czone_gpu_page1.html")
-    s = CzoneAllScraper()
-    s.MAX_PAGES = 3   # keep the test fast; behaviour is the same at 200
-
-    calls = {"n": 0}
-
-    def _fake_fetch(_url):
-        calls["n"] += 1
-        return html
-
-    s.fetch = _fake_fetch
-    # Total-count short-circuit would otherwise stop the loop early; force it off.
-    monkeypatch.setattr(s, "_extract_total", lambda _html: None)
-    # Every "page" looks brand new (different URLs) so `new` is never empty.
-    monkeypatch.setattr(
-        s, "_parse_page",
-        lambda _html: [{"name": f"p{calls['n']}", "price_pkr": 1,
-                         "url": f"http://x/{calls['n']}", "category": "",
-                         "source": "czone.com.pk", "scraped_at": "t",
-                         "thumbnail_url": None}],
-    )
-
-    with pytest.raises(ScrapeIncomplete) as exc:
-        s.scrape("https://www.czone.com.pk/graphic-cards-pakistan-ppt.154.aspx")
-    assert "MAX_PAGES" in str(exc.value)
-    assert calls["n"] == 3
-    # Deliberate asymmetry (matches redtech's MAX_PAGES raise): a page cap
-    # this generous being hit at all means the collected rows aren't trusted
-    # either, so no .partial_results is attached here.
-    assert not hasattr(exc.value, "partial_results")
-
-
-def _http_404(url="http://x/page/2"):
-    """The exact shape BaseScraper.fetch() raises for a 404: a RuntimeError
-    whose __cause__ is the HTTPError (404 is in NO_RETRY_CODES)."""
-    import urllib.error
-    cause = urllib.error.HTTPError(url, 404, "Not Found", {}, None)
-    err = RuntimeError(f"Failed to fetch {url}: HTTP 404")
-    err.__cause__ = cause
-    return err
-
-
-def test_a_404_past_page_one_ends_the_listing_cleanly(monkeypatch):
-    """
-    A WooCommerce category with fewer pages than the loop tries returns 404
-    for page N+1 — that is the end of the listing, not a fault. Counting it
-    as a failure made every short category fail deterministically:
-    techmatched's SSD listing is one page of 16 products, so pages 2/3/4 all
-    404 and tripped MAX_CONSECUTIVE_FAILURES on every single run.
-    """
-    import scrapers.czone.scraper as mod
-
-    monkeypatch.setattr(mod.time, "sleep", lambda *_a, **_k: None)
-    s = CzoneAllScraper()
-
-    page1 = [{"name": "p1", "price_pkr": 100, "url": "http://x/1",
-              "category": "", "source": "czone.com.pk",
-              "scraped_at": "t", "thumbnail_url": None}]
-    calls = {"n": 0}
-
-    def _fake_fetch(_url):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            return "page1"
-        raise _http_404()
-
-    s.fetch = _fake_fetch
-    monkeypatch.setattr(s, "_extract_total", lambda _html: None)
-    monkeypatch.setattr(s, "_parse_page", lambda html: page1 if html == "page1" else [])
-
-    products = s.scrape("https://www.czone.com.pk/graphic-cards-pakistan-ppt.154.aspx")
-
-    assert products == page1, "page 1's harvest must be returned, not discarded"
-    assert calls["n"] == 2, "the 404 must stop the loop immediately, not retry pages 3 and 4"
-
-
-def test_a_404_on_page_one_is_still_a_failure(monkeypatch):
-    """
-    A dead category URL is a real fault — only a 404 PAST page 1 means "the
-    listing ended". Without this distinction a mistyped or retired category
-    would scrape zero products and report success, which then lets the
-    freshness sweep delist everything that category holds.
-    """
-    import scrapers.czone.scraper as mod
-
-    monkeypatch.setattr(mod.time, "sleep", lambda *_a, **_k: None)
-    s = CzoneAllScraper()
-    s.fetch = lambda _url: (_ for _ in ()).throw(_http_404("http://x/dead"))
-
-    with pytest.raises(ScrapeIncomplete) as exc:
-        s.scrape("https://www.czone.com.pk/graphic-cards-pakistan-ppt.154.aspx")
-
-    # Page 1's 404 counts as a real failure and sets the sticky
-    # `pages_skipped` flag, so the run still raises even though the page-2
-    # 404 is what breaks the loop. Asserting the type, not the wording: what
-    # must hold is that this never returns cleanly — a clean return is
-    # precisely what lets the freshness sweep delist the whole category.
-    assert isinstance(exc.value, ScrapeIncomplete)
-    assert not getattr(exc.value, "partial_results", None)
+    with pytest.raises(OSError):
+        s.scrape(URL)
