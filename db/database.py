@@ -1220,6 +1220,73 @@ class Database:
             "updated_at": r[4],
         }
 
+    def get_part_page(self, part_id: int) -> dict | None:
+        """
+        One listing plus its retailer details, for the server-rendered part page.
+        One indexed lookup on each table (2 row reads). Inactive parts are
+        returned with is_active False so the page can 404 them; unknown ids
+        return None.
+        """
+        r = self._conn.execute(
+            """
+            SELECT p.id, p.source, p.name, p.category, p.url, p.thumbnail_url,
+                   p.specs, p.last_seen_at, p.latest_price, p.is_active,
+                   json_extract(p.specs, '$.condition'),
+                   d.overview, d.highlights, d.specs
+            FROM parts p
+            LEFT JOIN part_details d ON d.part_id = p.id
+            WHERE p.id = ?
+            """,
+            (part_id,),
+        ).fetchone()
+        if r is None:
+            return None
+        return {
+            "id": r[0], "source": r[1], "name": r[2], "category": r[3], "url": r[4],
+            "thumbnail_url": r[5], "specs": json.loads(r[6]) if r[6] else None,
+            "last_seen_at": r[7], "price_pkr": r[8], "is_active": bool(r[9]),
+            "condition": r[10],
+            "details": {
+                "overview": r[11],
+                "highlights": json.loads(r[12]) if r[12] else [],
+                "specs": json.loads(r[13]) if r[13] else [],
+            },
+        }
+
+    # Same rule as the frontend's partIsIndexable(): active, priced, and some
+    # retailer content. Empty pages are noindexed there and left out here.
+    _INDEXABLE_PARTS_WHERE = """
+        FROM parts p
+        JOIN part_details d ON d.part_id = p.id
+        WHERE p.is_active = 1
+          AND p.latest_price IS NOT NULL
+          AND (d.overview IS NOT NULL OR d.highlights != '[]' OR d.specs != '[]')
+    """
+
+    def list_indexable_parts(self, page: int = 1000) -> list[dict]:
+        """
+        (id, name, last_seen_at) of every part page worth indexing, for the
+        sitemap. Paged by id because Turso returns zero rows, not an error, for
+        an oversized response; the total is checked against a COUNT so a short
+        read raises instead of shipping a truncated sitemap.
+        """
+        out: list[dict] = []
+        last = 0
+        while True:
+            rows = self._conn.execute(
+                f"SELECT p.id, p.name, p.last_seen_at {self._INDEXABLE_PARTS_WHERE} "
+                "AND p.id > ? ORDER BY p.id LIMIT ?",
+                (last, page),
+            ).fetchall()
+            out.extend({"id": r[0], "name": r[1], "last_seen_at": r[2]} for r in rows)
+            if len(rows) < page:
+                break
+            last = rows[-1][0]
+        total = self._conn.execute(f"SELECT COUNT(*) {self._INDEXABLE_PARTS_WHERE}").fetchone()[0]
+        if len(out) != total:
+            raise RuntimeError(f"indexable parts short read: {len(out)} of {total}")
+        return out
+
     def iter_details_for_reparse(self, below_version: int, page: int = 500):
         """Yield (part_id, raw, name) for rows with parser_version < below_version, paged by id."""
         last = 0

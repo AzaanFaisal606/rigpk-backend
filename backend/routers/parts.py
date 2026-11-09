@@ -288,6 +288,68 @@ class PartDetails(BaseModel):
     specs: list[list[Optional[str]]] = []
 
 
+class PartPage(PartItem):
+    is_active: bool
+    details: PartDetails
+
+
+class SitemapPart(BaseModel):
+    id: int
+    name: str
+    last_seen_at: Optional[str] = None
+
+
+_PAGE_CACHE = "public, max-age=3600, stale-while-revalidate=86400"
+
+# Each uncached sitemap call reads every indexable part (~4 x 7.7k rows with
+# the COUNT check). Cloudflare's cache is keyed by URL, so a query string
+# would bypass it; this in-process copy can't be busted that way.
+_SITEMAP_TTL_SECONDS = 3600
+_sitemap_cache: tuple[list[dict], float] | None = None
+
+
+def reset_sitemap_cache() -> None:
+    """For tests: the cache is process-wide by design."""
+    global _sitemap_cache
+    _sitemap_cache = None
+
+
+@router.get("/parts/sitemap", response_model=list[SitemapPart])
+def get_parts_sitemap(response: Response, db: Database = Depends(get_database)):
+    """
+    Every part page worth indexing (active, priced, has retailer content).
+    Read by the frontend sitemap, which rebuilds once a day.
+    """
+    global _sitemap_cache
+    now = time.monotonic()
+    if _sitemap_cache is not None and (now - _sitemap_cache[1]) < _SITEMAP_TTL_SECONDS:
+        response.headers["Cache-Control"] = _PAGE_CACHE
+        return _sitemap_cache[0]
+    try:
+        rows = db.list_indexable_parts()
+    except RuntimeError:
+        logger.exception("sitemap parts short read")
+        raise HTTPException(status_code=503, detail="sitemap temporarily unavailable")
+    _sitemap_cache = (rows, now)
+    response.headers["Cache-Control"] = _PAGE_CACHE
+    return rows
+
+
+@router.get("/parts/{part_id}", response_model=PartPage)
+def get_part_page(part_id: int, response: Response, db: Database = Depends(get_database)):
+    """
+    One listing with its details, for the server-rendered part page. Inactive
+    parts come back with is_active False (the page 404s them); unknown ids 404.
+    """
+    if part_id <= 0:
+        raise HTTPException(status_code=400, detail="part_id must be a positive integer")
+    p = db.get_part_page(part_id)
+    if p is None:
+        raise HTTPException(status_code=404, detail="part not found")
+    response.headers["Cache-Control"] = _PAGE_CACHE
+    return p
+
+
 @router.get("/parts/{part_id}/details", response_model=PartDetails)
 def get_part_details(part_id: int, response: Response, db: Database = Depends(get_database)):
     """
