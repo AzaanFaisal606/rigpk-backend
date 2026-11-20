@@ -88,7 +88,8 @@ class WooStoreScraper(BaseScraper):
         seen: set[str] = set()
         for page in range(1, self.MAX_PAGES + 1):
             try:
-                items = json.loads(self.fetch(self.api_url(slug, page)))
+                # lstrip: techarc.pk prefixes replies with a UTF-8 BOM, which json.loads rejects.
+                items = json.loads(self.fetch(self.api_url(slug, page)).lstrip("\ufeff"))
                 if not isinstance(items, list):
                     # An error object ({"code": ..., "message": ...}) or a
                     # challenge page that happens to parse. Not a page of

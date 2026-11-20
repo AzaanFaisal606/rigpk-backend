@@ -189,6 +189,15 @@ def test_a_page_that_is_not_a_product_list_is_a_failure(make_items, body):
     assert len(exc.value.partial_results) == 100
 
 
+def test_a_page_with_a_utf8_bom_still_parses(make_items):
+    """techarc.pk's Store API began prefixing replies with a UTF-8 BOM; bare
+    json.loads rejects it ("Unexpected UTF-8 BOM") and every category failed
+    on page 1."""
+    body = "\ufeff" + json.dumps(make_items(0, 3))
+    rows = FakeStore({1: body}).scrape("gpus")
+    assert len(rows) == 3
+
+
 def test_host_blocked_propagates_with_partial_results(make_items):
     store = FakeStore({1: make_items(0, 100), 2: HostBlocked("store.test is blocked")})
     with pytest.raises(HostBlocked) as exc:
