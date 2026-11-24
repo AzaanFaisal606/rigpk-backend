@@ -14,6 +14,7 @@ Env:
 
 Usage:
     python scripts/notify_discord.py --parts-status success --prebuilts-status failure
+        [--cache-status failure]   # outcome of scripts/refresh_site_cache.py
 """
 
 import argparse
@@ -36,6 +37,11 @@ except Exception:
 from db.database import get_db
 
 DB_PATH = str(Path(__file__).resolve().parent.parent / "data" / "ppc.db")
+
+CACHE_REFRESH_FAILED = (
+    "Site cache refresh failed: the site keeps last week's pages. "
+    "Fix the Vercel secrets, then run `python scripts/refresh_site_cache.py`."
+)
 
 GREEN = 0x2ECC71
 ORANGE = 0xE67E22
@@ -141,6 +147,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--parts-status", default="unknown")
     ap.add_argument("--prebuilts-status", default="unknown")
+    ap.add_argument("--cache-status", default="unknown")
     args = ap.parse_args()
 
     webhook = os.getenv("DISCORD_WEBHOOK_URL")
@@ -150,6 +157,8 @@ def main() -> int:
 
     # Health warnings from the parts job (scrape.yml passes them via env).
     warnings = [w for w in os.getenv("HEALTH_WARNINGS", "").splitlines() if w.strip()]
+    if args.cache_status == "failure":
+        warnings.append(CACHE_REFRESH_FAILED)
     embed = build_embed(args.parts_status, args.prebuilts_status, warnings)
     try:
         post(webhook, embed)

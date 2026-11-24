@@ -24,6 +24,15 @@ Saves a retailer page as a test fixture, fetched through the project's own scrap
 the saved page matches exactly what a scraper sees. `python scripts/save_fixture.py <url>
 <fixture-name.html>`
 
+## refresh_site_cache.py
+
+Marks the site's cached catalogue pages stale after a scrape (Vercel invalidate-by-tag API, tag
+`catalog`, matching `frontend/lib/catalog-cache.ts`). Each page rebuilds once on its next visit
+and keeps serving the old copy meanwhile. `scrape.yml` and `rerun.yml` run it after every scrape;
+after a local scrape that wrote production data, run `python scripts/refresh_site_cache.py`.
+Needs `VERCEL_TOKEN` and `VERCEL_TEAM_ID` (`.env` locally, GitHub secrets in CI). Exits 1 on
+failure; the workflows carry on and Discord shows a warning.
+
 ## notify_discord.py
 
 Posts a scrape summary embed to Discord after a CI run, reading `scrape_runs` + current DB

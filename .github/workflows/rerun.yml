@@ -81,12 +81,24 @@ jobs:
             python -m scrapers.prebuilts.run_prebuilts "${{ steps.resolve.outputs.key }}" --strict
           fi
 
+      # Same as scrape.yml: the rerun wrote new rows, so the site's cached
+      # pages must be told. Reported in Discord, never fails the job.
+      - name: Refresh site cache
+        id: cache
+        if: always() && steps.resolve.outputs.valid == 'yes'
+        continue-on-error: true
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_TEAM_ID: ${{ secrets.VERCEL_TEAM_ID }}
+        run: python scripts/refresh_site_cache.py
+
       - name: Notify Discord
         if: always() && steps.resolve.outputs.valid == 'yes'
         run: >
           python scripts/notify_discord.py
           --parts-status ${{ steps.scrape.outcome }}
           --prebuilts-status ${{ steps.scrape.outcome }}
+          --cache-status ${{ steps.cache.outcome }}
 
       - name: Skipped — unparseable branch
         if: steps.resolve.outputs.valid != 'yes'
